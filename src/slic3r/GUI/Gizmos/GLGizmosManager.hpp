@@ -90,6 +90,7 @@ public:
         Assembly,
         Simplify,
         BrimEars,
+        Tracery,
         //SlaSupports,
         // BBS
         //FaceRecognition,
@@ -280,6 +281,10 @@ public:
     void on_change_color_mode(bool is_dark);
     void render_current_gizmo() const;
     void render_painter_gizmo();
+    // Render the stained-glass assignment layer after its editor is closed.
+    void render_tracery_overlay();
+    void render_tracery_surface_mask();
+    int tracery_overlay_object_index() const;
     void render_painter_assemble_view() const;
 
     void render_overlay();

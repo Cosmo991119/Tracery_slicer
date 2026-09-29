@@ -172,6 +172,8 @@ namespace ImGui
     const wchar_t UnfoldButtonIcon         = 0x0815;
     const wchar_t SphereButtonIcon         = 0x0816;
     const wchar_t GapFillIcon              = 0x0817;
+    const wchar_t StainedSurfaceModeIcon    = 0x082A;
+    const wchar_t StainedThroughModeIcon    = 0x082B;
     const wchar_t ConfirmIcon              = 0x0818;
     const wchar_t gCodeButtonIcon          = 0x0819; // ORCA
     const wchar_t VisibleIcon              = 0x0820; // ORCA
@@ -190,6 +192,8 @@ namespace ImGui
     const wchar_t HeightRangeDarkIcon      = 0x0825;
     const wchar_t SphereButtonDarkIcon     = 0x0826;
     const wchar_t GapFillDarkIcon          = 0x0827;
+    const wchar_t StainedSurfaceModeDarkIcon = 0x082C;
+    const wchar_t StainedThroughModeDarkIcon = 0x082D;
     const wchar_t ConfirmDarkIcon          = 0x0828;
 
     const wchar_t TextSearchIcon           = 0x0828;

@@ -332,7 +332,7 @@ void session::read_body()
     int                                nbuffer = 1000;
     std::shared_ptr<std::vector<char>> bufptr  = std::make_shared<std::vector<char>>(nbuffer);
     async_read(socket, boost::asio::buffer(*bufptr, nbuffer),
-               [this, self](const boost::beast::error_code& e, std::size_t s) { server.stop(self); });
+               [this, self, bufptr](const boost::beast::error_code& e, std::size_t s) { server.stop(self); });
 }
 
 void session::read_next_line()
@@ -346,8 +346,9 @@ void session::read_next_line()
         ssOut << "Content-Length: 0\r\n"; // no response body
         ssOut << "\r\n";                  // blank line between headers and body (required)
 
-        // 异步发送响应
-        async_write(socket, boost::asio::buffer(ssOut.str()), [this, self](const boost::beast::error_code& e, std::size_t s) {
+        // The buffer passed to async_write must outlive the callback.
+        auto response = std::make_shared<std::string>(ssOut.str());
+        async_write(socket, boost::asio::buffer(*response), [this, self, response](const boost::beast::error_code& e, std::size_t s) {
             std::cout << "OPTIONS预检请求已处理" << std::endl;
             server.stop(self); // 关闭连接
         });

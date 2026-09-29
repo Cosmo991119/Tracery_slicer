@@ -56,6 +56,16 @@ endif ()
 
 project(Snapmaker_Orca)
 
+# Ninja 1.11+ reads build files as UTF-8. Match cl.exe's /showIncludes output
+# encoding so header changes (including ModelVolume layout changes) rebuild users.
+if (CMAKE_HOST_WIN32 AND MSVC AND CMAKE_GENERATOR MATCHES "^Ninja")
+    execute_process(COMMAND "${CMAKE_MAKE_PROGRAM}" -t wincodepage
+        OUTPUT_VARIABLE _ninja_codepage OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if (_ninja_codepage MATCHES "UTF-8")
+        execute_process(COMMAND cmd /c chcp 65001 OUTPUT_QUIET ERROR_QUIET)
+    endif ()
+endif ()
+
 include("version.inc")
 # Upstream OrcaSlicer AppImage templates still reference SoftFever_VERSION.
 set(SoftFever_VERSION "${Snapmaker_VERSION}")

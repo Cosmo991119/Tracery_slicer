@@ -124,7 +124,9 @@ function(Snapmaker_Orca_add_cmake_project projectname)
     cmake_parse_arguments(P_ARGS "" "INSTALL_DIR;BUILD_COMMAND;INSTALL_COMMAND" "CMAKE_ARGS" ${ARGN})
 
     set(_configs_line -DCMAKE_BUILD_TYPE:STRING=${CMAKE_BUILD_TYPE})
-    if (_is_multi OR MSVC)
+    # MSVC may be used through Ninja, which is a single-config generator.
+    # Only omit CMAKE_BUILD_TYPE for actual multi-config generators.
+    if (_is_multi)
         if (ORCA_INCLUDE_DEBUG_INFO AND NOT DEP_DEBUG)
             set(_configs_line "-DCMAKE_C_FLAGS_RELEASE:STRING=${CMAKE_C_FLAGS_RELWITHDEBINFO} -DCMAKE_CXX_FLAGS_RELEASE:STRING=${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
         else ()
@@ -134,7 +136,11 @@ function(Snapmaker_Orca_add_cmake_project projectname)
 
     set(_gen "")
     set(_build_j "-j${NPROC}")
-    if (MSVC)
+    # Newer Visual Studio installations may use a toolset that predates a
+    # corresponding CMake Visual Studio generator.  When the top-level build
+    # uses Ninja, let ExternalProject inherit it so all dependencies use the
+    # already initialized MSVC environment instead of forcing a VS generator.
+    if (MSVC AND NOT CMAKE_GENERATOR MATCHES "Ninja")
         set(_gen CMAKE_GENERATOR "${DEP_MSVC_GEN}" CMAKE_GENERATOR_PLATFORM "${DEP_PLATFORM}")
         set(_build_j "/m")
     endif ()

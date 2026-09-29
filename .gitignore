@@ -1,5 +1,9 @@
 Build
 Build.bat
+/CMakeSettings.json
+/build_vs2026_*.bat
+/run_vs2026_*.bat
+/VS2026_*.md
 /build*/
 CMakeLists.txt.user
 **/CMakeLists.txt.autosave

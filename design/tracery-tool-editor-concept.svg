@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Concept asset only — not wired into the application. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-label="花窗碎玻璃编辑界面概念稿">
+  <defs>
+    <style>
+      .ui { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; fill: #2b3436; }
+      .small { font-size: 13px; } .label { font-size: 14px; font-weight: 600; } .title { font-size: 18px; font-weight: 700; }
+      .muted { fill: #748083; } .teal { fill: #009688; } .line { stroke: #2b3436; stroke-width: 1.4; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse" patternTransform="rotate(-10)">
+      <path d="M 48 0 L 0 0 0 48" fill="none" stroke="#687174" stroke-width="1" opacity=".65"/>
+    </pattern>
+    <clipPath id="disk"><circle cx="520" cy="466" r="190"/></clipPath>
+    <linearGradient id="base" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#dedede"/><stop offset="1" stop-color="#ababab"/></linearGradient>
+    <linearGradient id="coral" x1="0" x2="1"><stop stop-color="#ed9c7d"/><stop offset="1" stop-color="#e86b92"/></linearGradient>
+    <linearGradient id="blue" x1="0" x2="1"><stop stop-color="#89d9e7"/><stop offset="1" stop-color="#7778d9"/></linearGradient>
+    <linearGradient id="gold" x1="0" x2="1"><stop stop-color="#ffe788"/><stop offset="1" stop-color="#f0b65d"/></linearGradient>
+  </defs>
+
+  <rect width="1440" height="900" fill="#f1f2f2"/>
+  <rect width="1440" height="28" fill="#394548"/>
+  <text x="48" y="20" class="ui label" fill="#fff">项目</text>
+  <rect x="0" y="28" width="1440" height="56" fill="#fff"/>
+  <path d="M0 83h1440" stroke="#d9dddd"/>
+
+  <!-- Existing OrcaSlicer toolbar assets, with only the new flower-window icon inserted. -->
+  <g aria-label="OrcaSlicer toolbar">
+    <image href="../resources/images/toolbar_add_plate.svg" x="152" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_arrange.svg" x="198" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_orient.svg" x="244" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_assembly.svg" x="290" y="33" width="40" height="40"/>
+    <path d="M344 33v40" stroke="#d7dbdc"/>
+    <image href="../resources/images/toolbar_move.svg" x="362" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_rotate.svg" x="408" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_scale.svg" x="454" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_flatten.svg" x="500" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_cut.svg" x="546" y="33" width="40" height="40"/>
+    <path d="M600 33v40" stroke="#d7dbdc"/>
+    <image href="../resources/images/toolbar_fuzzy_skin_paint.svg" x="618" y="33" width="40" height="40"/>
+    <rect x="664" y="31" width="44" height="44" rx="3" fill="#d9f2ef"/>
+    <image href="tracery-tool-icon.svg" x="666" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_text.svg" x="716" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_seam.svg" x="762" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_support.svg" x="808" y="33" width="40" height="40"/>
+    <image href="../resources/images/toolbar_assembly.svg" x="854" y="33" width="40" height="40"/>
+  </g>
+  <g class="ui small"><rect x="658" y="88" width="110" height="25" rx="4" fill="#2b3436"/><text x="676" y="105" fill="#fff">花窗碎玻璃</text><path d="M708 113l5 5 5-5" fill="#2b3436"/></g>
+
+  <!-- 3D workspace -->
+  <rect x="0" y="84" width="1030" height="816" fill="#454a4b"/>
+  <rect x="0" y="84" width="1030" height="816" fill="url(#grid)"/>
+  <text x="22" y="116" class="ui small" fill="#e0e5e5">编辑预览 · 直接在模型表面涂抹或选择碎片</text>
+  <g opacity=".9">
+    <circle cx="520" cy="480" r="205" fill="#343839"/>
+    <circle cx="520" cy="466" r="190" fill="url(#base)"/>
+    <circle cx="520" cy="466" r="190" fill="#fff" opacity=".15"/>
+  </g>
+  <!-- full-surface stained-glass preview -->
+  <g clip-path="url(#disk)">
+    <g>
+      <rect x="330" y="275" width="390" height="382" fill="#e8d9c5"/>
+      <path d="M492 278c56 20 79 66 46 112-22 31-15 71 18 91 31 18 81 18 112-11 26-25 43-22 79-13l-7 204H508Z" fill="url(#blue)"/>
+      <path d="M492 312c24 21 62 14 79 47 18 34 2 71-34 85-36 14-46 50-22 78 23 27 57 17 80 42 24 27 11 68-20 94H493Z" fill="url(#coral)"/>
+      <path d="M589 272c1 43 29 71 70 69 38-2 48 30 36 63-12 31 11 56 42 64l8-196Z" fill="url(#gold)"/>
+      <path d="M505 441c27-20 58-16 73 12 14 26 42 29 66 12 25-18 55-7 66 20 11 27-3 56-33 67-30 11-39 37-24 62 15 24 47 26 76 11l-2 73H499Z" fill="#9fdbc5"/>
+      <g fill="none" stroke="#fff" stroke-opacity=".58" stroke-width="1.5">
+        <path d="M492 278c56 20 79 66 46 112-22 31-15 71 18 91 31 18 81 18 112-11 26-25 43-22 79-13"/>
+        <path d="M492 312c24 21 62 14 79 47 18 34 2 71-34 85-36 14-46 50-22 78 23 27 57 17 80 42 24 27 11 68-20 94"/>
+        <path d="M589 272c1 43 29 71 70 69 38-2 48 30 36 63-12 31 11 56 42 64"/>
+        <path d="M505 441c27-20 58-16 73 12 14 26 42 29 66 12 25-18 55-7 66 20 11 27-3 56-33 67-30 11-39 37-24 62 15 24 47 26 76 11"/>
+      </g>
+      <path d="M548 278c-20 50 2 85 38 103M678 276c-27 38-20 81 17 105M515 530c36 11 51 42 47 77M610 447c-23 20-27 54-10 80M707 507c-38 2-57 27-56 60" fill="none" stroke="#fff" stroke-opacity=".58" stroke-width="1.5"/>
+    </g>
+  </g>
+  <circle cx="520" cy="466" r="190" fill="none" stroke="#dfe4e4" stroke-width="2"/>
+
+  <!-- inspector -->
+  <rect x="1030" y="84" width="410" height="816" fill="#fff"/>
+  <path d="M1030 84v816" stroke="#dce1e1"/>
+  <text x="1060" y="121" class="ui title">花窗碎玻璃</text>
+  <text x="1060" y="146" class="ui small muted">在模型表面绘制花窗范围</text>
+  <text x="1060" y="187" class="ui label">开始方式：在模型上涂抹</text>
+  <text x="1325" y="187" class="ui small teal">更换</text>
+  <path d="M1060 204h328" stroke="#e3e7e7"/>
+
+  <text x="1060" y="236" class="ui label">工具类型</text>
+  <rect x="1060" y="250" width="38" height="36" rx="3" fill="#d9f2ef" stroke="#009688"/>
+  <circle cx="1079" cy="268" r="10" fill="none" stroke="#2b3436" stroke-width="1.4"/>
+  <rect x="1107" y="250" width="38" height="36" rx="3" fill="#f5f6f6"/>
+  <path d="M1117 264c5-7 15-1 10 6-3 5-11 2-8-3 2-3 7-1 5 2" class="line"/>
+  <!-- boxed color-paint tool retained -->
+  <rect x="1154" y="250" width="38" height="36" rx="3" fill="#f5f6f6"/>
+  <path d="M1162 258h22v20h-22z" class="line"/><path d="M1162 258l22 20h-22Z" fill="#009688" opacity=".88"/>
+  <rect x="1201" y="250" width="38" height="36" rx="3" fill="#f5f6f6"/>
+  <path d="M1210 261l12-5 5 11-12 5zM1209 272l-2 6m3-5 5 3" class="line"/>
+  <!-- new eraser, drawn in the same fine-line toolbar style -->
+  <rect x="1248" y="250" width="38" height="36" rx="3" fill="#f5f6f6"/>
+  <path d="M1258 273l9-12 10 8-9 11h-8zM1264 280h14" class="line"/>
+  <text x="1060" y="316" class="ui label">画刷尺寸</text>
+  <path d="M1142 311h162" stroke="#cbd3d3" stroke-width="2" stroke-linecap="round"/><path d="M1142 311h49" stroke="#009688" stroke-width="2" stroke-linecap="round"/><path d="M1190 302l-6 11h12z" fill="#009688"/>
+  <rect x="1317" y="297" width="71" height="28" rx="3" fill="#fff" stroke="#c7cecf"/><text x="1334" y="317" class="ui label">1.00</text>
+  <circle cx="1069" cy="354" r="10" fill="#009688"/><text x="1065" y="359" class="ui label" fill="#fff">?</text>
+  <rect x="1088" y="340" width="127" height="30" rx="3" fill="#f5f6f6" stroke="#c7cecf"/><text x="1103" y="361" class="ui label">擦除所有绘制</text>
+
+  <path d="M1060 400h328" stroke="#e3e7e7"/>
+  <text x="1060" y="433" class="ui label">碎片密度</text><text x="1347" y="433" class="ui small muted">粗　细</text>
+  <path d="M1062 454h322" stroke="#cbd3d3" stroke-width="3" stroke-linecap="round"/><path d="M1062 454h158" stroke="#009688" stroke-width="3" stroke-linecap="round"/><circle cx="1220" cy="454" r="7" fill="#009688"/>
+  <text x="1060" y="493" class="ui label">折射强度</text><text x="1298" y="493" class="ui small muted">原色　明显</text>
+  <path d="M1062 514h322" stroke="#cbd3d3" stroke-width="3" stroke-linecap="round"/><path d="M1062 514h159" stroke="#009688" stroke-width="3" stroke-linecap="round"/><circle cx="1221" cy="514" r="7" fill="#009688"/>
+  <rect x="1060" y="543" width="159" height="36" rx="4" fill="#f3f5f5"/><text x="1110" y="566" class="ui label">换一组</text>
+  <rect x="1228" y="543" width="160" height="36" rx="4" fill="#f3f5f5"/><text x="1261" y="566" class="ui label">恢复自动颜色</text>
+
+  <path d="M1030 618h410" stroke="#e0e4e4"/>
+  <rect x="1060" y="638" width="120" height="38" rx="4" fill="#f2f4f4"/><text x="1104" y="663" class="ui label">取消</text>
+  <rect x="1190" y="638" width="198" height="38" rx="4" fill="#009688"/><text x="1251" y="663" class="ui label" fill="#fff">完成编辑</text>
+</svg>

@@ -16,5 +16,6 @@ call "%~dp0build_windows_clean.bat" ^
     "%ProgramW6432%" ^
     "%USERPROFILE%" ^
     "%PATHEXT%" ^
+    "%VCINSTALLDIR%" ^
     "%*"
 exit /b %ERRORLEVEL%

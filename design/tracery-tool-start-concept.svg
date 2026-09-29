@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Concept asset only — not wired into the application. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-label="花窗碎玻璃开始方式选择界面">
+  <defs>
+    <style>
+      .ui { font-family: "Microsoft YaHei", "Segoe UI", Arial, sans-serif; fill: #2b3436; }
+      .small { font-size: 14px; } .label { font-size: 16px; font-weight: 600; } .title { font-size: 22px; font-weight: 700; }
+      .muted { fill: #748083; } .teal { fill: #009688; } .line { fill: none; stroke: #2b3436; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+    </style>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse" patternTransform="rotate(-10)">
+      <path d="M48 0H0V48" fill="none" stroke="#687174" stroke-width="1" opacity=".65"/>
+    </pattern>
+  </defs>
+  <rect width="1440" height="900" fill="#454a4b"/>
+  <rect width="1440" height="900" fill="url(#grid)"/>
+  <rect width="1440" height="28" fill="#394548"/><text x="48" y="20" class="ui label" fill="#fff">项目</text>
+  <rect x="0" y="28" width="1440" height="56" fill="#fff"/><path d="M0 83h1440" stroke="#d9dddd"/>
+  <!-- Existing toolbar content, with the new icon selected. -->
+  <image href="../resources/images/toolbar_add_plate.svg" x="152" y="33" width="40" height="40"/>
+  <image href="../resources/images/toolbar_arrange.svg" x="198" y="33" width="40" height="40"/>
+  <image href="../resources/images/toolbar_orient.svg" x="244" y="33" width="40" height="40"/>
+  <image href="../resources/images/toolbar_assembly.svg" x="290" y="33" width="40" height="40"/>
+  <path d="M344 33v40" stroke="#d7dbdc"/>
+  <image href="../resources/images/toolbar_move.svg" x="362" y="33" width="40" height="40"/>
+  <image href="../resources/images/toolbar_rotate.svg" x="408" y="33" width="40" height="40"/>
+  <image href="../resources/images/toolbar_scale.svg" x="454" y="33" width="40" height="40"/>
+  <image href="../resources/images/toolbar_flatten.svg" x="500" y="33" width="40" height="40"/>
+  <image href="../resources/images/toolbar_cut.svg" x="546" y="33" width="40" height="40"/>
+  <path d="M600 33v40" stroke="#d7dbdc"/>
+  <image href="../resources/images/toolbar_fuzzy_skin_paint.svg" x="618" y="33" width="40" height="40"/>
+  <rect x="664" y="31" width="44" height="44" rx="3" fill="#d9f2ef"/><image href="tracery-tool-icon.svg" x="666" y="33" width="40" height="40"/>
+  <image href="../resources/images/toolbar_text.svg" x="716" y="33" width="40" height="40"/><image href="../resources/images/toolbar_seam.svg" x="762" y="33" width="40" height="40"/>
+  <!-- No model is selected: this screen appears only in that state. -->
+  <rect x="300" y="184" width="840" height="510" rx="10" fill="#fff"/>
+  <text x="348" y="239" class="ui title">花窗碎玻璃</text>
+  <text x="348" y="270" class="ui small muted">未选中模型</text>
+  <text x="348" y="296" class="ui small muted">请选择图片创建二维花窗图案，或先选择模型后再使用花窗工具。</text>
+  <!-- Model card -->
+  <rect x="348" y="334" width="356" height="230" rx="7" fill="#f6f7f7" stroke="#d4dada" stroke-width="1.5"/>
+  <rect x="372" y="359" width="52" height="52" rx="8" fill="#ecefef"/>
+  <path d="M389 370c11-8 21 5 15 15-4 8-13 10-19 4-5-5-4-13 4-19Z" fill="none" stroke="#9aa5a7" stroke-width="2"/>
+  <path d="M400 394l10 10M403 400l8-8" fill="none" stroke="#9aa5a7" stroke-width="2" stroke-linecap="round"/>
+  <text x="372" y="448" class="ui label" fill="#869093">在模型上涂抹</text>
+  <text x="372" y="477" class="ui small muted">请先在工作区选择一个模型，</text>
+  <text x="372" y="500" class="ui small muted">再点击花窗图标直接进入。</text>
+  <rect x="372" y="520" width="190" height="28" rx="4" fill="#e3e7e7"/><text x="420" y="540" class="ui small" fill="#99a3a5">未选择模型</text>
+  <!-- Image card -->
+  <rect x="736" y="334" width="356" height="230" rx="7" fill="#f2fbfa" stroke="#009688" stroke-width="2"/>
+  <rect x="760" y="359" width="52" height="52" rx="8" fill="#d9f2ef"/>
+  <rect x="772" y="371" width="28" height="24" rx="2" fill="none" stroke="#2b3436" stroke-width="1.6"/>
+  <path d="M774 391l8-8 6 5 4-4 6 7" class="line"/><circle cx="793" cy="377" r="2.5" fill="#009688"/>
+  <text x="760" y="448" class="ui label">从图片创建</text>
+  <text x="760" y="477" class="ui small muted">导入图片，生成独立的二维</text>
+  <text x="760" y="500" class="ui small muted">花窗图案与轮廓数据。</text>
+  <rect x="760" y="520" width="190" height="28" rx="4" fill="#009688"/><text x="812" y="540" class="ui small" fill="#fff">选择图片</text>
+  <path d="M348 602h744" stroke="#e5e9e9"/>
+  <circle cx="363" cy="632" r="9" fill="#e0f3f0"/><text x="359" y="637" class="ui small teal">i</text>
+  <text x="382" y="637" class="ui small muted">选中模型后点击花窗图标，会跳过此页并直接进入模型涂抹。</text>
+</svg>

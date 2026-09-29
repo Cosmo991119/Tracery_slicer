@@ -173,7 +173,9 @@ static std::vector<VolumeSlices> slice_volumes_inner(
 
     // BBS
     const size_t num_extruders = print_config.filament_diameter.size();
-    const bool   is_mm_painted = num_extruders > 1 && std::any_of(model_volumes.cbegin(), model_volumes.cend(), [](const ModelVolume *mv) { return mv->is_mm_painted(); });
+    const bool   is_mm_painted = num_extruders > 1 && std::any_of(model_volumes.cbegin(), model_volumes.cend(), [](const ModelVolume *mv) {
+        return mv->is_mm_painted() || !mv->tracery_facets.empty();
+    });
     // BBS: don't do size compensation when slice volume.
     // Will handle contour and hole size compensation seperately later.
     //const auto   extra_offset  = is_mm_painted ? 0.f : std::max(0.f, float(print_object_config.xy_contour_compensation.value));
@@ -5251,7 +5253,7 @@ void PrintObject::slice_volumes()
     // Is any ModelVolume multi-material painted?
     if (const auto& volumes = this->model_object()->volumes;
         m_print->config().filament_diameter.size() > 1 && // BBS
-        std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume* v) { return !v->mmu_segmentation_facets.empty(); }) != volumes.end()) {
+        std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume* v) { return !v->mmu_segmentation_facets.empty() || !v->tracery_facets.empty(); }) != volumes.end()) {
 
         // If XY Size compensation is also enabled, notify the user that XY Size compensation
         // would not be used because the object is multi-material painted.
@@ -5265,6 +5267,33 @@ void PrintObject::slice_volumes()
 
         BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - MMU segmentation";
         std::vector<std::vector<ExPolygons>> mm_segmentation = multi_material_segmentation_by_painting(*this, [print]() { print->throw_if_canceled(); });
+        if (std::any_of(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return !v->tracery_facets.empty(); })) {
+            auto glass = stained_glass_segmentation_by_painting(*this, [print]() { print->throw_if_canceled(); });
+            for (size_t layer = 0; layer < mm_segmentation.size(); ++layer) {
+                ExPolygons glass_coverage;
+                for (size_t channel = 1; channel < glass[layer].size(); ++channel)
+                    append(glass_coverage, glass[layer][channel]);
+                if (glass_coverage.empty())
+                    continue;
+                glass_coverage = union_ex(glass_coverage);
+                for (ExPolygons &original : mm_segmentation[layer])
+                    if (!original.empty())
+                        original = diff_ex(original, glass_coverage);
+                for (size_t channel = 1; channel < glass[layer].size() && channel < mm_segmentation[layer].size(); ++channel)
+                    append(mm_segmentation[layer][channel], std::move(glass[layer][channel]));
+            }
+        }
+        // The source facets are deliberately left unchanged in the 3D model.
+        // Route their sliced 2D regions to CMYW recipes only after the glass
+        // coverage has replaced the corresponding original colour regions.
+        for (auto &layer : mm_segmentation)
+            for (size_t source = 1; source < layer.size(); ++source) {
+                const unsigned int target = m_print->stained_glass_route(static_cast<unsigned int>(source));
+                if (target == source || target == 0 || target >= layer.size())
+                    continue;
+                append(layer[target], std::move(layer[source]));
+                layer[source].clear();
+            }
         apply_mixed_surface_indentation(*this, mm_segmentation);
         apply_mixed_component_surface_offsets(*this, mm_segmentation);
         std::vector<std::vector<ExPolygons>> local_z_segmentation =

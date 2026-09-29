@@ -33,6 +33,7 @@
 #include "DailyTips.hpp"
 
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoTracery.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "slic3r/Utils/CpuMemory.hpp"
 #include "slic3r/Utils/MacDarkMode.hpp"
@@ -350,6 +351,7 @@ struct StencilFallbackRenderState
     GLboolean stencilTestEnabled{ GL_FALSE };
     GLboolean depthTestEnabled{ GL_FALSE };
     GLboolean depthWriteEnabled{ GL_TRUE };
+    GLint depthFunction{ GL_LESS };
     GLboolean blendEnabled{ GL_FALSE };
     GLboolean cullFaceEnabled{ GL_FALSE };
     std::array<GLboolean, 4> colorWriteMask{ GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE };
@@ -385,6 +387,7 @@ StencilFallbackRenderState SaveStencilFallbackRenderState()
     state.blendEnabled = glIsEnabled(GL_BLEND);
     state.cullFaceEnabled = glIsEnabled(GL_CULL_FACE);
     glsafe(::glGetBooleanv(GL_DEPTH_WRITEMASK, &state.depthWriteEnabled));
+    glsafe(::glGetIntegerv(GL_DEPTH_FUNC, &state.depthFunction));
     glsafe(::glGetBooleanv(GL_COLOR_WRITEMASK, state.colorWriteMask.data()));
     glsafe(::glGetIntegerv(GL_STENCIL_FUNC, &state.stencilFunction));
     glsafe(::glGetIntegerv(GL_STENCIL_REF, &state.stencilReference));
@@ -429,6 +432,7 @@ void RestoreStencilFallbackRenderState(const StencilFallbackRenderState& state)
     glsafe(::glColorMask(state.colorWriteMask[0], state.colorWriteMask[1],
                          state.colorWriteMask[2], state.colorWriteMask[3]));
     glsafe(::glDepthMask(state.depthWriteEnabled));
+    glsafe(::glDepthFunc(static_cast<GLenum>(state.depthFunction)));
     glsafe(::glFrontFace(static_cast<GLenum>(state.frontFace)));
     glsafe(::glCullFace(static_cast<GLenum>(state.cullFaceMode)));
     glsafe(::glUseProgram(static_cast<GLuint>(state.currentProgram)));
@@ -2995,7 +2999,7 @@ void GLCanvas3D::render(bool only_init)
         //only_body = true;
         only_current = true;
     }
-    else if ((gizmo_type == GLGizmosManager::FdmSupports) || (gizmo_type == GLGizmosManager::Seam) || (gizmo_type == GLGizmosManager::MmSegmentation) || (gizmo_type == GLGizmosManager::FuzzySkin))
+    else if ((gizmo_type == GLGizmosManager::FdmSupports) || (gizmo_type == GLGizmosManager::Seam) || (gizmo_type == GLGizmosManager::MmSegmentation) || (gizmo_type == GLGizmosManager::FuzzySkin) || (gizmo_type == GLGizmosManager::Tracery))
         no_partplate = true;
     else if (gizmo_type == GLGizmosManager::BrimEars && !camera.is_looking_downward())
         show_grid = false;
@@ -5341,7 +5345,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                     && m_gizmos.get_current_type() != GLGizmosManager::Seam
                     && m_gizmos.get_current_type() != GLGizmosManager::Cut
                     && m_gizmos.get_current_type() != GLGizmosManager::MmSegmentation
-                    && m_gizmos.get_current_type() != GLGizmosManager::FuzzySkin) {
+                    && m_gizmos.get_current_type() != GLGizmosManager::FuzzySkin
+                    && m_gizmos.get_current_type() != GLGizmosManager::Tracery) {
                     m_rectangle_selection.start_dragging(m_mouse.position, evt.ShiftDown() ? GLSelectionRectangle::Select : GLSelectionRectangle::Deselect);
                     m_dirty = true;
                 }
@@ -5493,7 +5498,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                 const Vec3d rot = (Vec3d(pos.x(), pos.y(), 0.) - m_mouse.drag.start_position_3D) * (PI * TRACKBALLSIZE / 180.) * mult;
                 if (this->m_canvas_type == ECanvasType::CanvasAssembleView || m_gizmos.get_current_type() == GLGizmosManager::FdmSupports ||
                     m_gizmos.get_current_type() == GLGizmosManager::Seam || m_gizmos.get_current_type() == GLGizmosManager::MmSegmentation ||
-                    m_gizmos.get_current_type() == GLGizmosManager::FuzzySkin) {
+                    m_gizmos.get_current_type() == GLGizmosManager::FuzzySkin || m_gizmos.get_current_type() == GLGizmosManager::Tracery) {
                     Vec3d rotate_target = Vec3d::Zero();
                     if (!m_selection.is_empty())
                         rotate_target = m_selection.get_bounding_box().center();
@@ -8529,6 +8534,33 @@ void GLCanvas3D::_render_plane() const
 //BBS: add outline drawing logic
 void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with_outline)
 {
+    if (GLGizmoTracery::global_display_diagnostics_active() &&
+        type == GLVolumeCollection::ERenderType::Opaque) {
+        const GLGizmosManager& gizmos = get_gizmos_manager();
+        const int overlay_index = gizmos.tracery_overlay_object_index();
+        int active_volumes = 0;
+        int matching_volumes = 0;
+        for (const GLVolume* volume : m_volumes.volumes)
+            if (volume->is_active) {
+                ++active_volumes;
+                if (volume->composite_id.object_id == overlay_index)
+                    ++matching_volumes;
+            }
+        const bool painter = dynamic_cast<GLGizmoPainterBase*>(gizmos.get_current()) != nullptr;
+        const std::string route = painter ?
+            (gizmos.get_current_type() == GLGizmosManager::Tracery ? "tracery_painter" : "other_painter") :
+            "ordinary_model";
+        GLGizmoTracery::record_global_display_diagnostic_canvas(this,
+            "route=" + route +
+            ",canvas_type=" + std::to_string(int(m_canvas_type)) +
+            ",gizmos_enabled=" + std::to_string(gizmos.is_enabled()) +
+            ",current_gizmo=" + std::to_string(int(gizmos.get_current_type())) +
+            ",overlay_index=" + std::to_string(overlay_index) +
+            ",active_volumes=" + std::to_string(active_volumes) +
+            ",matching_volumes=" + std::to_string(matching_volumes) +
+            ",layers_editing=" + std::to_string(m_layers_editing.is_enabled()) +
+            ",volumes_empty=" + std::to_string(m_volumes.empty()));
+    }
     if (m_volumes.empty())
         return;
 
@@ -8603,6 +8635,92 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
         case GLVolumeCollection::ERenderType::Opaque:
         {
             GLGizmosManager& gm = get_gizmos_manager();
+            const Camera& camera = wxGetApp().plater()->get_camera();
+            const auto renderable_volume = [this, canvas_type](const GLVolume& volume) {
+                if (canvas_type == ECanvasType::CanvasAssembleView)
+                    return !volume.is_modifier && !volume.is_wipe_tower;
+                return m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0;
+            };
+            const auto render_model_with_tracery = [&]() {
+                const int tracery_object = gm.tracery_overlay_object_index();
+                auto* tracery_diagnostics = dynamic_cast<GLGizmoTracery*>(gm.get_gizmo(GLGizmosManager::Tracery));
+                if (tracery_diagnostics != nullptr) {
+                    int matching_volumes = 0;
+                    for (const GLVolume* volume : m_volumes.volumes)
+                        if (volume->is_active && volume->composite_id.object_id == tracery_object)
+                            ++matching_volumes;
+                    tracery_diagnostics->record_display_diagnostic_canvas(tracery_object, m_picking_enabled,
+                        m_stencilFallbackAvailable, matching_volumes,
+                        gm.get_current_type() == GLGizmosManager::Tracery);
+                }
+                if (!m_stencilFallbackAvailable || tracery_object < 0) {
+                    // Mouse picking being enabled does not make this a picking
+                    // render pass. The actual picking pass is rendered elsewhere.
+                    shader->stop_using();
+                    gm.render_tracery_overlay();
+                    shader->start_using();
+                    m_volumes.render(type, m_picking_enabled, camera, renderable_volume, partly_inside_enable);
+                    if (tracery_diagnostics != nullptr)
+                        tracery_diagnostics->capture_display_diagnostic_frame("fallback_final", false);
+                    return;
+                }
+
+                const auto target_volume = [&](const GLVolume& volume) {
+                    return renderable_volume(volume) && volume.composite_id.object_id == tracery_object;
+                };
+                m_volumes.render(type, false, camera, [&](const GLVolume& volume) {
+                    return renderable_volume(volume) && volume.composite_id.object_id != tracery_object;
+                }, partly_inside_enable);
+
+                const StencilFallbackRenderState previous_state = SaveStencilFallbackRenderState();
+                ScopeGuard restore_state([&previous_state]() {
+                    RestoreStencilFallbackRenderState(previous_state);
+                });
+
+                // Establish the real visible surface before assigning any pixels to
+                // glass. This also keeps the back of a thin model from claiming its
+                // front-side mask when the camera moves.
+                glsafe(::glDisable(GL_STENCIL_TEST));
+                glsafe(::glEnable(GL_DEPTH_TEST));
+                glsafe(::glDepthFunc(GL_LESS));
+                glsafe(::glDepthMask(GL_TRUE));
+                glsafe(::glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE));
+                m_volumes.render(type, false, camera, target_volume, partly_inside_enable);
+
+                // The painted selection, not the fragment tessellation or MMU
+                // display mesh, owns stencil bit 0 at the visible surface.
+                glsafe(::glEnable(GL_STENCIL_TEST));
+                glsafe(::glStencilMask(0x01U));
+                glsafe(::glClearStencil(0));
+                glsafe(::glClear(GL_STENCIL_BUFFER_BIT));
+                glsafe(::glStencilFunc(GL_ALWAYS, 1, 0x01U));
+                glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE));
+                glsafe(::glDepthMask(GL_FALSE));
+                shader->stop_using();
+                gm.render_tracery_surface_mask();
+                shader->start_using();
+                if (tracery_diagnostics != nullptr)
+                    tracery_diagnostics->capture_display_diagnostic_frame("mask", true);
+
+                glsafe(::glColorMask(previous_state.colorWriteMask[0], previous_state.colorWriteMask[1],
+                                     previous_state.colorWriteMask[2], previous_state.colorWriteMask[3]));
+                glsafe(::glStencilMask(0x00U));
+                glsafe(::glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP));
+                glsafe(::glStencilFunc(GL_EQUAL, 1, 0x01U));
+                shader->stop_using();
+                gm.render_tracery_overlay();
+                shader->start_using();
+                if (tracery_diagnostics != nullptr)
+                    tracery_diagnostics->capture_display_diagnostic_frame("glass", false);
+
+                // The source mesh may be rebuilt after a mixed-filament update;
+                // stencil still excludes it from every pixel owned by glass.
+                glsafe(::glStencilFunc(GL_NOTEQUAL, 1, 0x01U));
+                glsafe(::glDepthFunc(GL_LEQUAL));
+                m_volumes.render(type, false, camera, target_volume, partly_inside_enable);
+                if (tracery_diagnostics != nullptr)
+                    tracery_diagnostics->capture_display_diagnostic_frame("final", false);
+            };
             if (dynamic_cast<GLGizmoPainterBase*>(gm.get_current()) == nullptr)
             {
                 if (m_picking_enabled && m_layers_editing.is_enabled() && (m_layers_editing.last_object_id != -1) && (m_layers_editing.object_max_z() > 0.0f)) {
@@ -8621,18 +8739,7 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                         else
                             shader->set_uniform("show_wireframe", false);
                     }*/
-                    //BBS:add assemble view related logic
-                    // do not cull backfaces to show broken geometry, if any
-                const Camera& camera = wxGetApp().plater()->get_camera();
-                    m_volumes.render(type, m_picking_enabled, camera, [this, canvas_type](const GLVolume& volume) {
-                        if (canvas_type == ECanvasType::CanvasAssembleView) {
-                            return !volume.is_modifier && !volume.is_wipe_tower;
-                        }
-                        else {
-                            return (m_render_sla_auxiliaries || volume.composite_id.volume_id >= 0);
-                        }
-                        },
-                        partly_inside_enable);
+                    render_model_with_tracery();
                 }
             }
             else {
@@ -8641,11 +8748,16 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                 // visible when inside modifier meshes etc.
 //                GLGizmosManager::EType type = gm.get_current_type();
                 if (dynamic_cast<GLGizmoPainterBase*>(gm.get_current())) {
+                    if (gm.get_current_type() == GLGizmosManager::Tracery) {
+                        render_model_with_tracery();
+                    }
                     shader->stop_using();
                     gm.render_painter_gizmo();
                     shader->start_using();
                 }
             }
+
+            GLGizmoTracery::capture_global_display_diagnostic_frame(this, "opaque_final");
 
             break;
         }

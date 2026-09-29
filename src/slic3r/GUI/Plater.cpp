@@ -9027,6 +9027,34 @@ void Sidebar::add_custom_filament(wxColour new_col) {
     auto_calc_flushing_volumes(filament_count - 1);
 }
 
+void Sidebar::add_custom_filaments(const std::vector<wxColour>& new_cols)
+{
+    if (new_cols.empty())
+        return;
+
+    PresetBundle* pb = wxGetApp().preset_bundle;
+    if (pb == nullptr)
+        return;
+
+    const size_t old_count = p->combos_filament.size();
+    const size_t new_count = old_count + new_cols.size();
+    if (new_count > MAXIMUM_EXTRUDER_NUMBER ||
+        pb->mixed_filaments.total_filaments(old_count) + new_cols.size() > MAXIMUM_FILAMENT_NUMBER)
+        return;
+
+    std::vector<std::string> colors;
+    colors.reserve(new_cols.size());
+    for (const wxColour& color : new_cols)
+        colors.emplace_back(color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString());
+
+    wxGetApp().plater()->confirm_auto_generated_gradients(int(new_count));
+    pb->set_num_filaments(unsigned(new_count), std::move(colors));
+    wxGetApp().plater()->on_filaments_change(new_count);
+    wxGetApp().get_tab(Preset::TYPE_PRINT)->update();
+    pb->export_selections(*wxGetApp().app_config);
+    auto_calc_flushing_volumes(int(new_count - 1));
+}
+
 void Sidebar::on_bed_type_change(BedType bed_type)
 {
     // btDefault option is not included in global bed type setting
