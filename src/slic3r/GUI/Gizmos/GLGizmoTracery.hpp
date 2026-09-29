@@ -55,7 +55,14 @@ private:
     bool on_init() override;
     void update_model_object() override;
     void update_from_model_object(bool first_update) override;
-    void on_opening() override { m_selection_modified = false; m_paint_mode = PaintMode::SURFACE; }
+    void on_opening() override
+    {
+        m_selection_modified = false;
+        m_regeneration_requested = false;
+        m_opening_fragment_density = m_fragment_density;
+        m_opening_refraction_strength = m_refraction_strength;
+        m_paint_mode = PaintMode::SURFACE;
+    }
     void on_shutdown() override;
     void on_load(cereal::BinaryInputArchive& ar) override;
     void on_save(cereal::BinaryOutputArchive& ar) const override;
@@ -86,6 +93,7 @@ private:
     wchar_t m_current_tool = 0;
     bool    m_eraser_mode = false;
     bool    m_selection_modified = false;
+    bool    m_regeneration_requested = false;
     bool    m_export_next_generation = false;
     bool    m_diagnostic_strong_depth_bias = false;
     bool    m_display_diagnostics_active = false;
@@ -95,6 +103,8 @@ private:
     std::set<std::string> m_display_diagnostics_captured;
     float   m_fragment_density = 0.5f;
     float   m_refraction_strength = 0.5f;
+    float   m_opening_fragment_density = 0.5f;
+    float   m_opening_refraction_strength = 0.5f;
     size_t  m_regeneration_version = 0;
     // Keep the editable selection independently from the model. The base
     // painter clears its live selectors when the gizmo closes, while this

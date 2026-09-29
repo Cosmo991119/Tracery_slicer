@@ -744,6 +744,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
 
     ImGui::Separator();
     if (m_imgui->button(_L("Regenerate fragments"))) {
+        m_regeneration_requested = true;
         ++m_regeneration_version;
         rebuild_colored_overlay();
         m_parent.set_as_dirty();
@@ -1729,6 +1730,10 @@ void GLGizmoTracery::apply_stained_glass_colors()
         cmyw_ids[index] = unsigned(physical_index + 1);
         cmyw_colours.emplace_back(colour_option->values[size_t(physical_index)]);
     }
+    // The actual CMYW recipe slots may be a mix of existing and newly added
+    // filaments. On U1, make all four use Full Spectrum after their IDs are known.
+    wxGetApp().sidebar().set_stained_glass_base_filament_preset(
+        std::vector<unsigned int>(cmyw_ids.begin(), cmyw_ids.end()));
 
     const std::set<unsigned int> used_source_ids = painted_source_ids();
     std::vector<unsigned int> physical_sources;
@@ -2010,6 +2015,32 @@ void GLGizmoTracery::update_from_model_object(bool)
 void GLGizmoTracery::on_shutdown()
 {
     record_display_diagnostic_state("shutdown_begin");
+    // Reopening the painter may restore a display-only overlay, but it does
+    // not change the saved glass or its mixed-filament recipes. In particular,
+    // do not retire and recreate those recipes on an unchanged editor exit.
+    const bool content_modified = m_selection_modified || m_regeneration_requested ||
+        m_fragment_density != m_opening_fragment_density ||
+        m_refraction_strength != m_opening_refraction_strength;
+    bool missing_published_glass = false;
+    if (!content_modified && !m_fragment_colors.empty()) {
+        const Model &model = wxGetApp().plater()->model();
+        const ModelObject *object = nullptr;
+        for (const ModelObject *candidate : model.objects)
+            if (candidate->id() == m_mask_object_id) { object = candidate; break; }
+        if (object == nullptr && m_mask_object_index >= 0 && size_t(m_mask_object_index) < model.objects.size())
+            object = model.objects[size_t(m_mask_object_index)];
+        missing_published_glass = object != nullptr &&
+            std::none_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume *volume) {
+                return !volume->tracery_facets.empty();
+            });
+    }
+    if (!content_modified && !missing_published_glass) {
+        record_display_diagnostic_state("shutdown_unchanged");
+        m_display_diagnostics_phase = "after_exit";
+        m_display_diagnostics_last_canvas_state.clear();
+        set_display_canvas_probe_phase(m_display_diagnostics_phase);
+        return;
+    }
     // Capture before GLGizmoPainterBase clears the live selectors. The colored
     // overlay remains available to the ordinary model renderer after closing.
     capture_mask_and_generate();

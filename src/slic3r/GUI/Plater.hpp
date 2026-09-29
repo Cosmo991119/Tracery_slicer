@@ -170,6 +170,7 @@ public:
                                                     std::function<void(int /*current*/, int /*total*/)> on_progress = nullptr);
     void add_custom_filament(wxColour new_col);
     void add_custom_filaments(const std::vector<wxColour>& new_cols);
+    void set_stained_glass_base_filament_preset(const std::vector<unsigned int>& filament_ids);
     void edit_filament();
 
     void on_filaments_delete(size_t filament_id);

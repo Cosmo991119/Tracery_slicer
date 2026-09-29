@@ -9055,6 +9055,38 @@ void Sidebar::add_custom_filaments(const std::vector<wxColour>& new_cols)
     auto_calc_flushing_volumes(int(new_count - 1));
 }
 
+void Sidebar::set_stained_glass_base_filament_preset(const std::vector<unsigned int>& filament_ids)
+{
+    PresetBundle* pb = wxGetApp().preset_bundle;
+    if (pb == nullptr ||
+        pb->printers.get_edited_preset().config.opt_string("printer_model") != "Snapmaker U1")
+        return;
+
+    const std::string preset_name = full_spectrum_preset_name();
+    Preset* preset = pb->filaments.find_preset(preset_name);
+    if (preset == nullptr || !preset->is_compatible) {
+        BOOST_LOG_TRIVIAL(warning) << "Stained-glass base material: preset unavailable or incompatible: "
+                                   << preset_name;
+        return;
+    }
+
+    preset->is_visible = true;
+    for (unsigned int id : filament_ids) {
+        if (id == 0 || id > pb->filament_presets.size())
+            continue;
+        const size_t index = size_t(id - 1);
+        pb->set_filament_preset(index, preset->name);
+        if (index < p->combos_filament.size())
+            p->combos_filament[index]->update();
+        BOOST_LOG_TRIVIAL(info) << "Stained-glass base material: assigned " << preset->name
+                                << " to physical slot " << id;
+    }
+    update_dynamic_filament_list();
+    update_color_mix_panel();
+    wxGetApp().plater()->update_project_dirty_from_presets();
+    pb->export_selections(*wxGetApp().app_config);
+}
+
 void Sidebar::on_bed_type_change(BedType bed_type)
 {
     // btDefault option is not included in global bed type setting
