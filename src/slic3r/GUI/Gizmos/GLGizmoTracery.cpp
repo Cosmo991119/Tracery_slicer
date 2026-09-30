@@ -30,6 +30,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <queue>
 #include <set>
 #include <stdexcept>
@@ -119,18 +120,6 @@ wxColour tracery_wx_color(const Slic3r::ColorRGBA& color)
         int(std::lround(std::clamp(color.b(), 0.0f, 1.0f) * 255.0f)));
 }
 
-wxColour lighter_tracery_recipe_target(const wxColour& color)
-{
-    // Moving each channel toward white preserves the target hue while making
-    // the printable glass recipe lighter and less saturated. This is not a
-    // display-only adjustment: the matcher receives this target colour.
-    constexpr double white_bias = 0.18;
-    const auto lighten = [white_bias](unsigned char channel) {
-        return int(std::lround(double(channel) * (1.0 - white_bias) + 255.0 * white_bias));
-    };
-    return wxColour(lighten(color.Red()), lighten(color.Green()), lighten(color.Blue()));
-}
-
 std::string tracery_hex(const wxColour& color)
 {
     return color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
@@ -169,9 +158,12 @@ Slic3r::ColorRGBA analogous_color(const Slic3r::ColorRGBA& base, size_t fragment
     if (hue < 0.0f) hue += 1.0f;
 
     const float saturation = chroma / std::max(0.001f, 1.0f - std::abs(2.0f * light - 1.0f));
-    const float shifted_hue = hue + (tracery_noise(fragment_id + 43) - 0.5f) * 0.16f;
-    const float shifted_saturation = std::clamp(saturation + (tracery_noise(fragment_id + 67) - 0.5f) * 0.26f, 0.0f, 1.0f);
-    const float shifted_light = std::clamp(light + (tracery_noise(fragment_id + 89) - 0.5f) * 0.32f, 0.05f, 0.95f);
+    // Keep fragments recognisably inside the source region's main hue. The
+    // previous +/-29 degree hue excursion made a painted red region drift
+    // toward unrelated purple and orange fragments before CMYW matching.
+    const float shifted_hue = hue + (tracery_noise(fragment_id + 43) - 0.5f) * 0.055f;
+    const float shifted_saturation = std::clamp(saturation + (tracery_noise(fragment_id + 67) - 0.5f) * 0.14f, 0.0f, 1.0f);
+    const float shifted_light = std::clamp(light + (tracery_noise(fragment_id + 89) - 0.5f) * 0.22f, 0.05f, 0.95f);
     const float second = shifted_light * (1.0f + shifted_saturation * (1.0f - std::abs(2.0f * shifted_light - 1.0f)));
     const float first = 2.0f * shifted_light - second;
     return Slic3r::ColorRGBA(std::clamp(hue_channel(first, second, shifted_hue + 1.0f / 3.0f), 0.0f, 1.0f),
@@ -188,6 +180,8 @@ Slic3r::ColorRGBA glass_color(const Slic3r::ColorRGBA& base, const Slic3r::Color
         local.g() * (1.0f - boundary_mix) + neighboring.g() * boundary_mix,
         local.b() * (1.0f - boundary_mix) + neighboring.b() * boundary_mix, 1.0f);
 }
+
+bool is_legal_tracery_recipe(const std::array<int, 4>& weights);
 
 Slic3r::GUI::MixedColorMatchRecipeResult build_tracery_cmyw_recipe(
     const std::vector<std::string>& physical_colours, const wxColour& target, bool glass_recipe)
@@ -211,11 +205,7 @@ Slic3r::GUI::MixedColorMatchRecipeResult build_tracery_cmyw_recipe(
     };
     const auto consider = [&best, &palette, &target, &encode_weights, glass_recipe](const std::array<int, 4>& weights) {
         if (glass_recipe) {
-            // White keeps the physical glass brighter; mixing all three CMY
-            // ingredients at once tends to produce a muddy complementary mix.
-            constexpr int minimum_white_percent = 15;
-            const int chromatic_count = int(weights[0] > 0) + int(weights[1] > 0) + int(weights[2] > 0);
-            if (weights[3] < minimum_white_percent || chromatic_count > 2)
+            if (!is_legal_tracery_recipe(weights))
                 return;
         }
         std::vector<double> mix_weights;
@@ -259,6 +249,72 @@ Slic3r::GUI::MixedColorMatchRecipeResult build_tracery_cmyw_recipe(
                 consider({ c, m, y, 100 - c - m - y });
 
     return best;
+}
+
+struct TraceryEditorRecipe {
+    std::array<int, 4> weights = { 0, 0, 0, 0 };
+    wxColour            preview;
+};
+
+bool is_legal_tracery_recipe(const std::array<int, 4>& weights)
+{
+    int active_count = 0;
+    int chromatic_count = 0;
+    int total = 0;
+    for (size_t index = 0; index < weights.size(); ++index) {
+        total += weights[index];
+        if (weights[index] == 0)
+            continue;
+        if (weights[index] < 15)
+            return false;
+        ++active_count;
+        if (index < 3)
+            ++chromatic_count;
+    }
+    if (total != 100 || active_count < 1 || active_count > 3 || chromatic_count > 2)
+        return false;
+    // A three-ingredient glass recipe must be one white ingredient plus two
+    // CMY ingredients. This rejects both CMY-only and four-colour mud.
+    return active_count != 3 || (weights[3] > 0 && chromatic_count == 2);
+}
+
+std::vector<TraceryEditorRecipe> build_tracery_editor_palette()
+{
+    const std::array<wxColour, 4> cmyw = {
+        wxColour("#08ABFB"), wxColour("#D93B90"), wxColour("#F9ED3D"), wxColour("#FFFFFF")
+    };
+    std::vector<wxColour> colours(cmyw.begin(), cmyw.end());
+    std::vector<TraceryEditorRecipe> palette;
+    // Five-percent increments are sufficient for a visual palette, keep the
+    // editor responsive, and leave 328 legal recipes before colour grouping.
+    constexpr int step = 5;
+    for (int c = 0; c <= 100; c += step)
+        for (int m = 0; m <= 100 - c; m += step)
+            for (int y = 0; y <= 100 - c - m; y += step) {
+                const std::array<int, 4> weights = { c, m, y, 100 - c - m - y };
+                if (!is_legal_tracery_recipe(weights))
+                    continue;
+                std::vector<double> mix_weights;
+                mix_weights.reserve(weights.size());
+                for (const int weight : weights)
+                    mix_weights.emplace_back(weight);
+                palette.push_back({ weights, Slic3r::GUI::blend_multi_filament_mixer(colours, mix_weights) });
+            }
+    return palette;
+}
+
+double tracery_recipe_balance_penalty(const std::array<int, 4>& weights)
+{
+    int minimum = 101;
+    int maximum = 0;
+    for (const int weight : weights)
+        if (weight > 0) {
+            minimum = std::min(minimum, weight);
+            maximum = std::max(maximum, weight);
+        }
+    // This is deliberately a preference rather than another hard cutoff: a
+    // dominant colour is sometimes required to preserve a saturated source.
+    return minimum <= 0 ? 0.0 : 0.08 * double(maximum - minimum);
 }
 
 } // namespace
@@ -1122,6 +1178,7 @@ void GLGizmoTracery::rebuild_colored_overlay()
                 merge_work(index, owner->second);
         }
     }
+
     std::map<size_t, std::array<int64_t, 4>> work_anchors;
     for (size_t index = 0; index < work_triangles.size(); ++index) {
         const std::array<int64_t, 3> point = quantize_point(work_triangles[index].a);
@@ -1240,6 +1297,7 @@ void GLGizmoTracery::rebuild_colored_overlay()
             seeds.emplace_back(FragmentSeed{ (triangle.world_a + triangle.world_b + triangle.world_c) / 3.0f, group, stable_id });
         }
     }
+
     fragment_count = seeds.size();
     if (fragment_count == 0) {
         if (export_diagnostics)
@@ -1417,6 +1475,21 @@ void GLGizmoTracery::rebuild_colored_overlay()
         }
     }
 
+    // Approximate the visible fragment adjacency from adjacent source faces.
+    // This catches normal shard boundaries without treating merely nearby,
+    // folded model faces as neighbours.
+    std::vector<std::set<size_t>> fragment_neighbours(fragment_count);
+    for (size_t triangle = 0; triangle < work_adjacency.size(); ++triangle) {
+        const size_t fragment = fragment_for_triangle[triangle];
+        if (fragment >= fragment_count)
+            continue;
+        for (const auto& adjacent : work_adjacency[triangle]) {
+            const size_t other_fragment = fragment_for_triangle[adjacent.first];
+            if (other_fragment < fragment_count && other_fragment != fragment)
+                fragment_neighbours[fragment].insert(other_fragment);
+        }
+    }
+
     // Propagate each real colour boundary across only its own colour region.
     // This is a surface-distance field: folded or nearby model faces cannot
     // borrow colour through empty space.
@@ -1467,21 +1540,103 @@ void GLGizmoTracery::rebuild_colored_overlay()
     base_colors.reserve(fragment_count);
     for (const FragmentSeed& seed : seeds)
         base_colors.emplace_back(color_groups[seed.color_group].color);
-    m_fragment_colors.resize(fragment_count);
-    m_overlay_volumes.resize(m_triangle_selectors.size());
+    const std::vector<TraceryEditorRecipe> editor_palette = build_tracery_editor_palette();
+    if (editor_palette.empty())
+        return;
+    std::vector<ColorRGBA> desired_colors(fragment_count);
     for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
         ColorRGBA boundary_color = base_colors[fragment];
         const size_t neighbor = fragment_boundary_neighbor[fragment];
         if (neighbor != no_group)
             boundary_color = color_groups[neighbor].color;
-        // The distance band is roughly one to two shard widths. Smoothstep
-        // makes the change gradual without affecting either deep interior.
         const float boundary_band = target_edge * 1.7f;
         const float linear_proximity = fragment_boundary_distance[fragment] < boundary_band ?
             1.0f - fragment_boundary_distance[fragment] / boundary_band : 0.0f;
         const float proximity = linear_proximity * linear_proximity * (3.0f - 2.0f * linear_proximity);
         const float boundary_mix = proximity * (0.16f + 0.42f * m_refraction_strength);
-        const ColorRGBA color = glass_color(base_colors[fragment], boundary_color, boundary_mix, seeds[fragment].stable_id);
+        desired_colors[fragment] = glass_color(base_colors[fragment], boundary_color, boundary_mix, seeds[fragment].stable_id);
+    }
+
+    struct CandidateRecipe { size_t palette_index; double score; };
+    std::vector<std::vector<CandidateRecipe>> fragment_candidates(fragment_count);
+    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
+        const wxColour target = tracery_wx_color(desired_colors[fragment]);
+        auto& candidates = fragment_candidates[fragment];
+        candidates.reserve(editor_palette.size());
+        for (size_t recipe = 0; recipe < editor_palette.size(); ++recipe) {
+            const double score = color_delta_e00(target, editor_palette[recipe].preview) +
+                tracery_recipe_balance_penalty(editor_palette[recipe].weights);
+            candidates.push_back({ recipe, score });
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const CandidateRecipe& first, const CandidateRecipe& second) {
+            return first.score < second.score;
+        });
+        if (candidates.size() > 24)
+            candidates.resize(24);
+    }
+
+    std::vector<size_t> order(fragment_count);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&fragment_neighbours](size_t first, size_t second) {
+        return fragment_neighbours[first].size() > fragment_neighbours[second].size();
+    });
+    std::vector<size_t> selected_recipe(fragment_count, size_t(-1));
+    constexpr double neighbour_minimum_delta_e = 12.0;
+    for (const size_t fragment : order) {
+        size_t fallback = size_t(-1);
+        double fallback_distance = -1.0;
+        for (const CandidateRecipe& candidate : fragment_candidates[fragment]) {
+            double minimum_distance = std::numeric_limits<double>::infinity();
+            for (const size_t neighbour : fragment_neighbours[fragment])
+                if (selected_recipe[neighbour] != size_t(-1))
+                    minimum_distance = std::min(minimum_distance, color_delta_e00(
+                        editor_palette[candidate.palette_index].preview, editor_palette[selected_recipe[neighbour]].preview));
+            if (minimum_distance >= neighbour_minimum_delta_e) {
+                selected_recipe[fragment] = candidate.palette_index;
+                break;
+            }
+            if (minimum_distance > fallback_distance) {
+                fallback = candidate.palette_index;
+                fallback_distance = minimum_distance;
+            }
+        }
+        // A colour family may genuinely be too narrow for the requested shard
+        // density. Keep the most distinct legal in-family candidate instead of
+        // escaping to an unrelated hue.
+        if (selected_recipe[fragment] == size_t(-1))
+            selected_recipe[fragment] = fallback == size_t(-1) ? fragment_candidates[fragment].front().palette_index : fallback;
+    }
+
+    // The slicer has a finite virtual-filament budget. Retain the common
+    // editor recipes first, then project rare choices to the closest retained
+    // legal colour instead of creating one material row per shard.
+    constexpr size_t maximum_editor_recipes = 24;
+    std::map<size_t, size_t> recipe_usage;
+    for (const size_t recipe : selected_recipe)
+        ++recipe_usage[recipe];
+    if (recipe_usage.size() > maximum_editor_recipes) {
+        std::vector<std::pair<size_t, size_t>> ranked(recipe_usage.begin(), recipe_usage.end());
+        std::sort(ranked.begin(), ranked.end(), [](const auto& first, const auto& second) { return first.second > second.second; });
+        std::set<size_t> retained;
+        for (size_t index = 0; index < maximum_editor_recipes; ++index)
+            retained.insert(ranked[index].first);
+        for (size_t& recipe : selected_recipe) {
+            if (retained.count(recipe))
+                continue;
+            const wxColour& source = editor_palette[recipe].preview;
+            recipe = *std::min_element(retained.begin(), retained.end(), [&](size_t first, size_t second) {
+                return color_delta_e00(source, editor_palette[first].preview) < color_delta_e00(source, editor_palette[second].preview);
+            });
+        }
+    }
+
+    m_fragment_colors.resize(fragment_count);
+    m_overlay_volumes.resize(m_triangle_selectors.size());
+    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
+        const TraceryEditorRecipe& recipe = editor_palette[selected_recipe[fragment]];
+        const wxColour& preview = recipe.preview;
+        const ColorRGBA color(float(preview.Red()) / 255.0f, float(preview.Green()) / 255.0f,
+            float(preview.Blue()) / 255.0f, 1.0f);
         m_fragment_colors[fragment] = color;
         for (std::vector<GLModel::Geometry>& per_volume : geometry)
             per_volume[fragment].color = color;
@@ -1784,6 +1939,9 @@ void GLGizmoTracery::apply_stained_glass_colors()
         return;
     }
 
+    // Keep the established publishing path: it owns the virtual-filament
+    // budget, creates valid recipe rows and maps their returned IDs to model
+    // facets. The editor only supplies its constrained preview colours.
     struct PaletteColour {
         wxColour colour;
         size_t usage = 0;
@@ -1835,21 +1993,20 @@ void GLGizmoTracery::apply_stained_glass_colors()
         const wxColour colour(wxString::FromUTF8(colour_option->values[source - 1]));
         target_colours.emplace_back(colour.IsOk() ? colour : wxColour("#808080"));
     }
-    for (const VirtualSource &source : virtual_sources)
+    for (const VirtualSource& source : virtual_sources)
         target_colours.emplace_back(source.colour);
+
     std::vector<MixedFilamentBatchEntry> new_rows;
     std::vector<size_t> target_row_indices(target_colours.size(), size_t(-1));
     std::map<std::string, size_t> recipe_rows;
     for (size_t index = 0; index < target_colours.size(); ++index) {
-        // Generic matching intentionally searches only pairs and triples to
-        // keep an arbitrary filament palette responsive. Stained glass always
-        // owns CMYW, so use its bounded four-channel matcher instead.
         const bool glass_recipe = index < candidates.size();
-        const wxColour target = glass_recipe ? lighter_tracery_recipe_target(target_colours[index]) : target_colours[index];
-        MixedColorMatchRecipeResult recipe = build_tracery_cmyw_recipe(cmyw_colours, target, glass_recipe);
+        // The constrained editor colours are the recipe targets directly:
+        // do not reintroduce the former white-lightening adjustment here.
+        MixedColorMatchRecipeResult recipe = build_tracery_cmyw_recipe(cmyw_colours, target_colours[index], glass_recipe);
         if (!recipe.valid)
             continue;
-        if (index < candidates.size())
+        if (glass_recipe)
             palette_preview_colours[index] = recipe.preview_color;
 
         const auto physical_id = [&cmyw_ids](unsigned int local_id) {
@@ -1867,8 +2024,7 @@ void GLGizmoTracery::apply_stained_glass_colors()
             continue;
         const std::string fingerprint = std::to_string(recipe.component_a) + ":" + std::to_string(recipe.component_b) + ":" +
             std::to_string(recipe.mix_b_percent) + ":" + recipe.gradient_component_ids + ":" + recipe.gradient_component_weights;
-        const auto existing = recipe_rows.find(fingerprint);
-        if (existing != recipe_rows.end()) {
+        if (const auto existing = recipe_rows.find(fingerprint); existing != recipe_rows.end()) {
             target_row_indices[index] = existing->second;
             continue;
         }
