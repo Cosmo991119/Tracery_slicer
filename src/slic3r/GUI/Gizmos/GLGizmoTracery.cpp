@@ -265,23 +265,17 @@ bool is_legal_tracery_recipe(const std::array<int, 4>& weights)
         total += weights[index];
         if (weights[index] == 0)
             continue;
+        if (weights[index] < 15)
+            return false;
         ++active_count;
         if (index < 3)
             ++chromatic_count;
     }
     if (total != 100 || active_count < 1 || active_count > 3 || chromatic_count > 2)
         return false;
-    if (active_count == 2)
-        return std::all_of(weights.begin(), weights.end(), [](int weight) {
-            return weight == 0 || weight >= 30;
-        });
     // A three-ingredient glass recipe must be one white ingredient plus two
-    // CMY ingredients, each at no less than 20%. This rejects both CMY-only
-    // and four-colour mud, while keeping all visible contributors substantial.
-    return active_count != 3 || (weights[3] >= 20 && chromatic_count == 2 &&
-        std::all_of(weights.begin(), weights.end(), [](int weight) {
-            return weight == 0 || weight >= 20;
-        }));
+    // CMY ingredients. This rejects both CMY-only and four-colour mud.
+    return active_count != 3 || (weights[3] > 0 && chromatic_count == 2);
 }
 
 std::vector<TraceryEditorRecipe> build_tracery_editor_palette()
@@ -292,7 +286,7 @@ std::vector<TraceryEditorRecipe> build_tracery_editor_palette()
     std::vector<wxColour> colours(cmyw.begin(), cmyw.end());
     std::vector<TraceryEditorRecipe> palette;
     // Five-percent increments are sufficient for a visual palette, keep the
-    // editor responsive, and leave 193 legal recipes before colour grouping.
+    // editor responsive, and leave 328 legal recipes before colour grouping.
     constexpr int step = 5;
     for (int c = 0; c <= 100; c += step)
         for (int m = 0; m <= 100 - c; m += step)
@@ -321,11 +315,6 @@ double tracery_recipe_balance_penalty(const std::array<int, 4>& weights)
     // This is deliberately a preference rather than another hard cutoff: a
     // dominant colour is sometimes required to preserve a saturated source.
     return minimum <= 0 ? 0.0 : 0.08 * double(maximum - minimum);
-}
-
-size_t tracery_recipe_component_count(const std::array<int, 4>& weights)
-{
-    return size_t(std::count_if(weights.begin(), weights.end(), [](int weight) { return weight > 0; }));
 }
 
 } // namespace
@@ -1389,11 +1378,6 @@ void GLGizmoTracery::rebuild_colored_overlay()
     };
 
     std::vector<size_t> fragment_for_triangle(work_triangles.size(), fragment_count);
-    // Work-triangle centres alone miss boundaries that pass through a finely
-    // tessellated triangle. Record every pair of clipped cells that coexists
-    // in one source triangle, then use that stronger graph for colour
-    // assignment so equal recipes cannot visually merge into one large tile.
-    std::vector<std::set<size_t>> clipped_fragment_neighbours(fragment_count);
     for (size_t triangle_index = 0; triangle_index < work_triangles.size(); ++triangle_index) {
         const WorkTriangle& triangle = work_triangles[triangle_index];
         if (triangle.mesh_idx >= geometry.size() || triangle.color_group >= group_seed_trees.size() ||
@@ -1439,7 +1423,6 @@ void GLGizmoTracery::rebuild_colored_overlay()
         candidates.emplace_back(nearest);
         std::sort(candidates.begin(), candidates.end());
         candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-        std::vector<size_t> clipped_candidates;
         for (const size_t candidate : candidates) {
             std::vector<ClipVertex> polygon(vertices.begin(), vertices.end());
             for (const size_t other : candidates) {
@@ -1451,7 +1434,6 @@ void GLGizmoTracery::rebuild_colored_overlay()
             }
             if (polygon.size() < 3)
                 continue;
-            clipped_candidates.emplace_back(candidate);
             GLModel::Geometry& data = geometry[triangle.mesh_idx][candidate];
             const unsigned int first = unsigned(data.vertices_count());
             for (const ClipVertex& vertex : polygon)
@@ -1459,11 +1441,6 @@ void GLGizmoTracery::rebuild_colored_overlay()
             for (unsigned int index = 1; index + 1 < polygon.size(); ++index)
                 data.add_triangle(first, first + index, first + index + 1);
         }
-        for (size_t first = 0; first < clipped_candidates.size(); ++first)
-            for (size_t second = first + 1; second < clipped_candidates.size(); ++second) {
-                clipped_fragment_neighbours[clipped_candidates[first]].insert(clipped_candidates[second]);
-                clipped_fragment_neighbours[clipped_candidates[second]].insert(clipped_candidates[first]);
-            }
     }
 
     struct BoundarySample {
@@ -1512,8 +1489,6 @@ void GLGizmoTracery::rebuild_colored_overlay()
                 fragment_neighbours[fragment].insert(other_fragment);
         }
     }
-    for (size_t fragment = 0; fragment < fragment_neighbours.size(); ++fragment)
-        fragment_neighbours[fragment].insert(clipped_fragment_neighbours[fragment].begin(), clipped_fragment_neighbours[fragment].end());
 
     // Propagate each real colour boundary across only its own colour region.
     // This is a surface-distance field: folded or nearby model faces cannot
@@ -1583,132 +1558,21 @@ void GLGizmoTracery::rebuild_colored_overlay()
     }
 
     struct CandidateRecipe { size_t palette_index; double score; };
-    struct SourcePalette { std::array<std::vector<size_t>, 3> recipes_by_component_count; };
-    // Keep the source colour dominant, but distribute the remaining shards by
-    // material complexity: 5% pure, 60% two-colour and 35% three-colour.
-    // The 42% anchor is deliberately a two-colour recipe, leaving 18% for
-    // additional two-colour variation.
-    constexpr int source_anchor_percent = 42;
-    constexpr std::array<int, 3> component_count_percent = { 5, 60, 35 };
-    constexpr std::array<size_t, 3> component_count_variant_count = { 1, 4, 3 };
-    const auto colour_lightness = [](const wxColour& colour) {
-        const int high = std::max({ int(colour.Red()), int(colour.Green()), int(colour.Blue()) });
-        const int low = std::min({ int(colour.Red()), int(colour.Green()), int(colour.Blue()) });
-        return double(high + low) / 510.0;
-    };
-
-    // Every painted source colour owns a compact, bright family of legal
-    // CMYW recipes. The first recipe is its closest printable anchor; the
-    // following recipes provide light, same-family variation without letting
-    // a blue, red or white region drift into unrelated dark colours.
-    std::vector<SourcePalette> source_palettes(color_groups.size());
-    for (size_t group = 0; group < color_groups.size(); ++group) {
-        const wxColour source = tracery_wx_color(color_groups[group].color);
-        const double minimum_lightness = std::max(0.35, colour_lightness(source) * 0.85);
-        std::array<std::vector<CandidateRecipe>, 3> ranked_by_component_count;
-        for (size_t recipe = 0; recipe < editor_palette.size(); ++recipe) {
-            if (colour_lightness(editor_palette[recipe].preview) < minimum_lightness)
-                continue;
-            const size_t component_count = tracery_recipe_component_count(editor_palette[recipe].weights);
-            ranked_by_component_count[component_count - 1].push_back({ recipe,
-                color_delta_e00(source, editor_palette[recipe].preview) +
-                tracery_recipe_balance_penalty(editor_palette[recipe].weights) });
-        }
-        for (size_t type = 0; type < ranked_by_component_count.size(); ++type) {
-            std::vector<CandidateRecipe>& ranked = ranked_by_component_count[type];
-            std::sort(ranked.begin(), ranked.end(), [](const CandidateRecipe& first, const CandidateRecipe& second) {
-                return first.score < second.score;
-            });
-            std::vector<size_t>& recipes = source_palettes[group].recipes_by_component_count[type];
-            for (const CandidateRecipe& candidate : ranked) {
-                const bool distinct = std::all_of(recipes.begin(), recipes.end(), [&editor_palette, &candidate](size_t selected) {
-                    return color_delta_e00(editor_palette[candidate.palette_index].preview, editor_palette[selected].preview) >= 12.0;
-                });
-                if (distinct)
-                    recipes.emplace_back(candidate.palette_index);
-                if (recipes.size() == component_count_variant_count[type])
-                    break;
-            }
-            // A neutral or very narrow family can lack enough perceptually
-            // separated variants. Fill its quota with the next best legal
-            // choices of the same component count rather than changing type.
-            for (const CandidateRecipe& candidate : ranked) {
-                if (recipes.size() == component_count_variant_count[type])
-                    break;
-                if (std::find(recipes.begin(), recipes.end(), candidate.palette_index) == recipes.end())
-                    recipes.emplace_back(candidate.palette_index);
-            }
-        }
-    }
-
-    // Allocate the source-family targets before considering adjacency. This
-    // establishes the 42% source-colour anchor and the 5/60/35 component
-    // quotas per painted region; the later adjacency pass may substitute only
-    // within the assigned component count when a same-colour contact occurs.
-    std::vector<std::vector<size_t>> fragments_by_group(color_groups.size());
-    for (size_t fragment = 0; fragment < seeds.size(); ++fragment)
-        fragments_by_group[seeds[fragment].color_group].emplace_back(fragment);
-    std::vector<size_t> preferred_recipe(fragment_count, 0);
-    std::vector<size_t> preferred_component_count(fragment_count, 2);
-    for (size_t group = 0; group < fragments_by_group.size(); ++group) {
-        std::vector<size_t>& fragments = fragments_by_group[group];
-        if (fragments.empty())
-            continue;
-        std::sort(fragments.begin(), fragments.end(), [&seeds](size_t first, size_t second) {
-            return tracery_noise(seeds[first].stable_id + 313) < tracery_noise(seeds[second].stable_id + 313);
-        });
-        std::array<size_t, 3> quota = {};
-        size_t assigned = 0;
-        for (size_t index = 0; index < quota.size(); ++index) {
-            quota[index] = size_t(std::lround(double(fragments.size()) * component_count_percent[index] / 100.0));
-            assigned += quota[index];
-        }
-        while (assigned > fragments.size()) {
-            const auto largest = std::max_element(quota.begin(), quota.end());
-            if (*largest == 0)
-                break;
-            --*largest;
-            --assigned;
-        }
-        for (size_t index = 0; assigned < fragments.size(); ++index, ++assigned)
-            ++quota[index % quota.size()];
-        size_t offset = 0;
-        const SourcePalette& palette = source_palettes[group];
-        const size_t anchor_count = std::min(quota[1], size_t(std::lround(double(fragments.size()) * source_anchor_percent / 100.0)));
-        const std::vector<size_t>& two_colour_recipes = palette.recipes_by_component_count[1];
-        for (size_t count = 0; count < anchor_count && offset < fragments.size(); ++count) {
-            preferred_recipe[fragments[offset]] = two_colour_recipes.front();
-            preferred_component_count[fragments[offset++]] = 2;
-        }
-        for (size_t type = 0; type < quota.size(); ++type) {
-            const std::vector<size_t>& recipes = palette.recipes_by_component_count[type];
-            const size_t start = type == 1 ? anchor_count : 0;
-            for (size_t count = start; count < quota[type] && offset < fragments.size(); ++count) {
-                const size_t recipe_offset = type == 1 ? count - anchor_count + 1 : count;
-                preferred_recipe[fragments[offset]] = recipes[recipe_offset % recipes.size()];
-                preferred_component_count[fragments[offset++]] = type + 1;
-            }
-        }
-    }
-
     std::vector<std::vector<CandidateRecipe>> fragment_candidates(fragment_count);
     for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
         const wxColour target = tracery_wx_color(desired_colors[fragment]);
-        const SourcePalette& family = source_palettes[seeds[fragment].color_group];
-        const std::vector<size_t>& recipes = family.recipes_by_component_count[preferred_component_count[fragment] - 1];
         auto& candidates = fragment_candidates[fragment];
-        candidates.reserve(recipes.size());
-        for (const size_t recipe : recipes)
-            candidates.push_back({ recipe, color_delta_e00(target, editor_palette[recipe].preview) +
-                tracery_recipe_balance_penalty(editor_palette[recipe].weights) });
+        candidates.reserve(editor_palette.size());
+        for (size_t recipe = 0; recipe < editor_palette.size(); ++recipe) {
+            const double score = color_delta_e00(target, editor_palette[recipe].preview) +
+                tracery_recipe_balance_penalty(editor_palette[recipe].weights);
+            candidates.push_back({ recipe, score });
+        }
         std::sort(candidates.begin(), candidates.end(), [](const CandidateRecipe& first, const CandidateRecipe& second) {
             return first.score < second.score;
         });
-        const auto preferred = std::find_if(candidates.begin(), candidates.end(), [&preferred_recipe, fragment](const CandidateRecipe& candidate) {
-            return candidate.palette_index == preferred_recipe[fragment];
-        });
-        if (preferred != candidates.end())
-            std::rotate(candidates.begin(), preferred, preferred + 1);
+        if (candidates.size() > 24)
+            candidates.resize(24);
     }
 
     std::vector<size_t> order(fragment_count);
@@ -1717,27 +1581,16 @@ void GLGizmoTracery::rebuild_colored_overlay()
         return fragment_neighbours[first].size() > fragment_neighbours[second].size();
     });
     std::vector<size_t> selected_recipe(fragment_count, size_t(-1));
-    constexpr double neighbour_minimum_delta_e = 15.0;
+    constexpr double neighbour_minimum_delta_e = 12.0;
     for (const size_t fragment : order) {
         size_t fallback = size_t(-1);
         double fallback_distance = -1.0;
         for (const CandidateRecipe& candidate : fragment_candidates[fragment]) {
             double minimum_distance = std::numeric_limits<double>::infinity();
-            bool shares_recipe_with_neighbour = false;
             for (const size_t neighbour : fragment_neighbours[fragment])
-                if (selected_recipe[neighbour] != size_t(-1)) {
-                    if (selected_recipe[neighbour] == candidate.palette_index) {
-                        shares_recipe_with_neighbour = true;
-                        break;
-                    }
+                if (selected_recipe[neighbour] != size_t(-1))
                     minimum_distance = std::min(minimum_distance, color_delta_e00(
                         editor_palette[candidate.palette_index].preview, editor_palette[selected_recipe[neighbour]].preview));
-                }
-            // Exact recipe equality is a hard failure, rather than merely a
-            // low-distance preference: neighbouring shards with the same
-            // recipe visually fuse into one larger colour block.
-            if (shares_recipe_with_neighbour)
-                continue;
             if (minimum_distance >= neighbour_minimum_delta_e) {
                 selected_recipe[fragment] = candidate.palette_index;
                 break;
@@ -1749,15 +1602,14 @@ void GLGizmoTracery::rebuild_colored_overlay()
         }
         // A colour family may genuinely be too narrow for the requested shard
         // density. Keep the most distinct legal in-family candidate instead of
-        // escaping to an unrelated hue. The fallback also never repeats a
-        // recipe already used by a touching fragment.
+        // escaping to an unrelated hue.
         if (selected_recipe[fragment] == size_t(-1))
             selected_recipe[fragment] = fallback == size_t(-1) ? fragment_candidates[fragment].front().palette_index : fallback;
     }
 
     // The slicer has a finite virtual-filament budget. Retain the common
-    // editor recipes first, but reserve each component-count class so palette
-    // compaction cannot change the requested 5/60/35 shard-count balance.
+    // editor recipes first, then project rare choices to the closest retained
+    // legal colour instead of creating one material row per shard.
     constexpr size_t maximum_editor_recipes = 24;
     std::map<size_t, size_t> recipe_usage;
     for (const size_t recipe : selected_recipe)
@@ -1766,53 +1618,15 @@ void GLGizmoTracery::rebuild_colored_overlay()
         std::vector<std::pair<size_t, size_t>> ranked(recipe_usage.begin(), recipe_usage.end());
         std::sort(ranked.begin(), ranked.end(), [](const auto& first, const auto& second) { return first.second > second.second; });
         std::set<size_t> retained;
-        for (size_t component_count = 1; component_count <= 3; ++component_count) {
-            const auto first_of_type = std::find_if(ranked.begin(), ranked.end(), [&](const auto& entry) {
-                return tracery_recipe_component_count(editor_palette[entry.first].weights) == component_count;
-            });
-            if (first_of_type != ranked.end())
-                retained.insert(first_of_type->first);
-        }
-        for (size_t index = 0; retained.size() < maximum_editor_recipes && index < ranked.size(); ++index)
+        for (size_t index = 0; index < maximum_editor_recipes; ++index)
             retained.insert(ranked[index].first);
         for (size_t& recipe : selected_recipe) {
             if (retained.count(recipe))
                 continue;
             const wxColour& source = editor_palette[recipe].preview;
-            const size_t component_count = tracery_recipe_component_count(editor_palette[recipe].weights);
-            const auto nearest_of_same_type = std::min_element(retained.begin(), retained.end(), [&](size_t first, size_t second) {
-                const bool first_matches = tracery_recipe_component_count(editor_palette[first].weights) == component_count;
-                const bool second_matches = tracery_recipe_component_count(editor_palette[second].weights) == component_count;
-                if (first_matches != second_matches)
-                    return first_matches;
+            recipe = *std::min_element(retained.begin(), retained.end(), [&](size_t first, size_t second) {
                 return color_delta_e00(source, editor_palette[first].preview) < color_delta_e00(source, editor_palette[second].preview);
             });
-            recipe = *nearest_of_same_type;
-        }
-    }
-
-    // Palette-budget compaction may project a rare recipe onto an existing
-    // one. Repair any resulting same-recipe contacts using only already kept
-    // recipes, so this pass cannot consume another virtual-filament slot.
-    std::set<size_t> retained_recipes(selected_recipe.begin(), selected_recipe.end());
-    for (const size_t fragment : order) {
-        const bool has_same_recipe_neighbour = std::any_of(fragment_neighbours[fragment].begin(), fragment_neighbours[fragment].end(),
-            [&selected_recipe, fragment](size_t neighbour) {
-                return selected_recipe[neighbour] == selected_recipe[fragment];
-            });
-        if (!has_same_recipe_neighbour)
-            continue;
-        for (const CandidateRecipe& candidate : fragment_candidates[fragment]) {
-            if (!retained_recipes.count(candidate.palette_index))
-                continue;
-            const bool clashes = std::any_of(fragment_neighbours[fragment].begin(), fragment_neighbours[fragment].end(),
-                [&selected_recipe, &candidate](size_t neighbour) {
-                    return selected_recipe[neighbour] == candidate.palette_index;
-                });
-            if (!clashes) {
-                selected_recipe[fragment] = candidate.palette_index;
-                break;
-            }
         }
     }
 
@@ -2133,11 +1947,7 @@ void GLGizmoTracery::apply_stained_glass_colors()
         size_t usage = 0;
     };
     std::vector<PaletteColour> candidates;
-    // Do not collapse merely similar editor colours into one virtual material:
-    // that would undo the non-adjacent-recipe assignment and make touching
-    // shards visually fuse after the editor closes. Only exact card previews
-    // are deduplicated here.
-    constexpr double merge_delta_e = 0.01;
+    constexpr double merge_delta_e = 7.0;
     for (const ColorRGBA& source : m_fragment_colors) {
         const wxColour colour = tracery_wx_color(source);
         size_t best = candidates.size();
