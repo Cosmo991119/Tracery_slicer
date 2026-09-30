@@ -59,6 +59,7 @@ private:
     {
         m_selection_modified = false;
         m_regeneration_requested = false;
+        m_palette_update_requested = false;
         m_opening_fragment_density = m_fragment_density;
         m_opening_refraction_strength = m_refraction_strength;
         m_paint_mode = PaintMode::SURFACE;
@@ -94,6 +95,7 @@ private:
     bool    m_eraser_mode = false;
     bool    m_selection_modified = false;
     bool    m_regeneration_requested = false;
+    bool    m_palette_update_requested = false;
     bool    m_export_next_generation = false;
     bool    m_diagnostic_strong_depth_bias = false;
     bool    m_display_diagnostics_active = false;

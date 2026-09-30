@@ -119,6 +119,18 @@ wxColour tracery_wx_color(const Slic3r::ColorRGBA& color)
         int(std::lround(std::clamp(color.b(), 0.0f, 1.0f) * 255.0f)));
 }
 
+wxColour lighter_tracery_recipe_target(const wxColour& color)
+{
+    // Moving each channel toward white preserves the target hue while making
+    // the printable glass recipe lighter and less saturated. This is not a
+    // display-only adjustment: the matcher receives this target colour.
+    constexpr double white_bias = 0.18;
+    const auto lighten = [white_bias](unsigned char channel) {
+        return int(std::lround(double(channel) * (1.0 - white_bias) + 255.0 * white_bias));
+    };
+    return wxColour(lighten(color.Red()), lighten(color.Green()), lighten(color.Blue()));
+}
+
 std::string tracery_hex(const wxColour& color)
 {
     return color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
@@ -178,7 +190,7 @@ Slic3r::ColorRGBA glass_color(const Slic3r::ColorRGBA& base, const Slic3r::Color
 }
 
 Slic3r::GUI::MixedColorMatchRecipeResult build_tracery_cmyw_recipe(
-    const std::vector<std::string>& physical_colours, const wxColour& target)
+    const std::vector<std::string>& physical_colours, const wxColour& target, bool glass_recipe)
 {
     Slic3r::GUI::MixedColorMatchRecipeResult best;
     if (!target.IsOk() || physical_colours.size() != 4)
@@ -197,7 +209,15 @@ Slic3r::GUI::MixedColorMatchRecipeResult build_tracery_cmyw_recipe(
         return std::to_string(weights[0]) + "/" + std::to_string(weights[1]) + "/" +
             std::to_string(weights[2]) + "/" + std::to_string(weights[3]);
     };
-    const auto consider = [&best, &palette, &target, &encode_weights](const std::array<int, 4>& weights) {
+    const auto consider = [&best, &palette, &target, &encode_weights, glass_recipe](const std::array<int, 4>& weights) {
+        if (glass_recipe) {
+            // White keeps the physical glass brighter; mixing all three CMY
+            // ingredients at once tends to produce a muddy complementary mix.
+            constexpr int minimum_white_percent = 15;
+            const int chromatic_count = int(weights[0] > 0) + int(weights[1] > 0) + int(weights[2] > 0);
+            if (weights[3] < minimum_white_percent || chromatic_count > 2)
+                return;
+        }
         std::vector<double> mix_weights;
         mix_weights.reserve(weights.size());
         for (int weight : weights)
@@ -749,6 +769,10 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         rebuild_colored_overlay();
         m_parent.set_as_dirty();
     }
+    if (!m_fragment_colors.empty() && m_imgui->button(_L("Reapply glass colours on exit")))
+        m_palette_update_requested = true;
+    if (m_palette_update_requested)
+        m_imgui->text(_L("Glass colours will update when editing closes."));
     ImGui::Separator();
     if (m_imgui->button("Export geometry diagnostics")) {
         m_export_next_generation = true;
@@ -1820,7 +1844,9 @@ void GLGizmoTracery::apply_stained_glass_colors()
         // Generic matching intentionally searches only pairs and triples to
         // keep an arbitrary filament palette responsive. Stained glass always
         // owns CMYW, so use its bounded four-channel matcher instead.
-        MixedColorMatchRecipeResult recipe = build_tracery_cmyw_recipe(cmyw_colours, target_colours[index]);
+        const bool glass_recipe = index < candidates.size();
+        const wxColour target = glass_recipe ? lighter_tracery_recipe_target(target_colours[index]) : target_colours[index];
+        MixedColorMatchRecipeResult recipe = build_tracery_cmyw_recipe(cmyw_colours, target, glass_recipe);
         if (!recipe.valid)
             continue;
         if (index < candidates.size())
@@ -2034,11 +2060,19 @@ void GLGizmoTracery::on_shutdown()
                 return !volume->tracery_facets.empty();
             });
     }
-    if (!content_modified && !missing_published_glass) {
+    if (!content_modified && !missing_published_glass && !m_palette_update_requested) {
         record_display_diagnostic_state("shutdown_unchanged");
         m_display_diagnostics_phase = "after_exit";
         m_display_diagnostics_last_canvas_state.clear();
         set_display_canvas_probe_phase(m_display_diagnostics_phase);
+        return;
+    }
+    if (!content_modified && !missing_published_glass && m_palette_update_requested) {
+        record_display_diagnostic_state("shutdown_reapply_palette");
+        m_display_diagnostics_phase = "after_exit";
+        m_display_diagnostics_last_canvas_state.clear();
+        set_display_canvas_probe_phase(m_display_diagnostics_phase);
+        wxGetApp().CallAfter([this] { apply_stained_glass_colors(); });
         return;
     }
     // Capture before GLGizmoPainterBase clears the live selectors. The colored
