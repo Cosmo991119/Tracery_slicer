@@ -5,6 +5,7 @@
 
 
 #include <cfloat>
+#include <functional>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
 
@@ -341,6 +342,14 @@ public:
 
     // Set facet of the mesh to a given state. Only works for original triangles.
     void set_facet(int facet_idx, EnforcerBlockerType state);
+
+    // Paint a procedurally generated pattern into this selector. The pattern is
+    // stored as regular selector leaves, so callers do not need a second mesh
+    // or a special slicing path. `region` limits the recursive refinement and
+    // `classify` returns NONE for points which must retain their old state.
+    void paint_generated(const BoundingBoxf3 &region,
+                         float max_leaf_edge,
+                         const std::function<EnforcerBlockerType(const Vec3f &)> &classify);
 
     // Clear everything and make the tree empty.
     void reset();

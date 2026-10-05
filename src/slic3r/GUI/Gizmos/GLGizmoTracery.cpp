@@ -584,26 +584,19 @@ void GLGizmoTracery::capture_display_diagnostic_frame(const char* stage, bool st
 
 int GLGizmoTracery::overlay_object_index() const
 {
-    if (!has_colored_overlay())
-        return -1;
-
-    const Model* model = m_parent.get_model();
-    if (model == nullptr)
-        return -1;
-    for (size_t index = 0; index < model->objects.size(); ++index)
-        if (model->objects[index]->id() == m_overlay_object_id)
-            return int(index);
+    // Fragment meshes are transient input to the normal paint baker. The
+    // canvas must render the model's regular multi-material paint only.
     return -1;
 }
 
 void GLGizmoTracery::render_colored_overlay()
 {
-    render_overlay_geometry(false);
+    // Deliberately empty: colours are stored in mmu_segmentation_facets.
 }
 
 void GLGizmoTracery::render_surface_mask()
 {
-    render_overlay_geometry(true);
+    // Deliberately empty: colours are stored in mmu_segmentation_facets.
 }
 
 void GLGizmoTracery::render_overlay_geometry(bool mask_only)
@@ -815,6 +808,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
     const bool refraction_edit_finished = ImGui::IsItemDeactivatedAfterEdit();
     if (density_edit_finished || refraction_edit_finished) {
         rebuild_colored_overlay();
+        apply_stained_glass_colors();
         m_parent.set_as_dirty();
     }
 
@@ -823,12 +817,9 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         m_regeneration_requested = true;
         ++m_regeneration_version;
         rebuild_colored_overlay();
+        apply_stained_glass_colors();
         m_parent.set_as_dirty();
     }
-    if (!m_fragment_colors.empty() && m_imgui->button(_L("Reapply glass colours on exit")))
-        m_palette_update_requested = true;
-    if (m_palette_update_requested)
-        m_imgui->text(_L("Glass colours will update when editing closes."));
     ImGui::Separator();
     if (m_imgui->button("Export geometry diagnostics")) {
         m_export_next_generation = true;
@@ -863,6 +854,10 @@ void GLGizmoTracery::update_model_object()
 {
     m_selection_modified = true;
     capture_mask_and_generate();
+    // This gizmo is a destructive, generated paint brush. Commit on every
+    // completed stroke so the standard colour-painting renderer owns the
+    // visible result even while this editor remains open.
+    apply_stained_glass_colors();
     m_parent.set_as_dirty();
 }
 
@@ -1793,64 +1788,7 @@ void GLGizmoTracery::apply_stained_glass_colors()
     auto* colour_option = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
     if (colour_option == nullptr)
         return;
-    // Only colours explicitly sprayed onto model facets need original-colour
-    // recipes. A volume's ordinary base filament remains unchanged.
-    const auto painted_source_ids = [] {
-        std::set<unsigned int> ids;
-        for (const ModelObject *object : wxGetApp().plater()->model().objects)
-            for (const ModelVolume *volume : object->volumes) {
-                const auto &states = volume->mmu_segmentation_facets.get_data().used_states;
-                for (size_t id = 1; id < states.size(); ++id)
-                    if (states[id]) ids.insert(unsigned(id));
-            }
-        return ids;
-    };
-
     auto& mixed_manager = bundle->mixed_filaments;
-    auto& mixed_rows = mixed_manager.mixed_filaments();
-    const std::vector<MixedFilament> old_mixed_rows = mixed_rows;
-    const std::vector<uint64_t> old_stained_ids = m_stained_mixed_stable_ids;
-    std::set<uint64_t> retired_ids(m_stained_mixed_stable_ids.begin(), m_stained_mixed_stable_ids.end());
-    std::set<uint64_t> protected_ids;
-    // Recover previous effect rows after reopening a project, but never
-    // retire a recipe still referenced by a different model object.
-    const Model &scene = wxGetApp().plater()->model();
-    size_t current_object_index = scene.objects.size();
-    for (size_t index = 0; index < scene.objects.size(); ++index)
-        if (scene.objects[index]->id() == m_mask_object_id) {
-            current_object_index = index;
-            break;
-        }
-    if (current_object_index == scene.objects.size() && m_mask_object_index >= 0 && size_t(m_mask_object_index) < scene.objects.size())
-        current_object_index = size_t(m_mask_object_index);
-    for (size_t object_index = 0; object_index < scene.objects.size(); ++object_index) {
-        const ModelObject *object = scene.objects[object_index];
-        const bool current = object_index == current_object_index;
-        for (const ModelVolume *volume : object->volumes)
-            for (const TraceryPatch &patch : volume->tracery_facets.patches)
-                if (const MixedFilament *row = mixed_manager.mixed_filament_from_id(patch.filament_id, colour_option->values.size()))
-                    (current ? retired_ids : protected_ids).insert(row->stable_id);
-    }
-    if (const auto *routes = bundle->project_config.option<ConfigOptionString>("stained_glass_color_routes")) {
-        size_t begin = 0;
-        while (begin < routes->value.size()) {
-            const size_t end = routes->value.find(';', begin);
-            const std::string pair = routes->value.substr(begin, end == std::string::npos ? end : end - begin);
-            if (const size_t colon = pair.find(':'); colon != std::string::npos) {
-                try { retired_ids.insert(std::stoull(pair.substr(colon + 1))); }
-                catch (const std::exception &) {}
-            }
-            if (end == std::string::npos) break;
-            begin = end + 1;
-        }
-    }
-    for (MixedFilament& row : mixed_rows) {
-        if (retired_ids.count(row.stable_id) && !protected_ids.count(row.stable_id)) {
-            row.deleted = true;
-            row.enabled = false;
-        }
-    }
-    m_stained_mixed_stable_ids.clear();
 
     const std::array<wxColour, 4> cmyw = {
         wxColour("#08ABFB"), wxColour("#D93B90"), wxColour("#F9ED3D"), wxColour("#FFFFFF")
@@ -1874,22 +1812,11 @@ void GLGizmoTracery::apply_stained_glass_colors()
     MixedFilamentManager projected_manager = mixed_manager;
     projected_manager.auto_generate(projected_colours);
     if (projected_colours.size() > MAXIMUM_EXTRUDER_NUMBER ||
-        projected_manager.total_filaments(projected_colours.size()) + painted_source_ids().size() + 4 > MAXIMUM_FILAMENT_NUMBER) {
-        mixed_rows = old_mixed_rows;
-        m_stained_mixed_stable_ids = old_stained_ids;
+        projected_manager.total_filaments(projected_colours.size()) + 4 > MAXIMUM_FILAMENT_NUMBER) {
         wxMessageBox(_L("There are not enough slots for the original colours, CMYW ingredients and stained-glass recipes."),
             _L("Stained glass"), wxOK | wxICON_WARNING);
         return;
     }
-
-    // Retiring old recipes changes virtual IDs. Remap the model's existing
-    // painting (including other objects' glass patches) before adding CMYW.
-    bundle->update_mixed_filament_id_remap(old_mixed_rows, colour_option->values.size(), colour_option->values.size());
-    wxGetApp().plater()->on_filaments_change(colour_option->values.size());
-    record_display_diagnostic_state("after_filaments_change");
-    colour_option = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
-    if (colour_option == nullptr)
-        return;
 
     // Add all missing base colours in one Sidebar update. Adding a physical
     // filament rebuilds the color option, so no pointer into the old option is
@@ -1914,27 +1841,10 @@ void GLGizmoTracery::apply_stained_glass_colors()
     wxGetApp().sidebar().set_stained_glass_base_filament_preset(
         std::vector<unsigned int>(cmyw_ids.begin(), cmyw_ids.end()));
 
-    const std::set<unsigned int> used_source_ids = painted_source_ids();
-    std::vector<unsigned int> physical_sources;
-    struct VirtualSource { uint64_t stable_id; wxColour colour; };
-    std::vector<VirtualSource> virtual_sources;
-    for (unsigned int id : used_source_ids) {
-        if (id <= colour_option->values.size()) {
-            physical_sources.emplace_back(id);
-            continue;
-        }
-        if (const MixedFilament *row = mixed_manager.mixed_filament_from_id(id, colour_option->values.size());
-            row != nullptr && row->stable_id != 0) {
-            const wxColour colour(wxString::FromUTF8(row->display_color));
-            virtual_sources.push_back({ row->stable_id, colour.IsOk() ? colour : wxColour("#808080") });
-        }
-    }
-
     const size_t available_mixed = MAXIMUM_FILAMENT_NUMBER - mixed_manager.total_filaments(colour_option->values.size());
-    const size_t source_budget = physical_sources.size() + virtual_sources.size();
-    const size_t palette_budget = std::min<size_t>(24, available_mixed > source_budget ? available_mixed - source_budget : 0);
+    const size_t palette_budget = std::min<size_t>(24, available_mixed);
     if (palette_budget < 4) {
-        wxMessageBox(_L("Not enough mixed-filament slots for the painted model colours and stained-glass colours."),
+        wxMessageBox(_L("Not enough mixed-filament slots for the stained-glass colours."),
             _L("Stained glass"), wxOK | wxICON_WARNING);
         return;
     }
@@ -1988,26 +1898,29 @@ void GLGizmoTracery::apply_stained_glass_colors()
     palette_preview_colours.reserve(candidates.size());
     for (const PaletteColour& colour : candidates)
         palette_preview_colours.emplace_back(colour.colour);
-    std::vector<wxColour> target_colours = palette_preview_colours;
-    for (unsigned int source : physical_sources) {
-        const wxColour colour(wxString::FromUTF8(colour_option->values[source - 1]));
-        target_colours.emplace_back(colour.IsOk() ? colour : wxColour("#808080"));
-    }
-    for (const VirtualSource& source : virtual_sources)
-        target_colours.emplace_back(source.colour);
+    const std::vector<wxColour> target_colours = palette_preview_colours;
 
     std::vector<MixedFilamentBatchEntry> new_rows;
     std::vector<size_t> target_row_indices(target_colours.size(), size_t(-1));
     std::map<std::string, size_t> recipe_rows;
+    std::map<std::string, unsigned int> existing_recipe_ids;
+    // This is a live paint brush, not an export operation: later strokes must
+    // refer to an equivalent existing virtual filament instead of consuming a
+    // new slot for the same CMYW recipe.
+    unsigned int virtual_id = unsigned(colour_option->values.size());
+    for (const MixedFilament &row : mixed_manager.mixed_filaments()) {
+        if (row.deleted || !row.enabled)
+            continue;
+        ++virtual_id;
+        const std::string fingerprint = std::to_string(row.component_a) + ":" + std::to_string(row.component_b) + ":" +
+            std::to_string(row.mix_b_percent) + ":" + row.gradient_component_ids + ":" + row.gradient_component_weights;
+        existing_recipe_ids.emplace(fingerprint, virtual_id);
+    }
     for (size_t index = 0; index < target_colours.size(); ++index) {
-        const bool glass_recipe = index < candidates.size();
-        // The constrained editor colours are the recipe targets directly:
-        // do not reintroduce the former white-lightening adjustment here.
-        MixedColorMatchRecipeResult recipe = build_tracery_cmyw_recipe(cmyw_colours, target_colours[index], glass_recipe);
+        MixedColorMatchRecipeResult recipe = build_tracery_cmyw_recipe(cmyw_colours, target_colours[index], true);
         if (!recipe.valid)
             continue;
-        if (glass_recipe)
-            palette_preview_colours[index] = recipe.preview_color;
+        palette_preview_colours[index] = recipe.preview_color;
 
         const auto physical_id = [&cmyw_ids](unsigned int local_id) {
             return local_id >= 1 && local_id <= cmyw_ids.size() ? cmyw_ids[local_id - 1] : 0u;
@@ -2024,6 +1937,10 @@ void GLGizmoTracery::apply_stained_glass_colors()
             continue;
         const std::string fingerprint = std::to_string(recipe.component_a) + ":" + std::to_string(recipe.component_b) + ":" +
             std::to_string(recipe.mix_b_percent) + ":" + recipe.gradient_component_ids + ":" + recipe.gradient_component_weights;
+        if (const auto existing = existing_recipe_ids.find(fingerprint); existing != existing_recipe_ids.end()) {
+            palette_filament_ids[index] = existing->second;
+            continue;
+        }
         if (const auto existing = recipe_rows.find(fingerprint); existing != recipe_rows.end()) {
             target_row_indices[index] = existing->second;
             continue;
@@ -2052,28 +1969,8 @@ void GLGizmoTracery::apply_stained_glass_colors()
     mixed_manager.add_batch_custom_filaments(new_rows, colour_option->values, &assigned_ids);
     for (size_t index = 0; index < candidates.size(); ++index) {
         const size_t row = target_row_indices[index];
-        if (row != size_t(-1) && row < assigned_ids.size())
+        if (palette_filament_ids[index] == 0 && row != size_t(-1) && row < assigned_ids.size())
             palette_filament_ids[index] = assigned_ids[row];
-    }
-    std::string source_routes;
-    for (size_t source = 0; source < physical_sources.size(); ++source) {
-        const size_t row_index = target_row_indices[candidates.size() + source];
-        const unsigned int virtual_id = assigned_ids[row_index];
-        const MixedFilament* row = mixed_manager.mixed_filament_from_id(virtual_id, colour_option->values.size());
-        if (row == nullptr || row->stable_id == 0) {
-            wxMessageBox(_L("Unable to assign a CMYW recipe to every painted model colour."),
-                _L("Stained glass"), wxOK | wxICON_WARNING);
-            return;
-        }
-        if (!source_routes.empty()) source_routes += ';';
-        source_routes += std::to_string(physical_sources[source]) + ':' + std::to_string(row->stable_id);
-    }
-    for (size_t source = 0; source < virtual_sources.size(); ++source) {
-        const size_t row_index = target_row_indices[candidates.size() + physical_sources.size() + source];
-        const MixedFilament *row = mixed_manager.mixed_filament_from_id(assigned_ids[row_index], colour_option->values.size());
-        if (row == nullptr || row->stable_id == 0)
-            return;
-        source_routes += ";v" + std::to_string(virtual_sources[source].stable_id) + ':' + std::to_string(row->stable_id);
     }
     m_fragment_mixed_filament_ids.resize(fragment_palette.size(), 0);
     for (size_t fragment = 0; fragment < fragment_palette.size(); ++fragment) {
@@ -2087,21 +1984,17 @@ void GLGizmoTracery::apply_stained_glass_colors()
                     overlay.model->set_color(preview_colour);
     }
 
-    for (unsigned int filament_id : assigned_ids) {
-        if (const MixedFilament* row = mixed_manager.mixed_filament_from_id(filament_id, colour_option->values.size()))
-            m_stained_mixed_stable_ids.emplace_back(row->stable_id);
-    }
     if (auto* definitions = bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
         definitions->value = mixed_manager.serialize_custom_entries();
     if (auto* routes = bundle->project_config.option<ConfigOptionString>("stained_glass_color_routes"))
-        routes->value = std::move(source_routes);
-    publish_tracery_overlay();
+        routes->value.clear();
+    bake_fragments_to_mmu_painting();
     wxGetApp().sidebar().update_color_mix_panel();
     wxGetApp().plater()->post_slice_state_change_update();
     m_parent.set_as_dirty();
 }
 
-void GLGizmoTracery::publish_tracery_overlay()
+void GLGizmoTracery::bake_fragments_to_mmu_painting()
 {
     Model &model = wxGetApp().plater()->model();
     ModelObject *object = nullptr;
@@ -2112,25 +2005,75 @@ void GLGizmoTracery::publish_tracery_overlay()
     if (object == nullptr)
         return;
 
+    bool updated = false;
     size_t volume_index = 0;
     for (ModelVolume *volume : object->volumes) {
         if (!volume->is_model_part())
             continue;
-        std::map<unsigned int, indexed_triangle_set> by_filament;
-        if (volume_index < m_overlay_volumes.size())
-            for (const OverlayFragment &fragment : m_overlay_volumes[volume_index].fragments)
-                if (fragment.fragment_id < m_fragment_mixed_filament_ids.size()) {
-                    const unsigned int filament = m_fragment_mixed_filament_ids[fragment.fragment_id];
-                    if (filament > 0)
-                        its_merge(by_filament[filament], fragment.surface);
+        struct GeneratedPaint {
+            unsigned int filament_id;
+            std::unique_ptr<AABBMesh> surface;
+        };
+        std::vector<GeneratedPaint> generated;
+        BoundingBoxf3 region;
+        if (volume_index < m_overlay_volumes.size()) {
+            for (const OverlayFragment &fragment : m_overlay_volumes[volume_index].fragments) {
+                if (fragment.fragment_id >= m_fragment_mixed_filament_ids.size())
+                    continue;
+                const unsigned int filament = m_fragment_mixed_filament_ids[fragment.fragment_id];
+                if (filament == 0 || filament > unsigned(EnforcerBlockerType::ExtruderMax) || fragment.surface.indices.empty())
+                    continue;
+                for (const Vec3f &vertex : fragment.surface.vertices) {
+                    const Vec3d point = vertex.cast<double>();
+                    if (!region.defined) {
+                        region.min = point;
+                        region.max = point;
+                        region.defined = true;
+                    } else {
+                        region.min = region.min.cwiseMin(point);
+                        region.max = region.max.cwiseMax(point);
+                    }
                 }
-        std::vector<TraceryPatch> patches;
-        patches.reserve(by_filament.size());
-        for (auto &[filament, surface] : by_filament)
-            patches.push_back({filament, std::move(surface)});
-        volume->tracery_facets.set(std::move(patches));
+                generated.push_back({ filament, std::make_unique<AABBMesh>(fragment.surface) });
+            }
+        }
+        if (!generated.empty()) {
+            TriangleSelector selector(volume->mesh());
+            selector.deserialize(volume->mmu_segmentation_facets.get_data(), false);
+            const float max_leaf_edge = std::clamp((6.5f - 4.0f * m_fragment_density) * 0.08f, 0.18f, 0.55f);
+            selector.paint_generated(region, max_leaf_edge, [&generated](const Vec3f &point) {
+                constexpr double surface_epsilon_sq = 1e-8;
+                double nearest = std::numeric_limits<double>::max();
+                unsigned int filament = 0;
+                for (const GeneratedPaint &paint : generated) {
+                    const double distance = paint.surface->squared_distance(point.cast<double>());
+                    if (distance < nearest) {
+                        nearest = distance;
+                        filament = paint.filament_id;
+                    }
+                }
+                return nearest <= surface_epsilon_sq ? EnforcerBlockerType(filament) : EnforcerBlockerType::NONE;
+            });
+            updated |= volume->mmu_segmentation_facets.set(selector);
+        }
+        // New edits are normal paint only. Clear a legacy overlay when this
+        // object is touched so it cannot enter the special render/slice path.
+        volume->tracery_facets.reset();
         ++volume_index;
     }
+    if (updated) {
+        const ModelObjectPtrs &objects = wxGetApp().model().objects;
+        const size_t object_index = std::find(objects.begin(), objects.end(), object) - objects.begin();
+        wxGetApp().obj_list()->update_info_items(object_index);
+        wxGetApp().plater()->get_partplate_list().notify_instance_update(object_index, 0);
+        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+        wxGetApp().plater()->notify_filament_usage_changed();
+    }
+    // The generated meshes were only classifiers for baking. Keeping none of
+    // them after the commit prevents a later canvas pass from treating glass
+    // as an independent renderable layer.
+    m_overlay_volumes.clear();
+    m_overlay_object_id = ObjectID();
 }
 
 void GLGizmoTracery::update_from_model_object(bool)
@@ -2197,72 +2140,12 @@ void GLGizmoTracery::update_from_model_object(bool)
 void GLGizmoTracery::on_shutdown()
 {
     record_display_diagnostic_state("shutdown_begin");
-    // Reopening the painter may restore a display-only overlay, but it does
-    // not change the saved glass or its mixed-filament recipes. In particular,
-    // do not retire and recreate those recipes on an unchanged editor exit.
-    const bool content_modified = m_selection_modified || m_regeneration_requested ||
-        m_fragment_density != m_opening_fragment_density ||
-        m_refraction_strength != m_opening_refraction_strength;
-    bool missing_published_glass = false;
-    if (!content_modified && !m_fragment_colors.empty()) {
-        const Model &model = wxGetApp().plater()->model();
-        const ModelObject *object = nullptr;
-        for (const ModelObject *candidate : model.objects)
-            if (candidate->id() == m_mask_object_id) { object = candidate; break; }
-        if (object == nullptr && m_mask_object_index >= 0 && size_t(m_mask_object_index) < model.objects.size())
-            object = model.objects[size_t(m_mask_object_index)];
-        missing_published_glass = object != nullptr &&
-            std::none_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume *volume) {
-                return !volume->tracery_facets.empty();
-            });
-    }
-    if (!content_modified && !missing_published_glass && !m_palette_update_requested) {
-        record_display_diagnostic_state("shutdown_unchanged");
-        m_display_diagnostics_phase = "after_exit";
-        m_display_diagnostics_last_canvas_state.clear();
-        set_display_canvas_probe_phase(m_display_diagnostics_phase);
-        return;
-    }
-    if (!content_modified && !missing_published_glass && m_palette_update_requested) {
-        record_display_diagnostic_state("shutdown_reapply_palette");
-        m_display_diagnostics_phase = "after_exit";
-        m_display_diagnostics_last_canvas_state.clear();
-        set_display_canvas_probe_phase(m_display_diagnostics_phase);
-        wxGetApp().CallAfter([this] { apply_stained_glass_colors(); });
-        return;
-    }
-    // Capture before GLGizmoPainterBase clears the live selectors. The colored
-    // overlay remains available to the ordinary model renderer after closing.
-    capture_mask_and_generate();
-    record_display_diagnostic_state("shutdown_after_capture");
+    // Every completed edit has already baked into normal colour painting.
+    // Closing this gizmo must not create a second, delayed render/slice layer.
     m_display_diagnostics_phase = "after_exit";
     m_display_diagnostics_last_canvas_state.clear();
     set_display_canvas_probe_phase(m_display_diagnostics_phase);
-
-    // Closing the toolbar, switching gizmos and clicking the explicit button
-    // all mean that editing is finished.  Existing fragments must therefore
-    // take the same deferred material-update path in every case.
-    if (m_fragment_colors.empty()) {
-        if (!m_selection_modified)
-            return;
-        publish_tracery_overlay();
-        const Model &model = wxGetApp().plater()->model();
-        const bool any_glass = std::any_of(model.objects.begin(), model.objects.end(), [](const ModelObject *object) {
-            return std::any_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume *volume) {
-                return !volume->tracery_facets.empty();
-            });
-        });
-        if (!any_glass)
-            if (auto *routes = wxGetApp().preset_bundle->project_config.option<ConfigOptionString>("stained_glass_color_routes"))
-                routes->value.clear();
-        wxGetApp().plater()->post_slice_state_change_update();
-        return;
-    }
-
-    // Filament and mixed-colour changes may rebuild the model's display
-    // objects. Running them only after this painter has exited prevents that
-    // refresh from clearing the active painted selection.
-    wxGetApp().CallAfter([this] { apply_stained_glass_colors(); });
+    record_display_diagnostic_state("shutdown_baked");
 }
 
 void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)

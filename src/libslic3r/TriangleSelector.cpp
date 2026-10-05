@@ -963,6 +963,71 @@ void TriangleSelector::set_facet(int facet_idx, EnforcerBlockerType state)
     m_triangles[facet_idx].set_state(state);
 }
 
+void TriangleSelector::paint_generated(const BoundingBoxf3 &region,
+                                       float max_leaf_edge,
+                                       const std::function<EnforcerBlockerType(const Vec3f &)> &classify)
+{
+    if (!region.defined || max_leaf_edge <= 0.f || !classify)
+        return;
+
+    // Generated paint is evaluated in mesh coordinates. Unlike a cursor this
+    // has no view-dependent transform, therefore split_triangle() uses local
+    // edge lengths while this operation is active.
+    m_cursor.reset();
+    set_edge_limit(max_leaf_edge);
+    const float margin = max_leaf_edge * 1.5f;
+    const auto intersects_region = [&region, margin](const Vec3f &a, const Vec3f &b, const Vec3f &c) {
+        const Vec3f minimum = a.cwiseMin(b).cwiseMin(c);
+        const Vec3f maximum = a.cwiseMax(b).cwiseMax(c);
+        return minimum.x() <= float(region.max.x()) + margin && maximum.x() >= float(region.min.x()) - margin &&
+               minimum.y() <= float(region.max.y()) + margin && maximum.y() >= float(region.min.y()) - margin &&
+               minimum.z() <= float(region.max.z()) + margin && maximum.z() >= float(region.min.z()) - margin;
+    };
+    const auto longest_edge = [this](const Triangle &triangle) {
+        const Vec3f &a = m_vertices[triangle.verts_idxs[0]].v;
+        const Vec3f &b = m_vertices[triangle.verts_idxs[1]].v;
+        const Vec3f &c = m_vertices[triangle.verts_idxs[2]].v;
+        return std::max({(a - b).norm(), (b - c).norm(), (c - a).norm()});
+    };
+
+    std::function<void(int, const Vec3i32 &)> paint_triangle;
+    paint_triangle = [this, &paint_triangle, &classify, &intersects_region, &longest_edge, max_leaf_edge](int triangle_idx, const Vec3i32 &neighbors) {
+        Triangle &triangle = m_triangles[triangle_idx];
+        const Vec3f &a = m_vertices[triangle.verts_idxs[0]].v;
+        const Vec3f &b = m_vertices[triangle.verts_idxs[1]].v;
+        const Vec3f &c = m_vertices[triangle.verts_idxs[2]].v;
+        if (!intersects_region(a, b, c))
+            return;
+
+        if (!triangle.is_split() && longest_edge(triangle) > max_leaf_edge) {
+            split_triangle(triangle_idx, neighbors);
+        }
+        if (m_triangles[triangle_idx].is_split()) {
+            const Triangle &parent = m_triangles[triangle_idx];
+            std::vector<std::pair<int, Vec3i32>> children;
+            children.reserve(size_t(parent.number_of_split_sides() + 1));
+            for (int child_idx = 0; child_idx <= parent.number_of_split_sides(); ++child_idx) {
+                const int child = parent.children[child_idx];
+                children.emplace_back(child, child_neighbors(parent, neighbors, child_idx));
+            }
+            for (const auto &[child, child_neighbors_] : children)
+                paint_triangle(child, child_neighbors_);
+            return;
+        }
+
+        const Vec3f center = (a + b + c) / 3.f;
+        const EnforcerBlockerType state = classify(center);
+        if (state != EnforcerBlockerType::NONE)
+            m_triangles[triangle_idx].set_state(state);
+    };
+
+    for (int triangle_idx = 0; triangle_idx < m_orig_size_indices; ++triangle_idx)
+        paint_triangle(triangle_idx, m_neighbors[triangle_idx]);
+    for (int triangle_idx = 0; triangle_idx < m_orig_size_indices; ++triangle_idx)
+        remove_useless_children(triangle_idx);
+    garbage_collect();
+}
+
 // called by select_patch()->select_triangle()...select_triangle()
 // to decide which sides of the triangle to split and to actually split it calling set_division() and perform_split().
 void TriangleSelector::split_triangle(int facet_idx, const Vec3i32 &neighbors)
@@ -988,7 +1053,7 @@ void TriangleSelector::split_triangle(int facet_idx, const Vec3i32 &neighbors)
 
     // In case the object is non-uniformly scaled, transform the
     // points to world coords.
-    if (! m_cursor->uniform_scaling) {
+    if (m_cursor != nullptr && !m_cursor->uniform_scaling) {
         for (size_t i=0; i<pts.size(); ++i) {
             pts_transformed[i] = m_cursor->trafo * (*pts[i]);
             pts[i] = &pts_transformed[i];

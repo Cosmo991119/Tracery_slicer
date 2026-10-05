@@ -14,8 +14,9 @@
 
 namespace Slic3r::GUI {
 
-// The editable preview stays separate from the original mesh painting. On
-// exit, its coloured patches are published as an independent slicing layer.
+// Stained glass is an automatic multi-material paint brush. Its temporary
+// fragments are baked into the regular per-facet painting before rendering or
+// slicing, never published as a separate model layer.
 class GLGizmoTracery final : public GLGizmoPainterBase
 {
 public:
@@ -23,7 +24,8 @@ public:
 
     bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down) override;
     void render_painter_gizmo() override;
-    // Called by the canvas even after the editor closes.
+    // Kept as harmless compatibility hooks while the canvas no longer needs a
+    // dedicated stained-glass render pass.
     void render_colored_overlay();
     void render_surface_mask();
     int overlay_object_index() const;
@@ -73,7 +75,7 @@ private:
     void rebuild_colored_overlay();
     void render_overlay_geometry(bool mask_only);
     void apply_stained_glass_colors();
-    void publish_tracery_overlay();
+    void bake_fragments_to_mmu_painting();
     bool has_colored_overlay() const;
     void start_display_diagnostics();
     void stop_display_diagnostics();
@@ -114,8 +116,7 @@ private:
     ObjectID m_mask_object_id;
     std::vector<TriangleSelector::TriangleSplittingData> m_mask_data;
     std::vector<OverlayVolume> m_overlay_volumes;
-    // Target colours remain separate from the source mesh; CMYW assignment
-    // publishes only the generated overlay patches.
+    // Target colours are converted to normal virtual-filament paint states.
     std::vector<ColorRGBA> m_fragment_colors;
     std::vector<unsigned int> m_fragment_mixed_filament_ids;
     std::vector<uint64_t> m_stained_mixed_stable_ids;
