@@ -841,6 +841,8 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
             selector->request_update_render_data(true);
         }
         capture_mask_and_generate();
+        apply_stained_glass_colors();
+        m_parent.set_as_dirty();
     }
     ImGui::SameLine();
     m_imgui->text_colored(ImGuiWrapper::COL_WINDOW_BG,
@@ -876,6 +878,16 @@ void GLGizmoTracery::capture_mask_and_generate()
                 m_mask_object_index = int(index);
                 break;
             }
+        }
+    }
+    // Capture the ordinary paint exactly once, before the first generated
+    // result is committed. Subsequent edits must not sample the previous
+    // stained-glass result as if it were the original model colour.
+    if (m_stained_glass_base_paint_data.empty()) {
+        m_stained_glass_base_paint_data.reserve(m_triangle_selectors.size());
+        for (const ModelVolume* volume : model_object->volumes) {
+            if (volume->is_model_part())
+                m_stained_glass_base_paint_data.emplace_back(volume->mmu_segmentation_facets.get_data());
         }
     }
     m_mask_data.clear();
@@ -990,9 +1002,15 @@ void GLGizmoTracery::rebuild_colored_overlay()
         // per ModelVolume. Mirror the same facet sets used by the normal
         // model renderer and use an AABB lookup below to sample the actual
         // source colour at each selected surface position.
-        if (!volume->mmu_segmentation_facets.empty()) {
-            std::vector<indexed_triangle_set> facets_per_color;
+        std::vector<indexed_triangle_set> facets_per_color;
+        if (mesh_idx < m_stained_glass_base_paint_data.size()) {
+            TriangleSelector base_selector(volume->mesh());
+            base_selector.deserialize(m_stained_glass_base_paint_data[mesh_idx], false);
+            base_selector.get_facets(facets_per_color);
+        } else if (!volume->mmu_segmentation_facets.empty()) {
             volume->mmu_segmentation_facets.get_facets(*volume, facets_per_color);
+        }
+        if (!facets_per_color.empty()) {
             for (size_t color_idx = 0; color_idx < facets_per_color.size(); ++color_idx) {
                 if (facets_per_color[color_idx].indices.empty())
                     continue;
@@ -1779,7 +1797,15 @@ void GLGizmoTracery::apply_stained_glass_colors()
         set_display_canvas_probe_phase(m_display_diagnostics_phase);
     });
     if (m_fragment_colors.empty()) {
-        wxMessageBox(_L("Paint an area and generate stained-glass fragments first."), _L("Stained glass"), wxOK | wxICON_INFORMATION);
+        // An empty selector means the user erased the complete glass mask.
+        // Commit the base snapshot so those facets return to their ordinary
+        // paint rather than retaining the last generated leaf states.
+        if (!m_stained_glass_base_paint_data.empty()) {
+            bake_fragments_to_mmu_painting();
+            wxGetApp().sidebar().update_color_mix_panel();
+            wxGetApp().plater()->post_slice_state_change_update();
+            m_parent.set_as_dirty();
+        }
         return;
     }
     PresetBundle* bundle = wxGetApp().preset_bundle;
@@ -1812,8 +1838,8 @@ void GLGizmoTracery::apply_stained_glass_colors()
     MixedFilamentManager projected_manager = mixed_manager;
     projected_manager.auto_generate(projected_colours);
     if (projected_colours.size() > MAXIMUM_EXTRUDER_NUMBER ||
-        projected_manager.total_filaments(projected_colours.size()) + 4 > MAXIMUM_FILAMENT_NUMBER) {
-        wxMessageBox(_L("There are not enough slots for the original colours, CMYW ingredients and stained-glass recipes."),
+        projected_manager.total_filaments(projected_colours.size()) > MAXIMUM_FILAMENT_NUMBER) {
+        wxMessageBox(_L("There are not enough slots for the original colours and CMYW ingredients."),
             _L("Stained glass"), wxOK | wxICON_WARNING);
         return;
     }
@@ -1842,12 +1868,9 @@ void GLGizmoTracery::apply_stained_glass_colors()
         std::vector<unsigned int>(cmyw_ids.begin(), cmyw_ids.end()));
 
     const size_t available_mixed = MAXIMUM_FILAMENT_NUMBER - mixed_manager.total_filaments(colour_option->values.size());
-    const size_t palette_budget = std::min<size_t>(24, available_mixed);
-    if (palette_budget < 4) {
-        wxMessageBox(_L("Not enough mixed-filament slots for the stained-glass colours."),
-            _L("Stained glass"), wxOK | wxICON_WARNING);
-        return;
-    }
+    // A palette entry may resolve to an existing CMYW recipe, so do not cap
+    // the candidates by free slots before recipe de-duplication.
+    constexpr size_t palette_budget = 24;
 
     // Keep the established publishing path: it owns the virtual-filament
     // budget, creates valid recipe rows and maps their returned IDs to model
@@ -1900,8 +1923,9 @@ void GLGizmoTracery::apply_stained_glass_colors()
         palette_preview_colours.emplace_back(colour.colour);
     const std::vector<wxColour> target_colours = palette_preview_colours;
 
+    constexpr size_t no_new_row = size_t(-1);
     std::vector<MixedFilamentBatchEntry> new_rows;
-    std::vector<size_t> target_row_indices(target_colours.size(), size_t(-1));
+    std::vector<size_t> target_row_indices(target_colours.size(), no_new_row);
     std::map<std::string, size_t> recipe_rows;
     std::map<std::string, unsigned int> existing_recipe_ids;
     // This is a live paint brush, not an export operation: later strokes must
@@ -1959,8 +1983,14 @@ void GLGizmoTracery::apply_stained_glass_colors()
         new_rows.emplace_back(std::move(entry));
     }
 
-    if (new_rows.size() > available_mixed ||
-        std::any_of(target_row_indices.begin(), target_row_indices.end(), [](size_t row) { return row == size_t(-1); })) {
+    bool has_unresolved_recipe = false;
+    for (size_t index = 0; index < target_row_indices.size(); ++index) {
+        if (palette_filament_ids[index] == 0 && target_row_indices[index] == no_new_row) {
+            has_unresolved_recipe = true;
+            break;
+        }
+    }
+    if (new_rows.size() > available_mixed || has_unresolved_recipe) {
         wxMessageBox(_L("Unable to make CMYW recipes for every model and stained-glass colour."),
             _L("Stained glass"), wxOK | wxICON_WARNING);
         return;
@@ -1969,8 +1999,13 @@ void GLGizmoTracery::apply_stained_glass_colors()
     mixed_manager.add_batch_custom_filaments(new_rows, colour_option->values, &assigned_ids);
     for (size_t index = 0; index < candidates.size(); ++index) {
         const size_t row = target_row_indices[index];
-        if (palette_filament_ids[index] == 0 && row != size_t(-1) && row < assigned_ids.size())
+        if (palette_filament_ids[index] == 0 && row != no_new_row && row < assigned_ids.size())
             palette_filament_ids[index] = assigned_ids[row];
+    }
+    if (std::any_of(palette_filament_ids.begin(), palette_filament_ids.end(), [](unsigned int id) { return id == 0; })) {
+        wxMessageBox(_L("Unable to assign a CMYW recipe to every stained-glass colour."),
+            _L("Stained glass"), wxOK | wxICON_WARNING);
+        return;
     }
     m_fragment_mixed_filament_ids.resize(fragment_palette.size(), 0);
     for (size_t fragment = 0; fragment < fragment_palette.size(); ++fragment) {
@@ -2037,23 +2072,29 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting()
                 generated.push_back({ filament, std::make_unique<AABBMesh>(fragment.surface) });
             }
         }
-        if (!generated.empty()) {
+        const bool has_base_paint = volume_index < m_stained_glass_base_paint_data.size();
+        if (has_base_paint || !generated.empty()) {
             TriangleSelector selector(volume->mesh());
-            selector.deserialize(volume->mmu_segmentation_facets.get_data(), false);
-            const float max_leaf_edge = std::clamp((6.5f - 4.0f * m_fragment_density) * 0.08f, 0.18f, 0.55f);
-            selector.paint_generated(region, max_leaf_edge, [&generated](const Vec3f &point) {
-                constexpr double surface_epsilon_sq = 1e-8;
-                double nearest = std::numeric_limits<double>::max();
-                unsigned int filament = 0;
-                for (const GeneratedPaint &paint : generated) {
-                    const double distance = paint.surface->squared_distance(point.cast<double>());
-                    if (distance < nearest) {
-                        nearest = distance;
-                        filament = paint.filament_id;
+            if (has_base_paint)
+                selector.deserialize(m_stained_glass_base_paint_data[volume_index], false);
+            else
+                selector.deserialize(volume->mmu_segmentation_facets.get_data(), false);
+            if (!generated.empty()) {
+                const float max_leaf_edge = std::clamp((6.5f - 4.0f * m_fragment_density) * 0.08f, 0.18f, 0.55f);
+                selector.paint_generated(region, max_leaf_edge, [&generated](const Vec3f &point) {
+                    constexpr double surface_epsilon_sq = 1e-8;
+                    double nearest = std::numeric_limits<double>::max();
+                    unsigned int filament = 0;
+                    for (const GeneratedPaint &paint : generated) {
+                        const double distance = paint.surface->squared_distance(point.cast<double>());
+                        if (distance < nearest) {
+                            nearest = distance;
+                            filament = paint.filament_id;
+                        }
                     }
-                }
-                return nearest <= surface_epsilon_sq ? EnforcerBlockerType(filament) : EnforcerBlockerType::NONE;
-            });
+                    return nearest <= surface_epsilon_sq ? EnforcerBlockerType(filament) : EnforcerBlockerType::NONE;
+                });
+            }
             updated |= volume->mmu_segmentation_facets.set(selector);
         }
         // New edits are normal paint only. Clear a legacy overlay when this
@@ -2103,6 +2144,7 @@ void GLGizmoTracery::update_from_model_object(bool)
     }
     if (!restore_mask) {
         m_mask_data.clear();
+        m_stained_glass_base_paint_data.clear();
         m_overlay_volumes.clear();
         m_overlay_object_id = ObjectID();
         m_mask_object_index = -1;
@@ -2152,7 +2194,7 @@ void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
 {
     record_display_diagnostic_state("load_begin");
     GLGizmoPainterBase::on_load(ar);
-    ar(m_mask_object_id, m_mask_data, m_fragment_density, m_refraction_strength);
+    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength);
     m_overlay_volumes.clear();
     m_overlay_object_id = ObjectID();
     record_display_diagnostic_state("load_end");
@@ -2160,7 +2202,7 @@ void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
 
 void GLGizmoTracery::on_save(cereal::BinaryOutputArchive& ar) const
 {
-    ar(m_mask_object_id, m_mask_data, m_fragment_density, m_refraction_strength);
+    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength);
 }
 
 PainterGizmoType GLGizmoTracery::get_painter_type() const
