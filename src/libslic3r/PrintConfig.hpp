@@ -1438,7 +1438,6 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloat,              mixed_filament_surface_indentation))
     ((ConfigOptionBool,               mixed_filament_region_collapse))
     ((ConfigOptionString,             mixed_filament_definitions))
-    ((ConfigOptionString,             stained_glass_color_routes))
     ((ConfigOptionFloat,              dithering_z_step_size))
     ((ConfigOptionBool,               dithering_local_z_mode))
     ((ConfigOptionBool,               dithering_local_z_whole_objects))

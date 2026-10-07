@@ -795,37 +795,23 @@ private:
     friend class ModelVolume;
 };
 
-// Generated stained-glass patches are independent of the source triangle
-// painting, so clearing the effect never destroys the model's original colour.
-struct TraceryPatch {
+// Binary-model compatibility payload. It only consumes the retired stained
+// glass section while loading older ordinary projects; it is never attached to
+// a ModelVolume or used for rendering, slicing, or preserving old data in new saves.
+struct RetiredStainedGlassPatch {
     unsigned int filament_id = 0;
     indexed_triangle_set surface;
 
     template<class Archive> void serialize(Archive &ar) { ar(filament_id, surface.vertices, surface.indices); }
 };
 
-class TraceryAnnotation final : public ObjectWithTimestamp {
+class RetiredStainedGlassPayload final : public ObjectWithTimestamp {
 public:
-    TraceryAnnotation() = default;
-    explicit TraceryAnnotation(int) : ObjectWithTimestamp(-1) {}
-    std::vector<TraceryPatch> patches;
-
-    bool empty() const { return patches.empty(); }
-    void set(std::vector<TraceryPatch> value) { patches = std::move(value); touch(); }
-    void reset() { if (!patches.empty()) { patches.clear(); touch(); } }
-    void assign(const TraceryAnnotation &rhs) {
-        if (!timestamp_matches(rhs)) { patches = rhs.patches; copy_timestamp(rhs); }
-    }
-    indexed_triangle_set facets(unsigned int filament_id) const {
-        indexed_triangle_set result;
-        for (const TraceryPatch &patch : patches)
-            if (patch.filament_id == filament_id)
-                its_merge(result, patch.surface);
-        return result;
-    }
+    RetiredStainedGlassPayload() = default;
+    explicit RetiredStainedGlassPayload(int) : ObjectWithTimestamp(-1) {}
+    std::vector<RetiredStainedGlassPatch> patches;
 
 private:
-    friend class ModelVolume;
     friend class cereal::access;
     template<class Archive> void serialize(Archive &ar) {
         ar(cereal::base_class<ObjectWithTimestamp>(this), patches);
@@ -917,8 +903,6 @@ public:
 
     // List of mesh facets painted for MMU segmentation.
     FacetsAnnotation    mmu_segmentation_facets;
-
-    TraceryAnnotation   tracery_facets;
 
     // List of mesh facets painted for fuzzy skin.
     FacetsAnnotation    fuzzy_skin_facets;
@@ -1047,7 +1031,6 @@ public:
         this->supported_facets.set_new_unique_id();
         this->seam_facets.set_new_unique_id();
         this->mmu_segmentation_facets.set_new_unique_id();
-        this->tracery_facets.set_new_unique_id();
         this->fuzzy_skin_facets.set_new_unique_id();
     }
 
@@ -1150,7 +1133,6 @@ private:
         name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
-        tracery_facets(other.tracery_facets),
         fuzzy_skin_facets(other.fuzzy_skin_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
     {
 		assert(this->id().valid()); 
@@ -1211,7 +1193,7 @@ private:
 	friend class cereal::access;
 	friend class UndoRedo::StackImpl;
 	// Used for deserialization, therefore no IDs are allocated.
-	ModelVolume() : ObjectBase(-1), config(-1), supported_facets(-1), seam_facets(-1), mmu_segmentation_facets(-1), tracery_facets(-1), fuzzy_skin_facets(-1), object(nullptr) {
+	ModelVolume() : ObjectBase(-1), config(-1), supported_facets(-1), seam_facets(-1), mmu_segmentation_facets(-1), fuzzy_skin_facets(-1), object(nullptr) {
 		assert(this->id().invalid());
         assert(this->config.id().invalid());
         assert(this->supported_facets.id().invalid());
@@ -1235,9 +1217,9 @@ private:
         t = mmu_segmentation_facets.timestamp();
         cereal::load_by_value(ar, mmu_segmentation_facets);
         mesh_changed |= t != mmu_segmentation_facets.timestamp();
-        t = tracery_facets.timestamp();
-        cereal::load_by_value(ar, tracery_facets);
-        mesh_changed |= t != tracery_facets.timestamp();
+        RetiredStainedGlassPayload retired_stained_glass(-1);
+        cereal::load_by_value(ar, retired_stained_glass);
+        t = fuzzy_skin_facets.timestamp();
         cereal::load_by_value(ar, fuzzy_skin_facets);
         mesh_changed |= t != fuzzy_skin_facets.timestamp();
         cereal::load_by_value(ar, config);
@@ -1260,7 +1242,8 @@ private:
         cereal::save_by_value(ar, supported_facets);
         cereal::save_by_value(ar, seam_facets);
         cereal::save_by_value(ar, mmu_segmentation_facets);
-        cereal::save_by_value(ar, tracery_facets);
+        RetiredStainedGlassPayload retired_stained_glass(-1);
+        cereal::save_by_value(ar, retired_stained_glass);
         cereal::save_by_value(ar, fuzzy_skin_facets);
         cereal::save_by_value(ar, config);
         cereal::save(ar, text_configuration);

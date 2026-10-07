@@ -588,97 +588,6 @@ bool bbs_is_valid_object_type(const std::string& type)
 
 namespace Slic3r {
 
-static constexpr const char *TRACERY_3MF_FILE = "Metadata/stained_glass.bin";
-
-template<class T> static void tracery_write(std::string &out, const T &value)
-{
-    out.append(reinterpret_cast<const char *>(&value), sizeof(T));
-}
-
-template<class T> static bool tracery_read(const char *&pos, const char *end, T &value)
-{
-    if (size_t(end - pos) < sizeof(T)) return false;
-    std::memcpy(&value, pos, sizeof(T));
-    pos += sizeof(T);
-    return true;
-}
-
-static bool save_tracery(mz_zip_archive &archive, const Model &model)
-{
-    std::string out;
-    const uint32_t magic = 0x31475354; // TSG1
-    uint32_t count = 0;
-    for (const ModelObject *object : model.objects)
-        for (const ModelVolume *volume : object->volumes)
-            count += uint32_t(volume->tracery_facets.patches.size());
-    if (count == 0) return true;
-    tracery_write(out, magic);
-    tracery_write(out, count);
-    for (uint32_t object_id = 0; object_id < model.objects.size(); ++object_id)
-        for (uint32_t volume_id = 0; volume_id < model.objects[object_id]->volumes.size(); ++volume_id)
-            for (const TraceryPatch &patch : model.objects[object_id]->volumes[volume_id]->tracery_facets.patches) {
-                const uint32_t vertex_count = uint32_t(patch.surface.vertices.size());
-                const uint32_t face_count = uint32_t(patch.surface.indices.size());
-                tracery_write(out, object_id);
-                tracery_write(out, volume_id);
-                tracery_write(out, patch.filament_id);
-                tracery_write(out, vertex_count);
-                tracery_write(out, face_count);
-                for (const Vec3f &vertex : patch.surface.vertices)
-                    for (int axis = 0; axis < 3; ++axis)
-                        tracery_write(out, vertex[axis]);
-                for (const Vec3i32 &face : patch.surface.indices)
-                    for (int axis = 0; axis < 3; ++axis)
-                        tracery_write(out, face[axis]);
-            }
-    return mz_zip_writer_add_mem(&archive, TRACERY_3MF_FILE, out.data(), out.size(), MZ_DEFAULT_COMPRESSION) != 0;
-}
-
-static bool load_tracery(mz_zip_archive &archive, Model &model)
-{
-    const int file = mz_zip_reader_locate_file(&archive, TRACERY_3MF_FILE, nullptr, 0);
-    if (file < 0) return true;
-    mz_zip_archive_file_stat stat;
-    if (!mz_zip_reader_file_stat(&archive, file, &stat) || stat.m_uncomp_size > 128 * 1024 * 1024)
-        return false;
-    std::string data(size_t(stat.m_uncomp_size), '\0');
-    if (!mz_zip_reader_extract_to_mem(&archive, file, data.data(), data.size(), 0))
-        return false;
-    const char *pos = data.data(), *end = pos + data.size();
-    uint32_t magic = 0, count = 0;
-    if (!tracery_read(pos, end, magic) || magic != 0x31475354 ||
-        !tracery_read(pos, end, count) || count > 65536)
-        return false;
-    std::map<std::pair<uint32_t, uint32_t>, std::vector<TraceryPatch>> patches;
-    for (uint32_t record = 0; record < count; ++record) {
-        uint32_t object_id, volume_id, filament_id, vertices, faces;
-        if (!tracery_read(pos, end, object_id) || !tracery_read(pos, end, volume_id) ||
-            !tracery_read(pos, end, filament_id) || !tracery_read(pos, end, vertices) ||
-            !tracery_read(pos, end, faces) || vertices > 2000000 || faces > 2000000 ||
-            object_id >= model.objects.size() || volume_id >= model.objects[object_id]->volumes.size() ||
-            size_t(end - pos) < 12ull * (vertices + faces))
-            return false;
-        TraceryPatch patch;
-        patch.filament_id = filament_id;
-        patch.surface.vertices.resize(vertices);
-        patch.surface.indices.resize(faces);
-        for (Vec3f &vertex : patch.surface.vertices)
-            for (int axis = 0; axis < 3; ++axis)
-                tracery_read(pos, end, vertex[axis]);
-        for (Vec3i32 &face : patch.surface.indices)
-            for (int axis = 0; axis < 3; ++axis)
-                tracery_read(pos, end, face[axis]);
-        for (const Vec3i32 &face : patch.surface.indices)
-            for (int axis = 0; axis < 3; ++axis)
-                if (face[axis] < 0 || uint32_t(face[axis]) >= vertices)
-                    return false;
-        patches[{object_id, volume_id}].emplace_back(std::move(patch));
-    }
-    for (auto &[id, value] : patches)
-        model.objects[id.first]->volumes[id.second]->tracery_facets.set(std::move(value));
-    return true;
-}
-
 static size_t physical_filament_count_from_project_config(const DynamicPrintConfig &config)
 {
     for (const char* key : {"filament_colour", "filament_settings_id",
@@ -2008,10 +1917,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
         }
 
-        if (m_load_model && !load_tracery(archive, model)) {
-            add_error("Invalid stained-glass layer in archive");
-            return false;
-        }
         lock.close();
 
         if (!m_is_bbl_3mf) {
@@ -6277,11 +6182,6 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_model_config_file_to_archive failed\n");
             return false;
         }
-        if (!save_tracery(archive, model)) {
-            add_error("Unable to save stained-glass layer");
-            return false;
-        }
-
         if (!_add_cut_information_file_to_archive(archive, model)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format(", _add_cut_information_file_to_archive failed\n");
             return false;

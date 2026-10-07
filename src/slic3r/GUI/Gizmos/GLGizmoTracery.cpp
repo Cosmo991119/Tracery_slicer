@@ -347,8 +347,8 @@ std::string GLGizmoTracery::on_get_name() const
 
 void GLGizmoTracery::render_painter_gizmo()
 {
-    // The canvas renders the stained-glass replacement before the ordinary
-    // model pass. Only the editing aids belong in this later painter pass.
+    // Generated colours are baked into normal MMU paint before this pass.
+    // Only editing aids are rendered here.
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glEnable(GL_DEPTH_TEST));
     m_c->object_clipper()->render_cut();
@@ -356,13 +356,6 @@ void GLGizmoTracery::render_painter_gizmo()
     if (m_paint_mode == PaintMode::SURFACE)
         render_cursor();
     glsafe(::glDisable(GL_BLEND));
-}
-
-bool GLGizmoTracery::has_colored_overlay() const
-{
-    return std::any_of(m_overlay_volumes.cbegin(), m_overlay_volumes.cend(), [](const OverlayVolume& volume) {
-        return !volume.fragments.empty();
-    });
 }
 
 void GLGizmoTracery::start_display_diagnostics()
@@ -374,7 +367,7 @@ void GLGizmoTracery::start_display_diagnostics()
         std::filesystem::create_directories(m_display_diagnostics_dir);
         std::ofstream readme(m_display_diagnostics_dir / "README.txt", std::ios::binary);
         readme << "Display diagnostics for stained glass. Normal rendering is not changed.\n"
-               << "events.tsv records model/overlay identity, fragment counts and rendering decisions.\n"
+               << "events.tsv records model/paint identity, fragment counts and rendering decisions.\n"
                << "*_mask.png is the stencil buffer immediately after the selected-surface pass.\n"
                << "*_glass.png is the framebuffer after glass, before the source model is drawn.\n"
                << "*_final.png is the framebuffer after the source model is drawn.\n"
@@ -483,21 +476,14 @@ void GLGizmoTracery::record_display_diagnostic_state(const char* event, const st
 
     const Model* model = m_parent.get_model();
     size_t fragments = 0;
-    size_t masks = 0;
-    for (const OverlayVolume& volume : m_overlay_volumes) {
-        fragments += volume.fragments.size();
-        masks += volume.mask_model != nullptr ? 1 : 0;
-    }
-    size_t saved_patches = 0;
+    for (const auto& volume : m_generated_fragments)
+        fragments += volume.size();
     std::string object_ids;
     if (model != nullptr) {
         for (size_t index = 0; index < model->objects.size(); ++index) {
             const ModelObject* object = model->objects[index];
             if (!object_ids.empty()) object_ids += ',';
             object_ids += std::to_string(object->id().id);
-            if (int(index) == m_mask_object_index)
-                for (const ModelVolume* volume : object->volumes)
-                    saved_patches += volume->tracery_facets.patches.size();
         }
     }
     const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -507,15 +493,11 @@ void GLGizmoTracery::record_display_diagnostic_state(const char* event, const st
         << "\tediting=" << (m_state == On)
         << "\tmask_id=" << m_mask_object_id.id
         << "\tmask_index=" << m_mask_object_index
-        << "\toverlay_id=" << m_overlay_object_id.id
         << "\tobject_ids=" << object_ids
-        << "\tlookup=" << overlay_object_index()
         << "\tmask_entries=" << m_mask_data.size()
         << "\tlive_selectors=" << m_triangle_selectors.size()
-        << "\toverlay_volumes=" << m_overlay_volumes.size()
+        << "\tgenerated_volumes=" << m_generated_fragments.size()
         << "\tfragments=" << fragments
-        << "\tmask_models=" << masks
-        << "\tsaved_patches=" << saved_patches
         << "\tfragment_colours=" << m_fragment_colors.size()
         << "\tmixed_ids=" << m_fragment_mixed_filament_ids.size() << '\n';
 }
@@ -580,124 +562,6 @@ void GLGizmoTracery::capture_display_diagnostic_frame(const char* stage, bool st
     const std::filesystem::path path = m_display_diagnostics_dir / (key + ".png");
     record_display_diagnostic_state(image.SaveFile(wxString(path.wstring()), wxBITMAP_TYPE_PNG) ?
         "capture_saved" : "capture_failed", key);
-}
-
-int GLGizmoTracery::overlay_object_index() const
-{
-    // Fragment meshes are transient input to the normal paint baker. The
-    // canvas must render the model's regular multi-material paint only.
-    return -1;
-}
-
-void GLGizmoTracery::render_colored_overlay()
-{
-    // Deliberately empty: colours are stored in mmu_segmentation_facets.
-}
-
-void GLGizmoTracery::render_surface_mask()
-{
-    // Deliberately empty: colours are stored in mmu_segmentation_facets.
-}
-
-void GLGizmoTracery::render_overlay_geometry(bool mask_only)
-{
-    const int object_idx = overlay_object_index();
-    if (object_idx < 0)
-        return;
-    const ModelObject* model_object = m_parent.get_model()->objects[size_t(object_idx)];
-
-    auto* shader = wxGetApp().get_shader("gouraud");
-    if (shader == nullptr)
-        return;
-
-    const GLboolean blend_enabled = ::glIsEnabled(GL_BLEND);
-    const GLboolean depth_test_enabled = ::glIsEnabled(GL_DEPTH_TEST);
-    const GLboolean cull_face_enabled = ::glIsEnabled(GL_CULL_FACE);
-    const GLboolean polygon_offset_enabled = ::glIsEnabled(GL_POLYGON_OFFSET_FILL);
-    GLboolean depth_write_enabled = GL_TRUE;
-    GLint depth_function = GL_LESS;
-    GLfloat polygon_offset_factor = 0.0f;
-    GLfloat polygon_offset_units = 0.0f;
-    glsafe(::glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_write_enabled));
-    glsafe(::glGetIntegerv(GL_DEPTH_FUNC, &depth_function));
-    glsafe(::glGetFloatv(GL_POLYGON_OFFSET_FACTOR, &polygon_offset_factor));
-    glsafe(::glGetFloatv(GL_POLYGON_OFFSET_UNITS, &polygon_offset_units));
-
-    shader->start_using();
-    ScopeGuard restore_overlay_state([=]() {
-        shader->stop_using();
-        glsafe(::glDepthMask(depth_write_enabled));
-        glsafe(::glDepthFunc(static_cast<GLenum>(depth_function)));
-        glsafe(::glPolygonOffset(polygon_offset_factor, polygon_offset_units));
-        glsafe(blend_enabled == GL_TRUE ? ::glEnable(GL_BLEND) : ::glDisable(GL_BLEND));
-        glsafe(depth_test_enabled == GL_TRUE ? ::glEnable(GL_DEPTH_TEST) : ::glDisable(GL_DEPTH_TEST));
-        glsafe(cull_face_enabled == GL_TRUE ? ::glEnable(GL_CULL_FACE) : ::glDisable(GL_CULL_FACE));
-        glsafe(polygon_offset_enabled == GL_TRUE ? ::glEnable(GL_POLYGON_OFFSET_FILL) : ::glDisable(GL_POLYGON_OFFSET_FILL));
-    });
-    const Camera& camera = wxGetApp().plater()->get_camera();
-    // The mask is made from the painted selection, not from the tessellated
-    // shards. It therefore remains stable when mixed-filament colours refresh
-    // the original model's independent MMU display mesh.
-    glsafe(::glDisable(GL_BLEND));
-    glsafe(::glEnable(GL_DEPTH_TEST));
-    glsafe(::glDepthFunc(GL_LEQUAL));
-    glsafe(::glDepthMask(mask_only ? GL_FALSE : GL_TRUE));
-    glsafe(::glEnable(GL_POLYGON_OFFSET_FILL));
-    const float depth_bias = mask_only ? -4.0f : (m_diagnostic_strong_depth_bias ? -16.0f : -8.0f);
-    glsafe(::glPolygonOffset(depth_bias, depth_bias));
-    glsafe(::glDisable(GL_CULL_FACE));
-
-    const GLVolumeCollection& displayed_volumes = m_parent.get_volumes();
-    shader->set_uniform("z_range", displayed_volumes.get_z_range());
-    shader->set_uniform("clipping_plane", displayed_volumes.get_clipping_plane());
-    shader->set_uniform("use_color_clip_plane", false);
-    shader->set_uniform("slope.actived", false);
-    shader->set_uniform("print_volume.type", -1);
-#if ENABLE_ENVIRONMENT_MAP
-    shader->set_uniform("use_environment_tex", false);
-#endif
-
-    // The object model is updated after a drag finishes, but the canvas
-    // volume carries the live transformation while a move/rotate/scale is in
-    // progress. Map every model part to the overlay mesh created for it, then
-    // render through that live GLVolume transformation.
-    std::vector<int> overlay_mesh_for_volume(model_object->volumes.size(), -1);
-    for (size_t volume_idx = 0, mesh_idx = 0; volume_idx < model_object->volumes.size(); ++volume_idx) {
-        if (!model_object->volumes[volume_idx]->is_model_part())
-            continue;
-        if (mesh_idx >= m_overlay_volumes.size())
-            break;
-        overlay_mesh_for_volume[volume_idx] = int(mesh_idx++);
-    }
-
-    for (const GLVolume* display_volume : m_parent.get_volumes().volumes) {
-        if (!display_volume->is_active || display_volume->composite_id.object_id != object_idx)
-            continue;
-        const int volume_idx = display_volume->composite_id.volume_id;
-        if (volume_idx < 0 || size_t(volume_idx) >= overlay_mesh_for_volume.size())
-            continue;
-        const int overlay_mesh_idx = overlay_mesh_for_volume[size_t(volume_idx)];
-        if (overlay_mesh_idx < 0)
-            continue;
-
-        const Transform3d trafo_matrix = display_volume->world_matrix();
-        shader->set_uniform("view_model_matrix", camera.get_view_matrix() * trafo_matrix);
-        shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-        shader->set_uniform("volume_world_matrix", trafo_matrix);
-        const Matrix3d view_normal_matrix = camera.get_view_matrix().matrix().block(0, 0, 3, 3) *
-            trafo_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
-        shader->set_uniform("view_normal_matrix", view_normal_matrix);
-
-        const OverlayVolume& overlay_volume = m_overlay_volumes[size_t(overlay_mesh_idx)];
-        if (mask_only) {
-            if (overlay_volume.mask_model != nullptr)
-                overlay_volume.mask_model->render();
-        } else {
-            for (const OverlayFragment& fragment : overlay_volume.fragments)
-                fragment.model->render();
-        }
-    }
-
 }
 
 void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit)
@@ -807,7 +671,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
     m_imgui->bbl_slider_float_style("##tracery_refraction", &m_refraction_strength, 0.f, 1.f, "%.0f%%", 1.0f, true);
     const bool refraction_edit_finished = ImGui::IsItemDeactivatedAfterEdit();
     if (density_edit_finished || refraction_edit_finished) {
-        rebuild_colored_overlay();
+        generate_paint_plan();
         apply_stained_glass_colors();
         m_parent.set_as_dirty();
     }
@@ -816,7 +680,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
     if (m_imgui->button(_L("Regenerate fragments"))) {
         m_regeneration_requested = true;
         ++m_regeneration_version;
-        rebuild_colored_overlay();
+        generate_paint_plan();
         apply_stained_glass_colors();
         m_parent.set_as_dirty();
     }
@@ -894,15 +758,15 @@ void GLGizmoTracery::capture_mask_and_generate()
     m_mask_data.reserve(m_triangle_selectors.size());
     for (const std::unique_ptr<TriangleSelectorGUI>& selector : m_triangle_selectors)
         m_mask_data.emplace_back(selector->serialize());
-    rebuild_colored_overlay();
+    generate_paint_plan();
 }
 
-void GLGizmoTracery::rebuild_colored_overlay()
+void GLGizmoTracery::generate_paint_plan()
 {
-    record_display_diagnostic_state("rebuild_begin");
-    ScopeGuard log_rebuild_end([this]() { record_display_diagnostic_state("rebuild_end"); });
+    record_display_diagnostic_state("generation_begin");
+    ScopeGuard log_generation_end([this]() { record_display_diagnostic_state("generation_end"); });
     const bool export_diagnostics = std::exchange(m_export_next_generation, false);
-    m_overlay_volumes.clear();
+    m_generated_fragments.clear();
     m_fragment_colors.clear();
     m_fragment_mixed_filament_ids.clear();
     const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
@@ -914,8 +778,7 @@ void GLGizmoTracery::rebuild_colored_overlay()
         return;
     }
 
-    m_overlay_object_id = model_object->id();
-    m_overlay_volumes.resize(m_triangle_selectors.size());
+    m_generated_fragments.resize(m_triangle_selectors.size());
 
     struct SurfaceTriangle {
         size_t mesh_idx;
@@ -989,11 +852,6 @@ void GLGizmoTracery::rebuild_colored_overlay()
             break;
 
         const indexed_triangle_set facets = m_triangle_selectors[mesh_idx]->get_facets_strict(EnforcerBlockerType::ENFORCER);
-        if (!facets.indices.empty()) {
-            auto mask = std::make_unique<GLModel>();
-            mask->init_from(facets);
-            m_overlay_volumes[mesh_idx].mask_model = std::move(mask);
-        }
         const Transform3d& volume_transform = volume->get_matrix();
         volume_transforms.emplace_back(volume_transform);
         const ColorRGBA source_color = volume_source_color(int(volume_idx));
@@ -1319,10 +1177,17 @@ void GLGizmoTracery::rebuild_colored_overlay()
         return;
     }
 
-    std::vector<std::vector<GLModel::Geometry>> geometry(m_triangle_selectors.size(), std::vector<GLModel::Geometry>(fragment_count));
-    for (std::vector<GLModel::Geometry>& per_volume : geometry)
-        for (GLModel::Geometry& data : per_volume)
-            data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
+    struct CpuGeometry {
+        indexed_triangle_set surface;
+
+        bool empty() const { return surface.indices.empty(); }
+        void add_vertex(const Vec3f& vertex) { surface.vertices.emplace_back(vertex); }
+        void add_triangle(unsigned int first, unsigned int second, unsigned int third)
+        {
+            surface.indices.emplace_back(stl_triangle_vertex_indices{int(first), int(second), int(third)});
+        }
+    };
+    std::vector<std::vector<CpuGeometry>> geometry(m_triangle_selectors.size(), std::vector<CpuGeometry>(fragment_count));
 
     const auto warped_position = [target_edge](const Vec3f& point) {
         // One continuous field is shared by every seed. Unlike per-seed
@@ -1447,10 +1312,10 @@ void GLGizmoTracery::rebuild_colored_overlay()
             }
             if (polygon.size() < 3)
                 continue;
-            GLModel::Geometry& data = geometry[triangle.mesh_idx][candidate];
-            const unsigned int first = unsigned(data.vertices_count());
+            CpuGeometry& data = geometry[triangle.mesh_idx][candidate];
+            const unsigned int first = unsigned(data.surface.vertices.size());
             for (const ClipVertex& vertex : polygon)
-                data.add_vertex(vertex.local, triangle.normal);
+                data.add_vertex(vertex.local);
             for (unsigned int index = 1; index + 1 < polygon.size(); ++index)
                 data.add_triangle(first, first + index, first + index + 1);
         }
@@ -1644,15 +1509,12 @@ void GLGizmoTracery::rebuild_colored_overlay()
     }
 
     m_fragment_colors.resize(fragment_count);
-    m_overlay_volumes.resize(m_triangle_selectors.size());
     for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
         const TraceryEditorRecipe& recipe = editor_palette[selected_recipe[fragment]];
         const wxColour& preview = recipe.preview;
         const ColorRGBA color(float(preview.Red()) / 255.0f, float(preview.Green()) / 255.0f,
             float(preview.Blue()) / 255.0f, 1.0f);
         m_fragment_colors[fragment] = color;
-        for (std::vector<GLModel::Geometry>& per_volume : geometry)
-            per_volume[fragment].color = color;
     }
 
     std::filesystem::path diagnostic_dir;
@@ -1677,20 +1539,22 @@ void GLGizmoTracery::rebuild_colored_overlay()
 
             size_t clipped_faces = 0;
             for (const auto& per_volume : geometry)
-                for (const GLModel::Geometry& data : per_volume)
-                    clipped_faces += data.indices_count() / 3;
+                for (const CpuGeometry& data : per_volume)
+                    clipped_faces += data.surface.indices.size();
             write_tracery_diagnostic_ply(diagnostic_dir / "02_clipped_geometry.ply", clipped_faces,
                 [&](const auto& emit) {
                     for (size_t volume = 0; volume < geometry.size(); ++volume)
-                        for (const GLModel::Geometry& data : geometry[volume])
-                            for (size_t index = 0; index + 2 < data.indices_count(); index += 3)
+                        for (size_t fragment = 0; fragment < geometry[volume].size(); ++fragment) {
+                            const CpuGeometry& data = geometry[volume][fragment];
+                            for (const stl_triangle_vertex_indices& face : data.surface.indices)
                                 for (size_t corner = 0; corner < 3; ++corner) {
-                                    const unsigned int vertex = data.indices[index + corner];
                                     Vec3f local = Vec3f::Zero();
-                                    if (vertex < data.vertices_count())
-                                        local = data.extract_position_3(vertex);
-                                    emit((volume_transforms[volume] * local.cast<double>()).cast<float>(), data.color);
+                                    if (face[corner] < data.surface.vertices.size())
+                                        local = data.surface.vertices[face[corner]];
+                                    emit((volume_transforms[volume] * local.cast<double>()).cast<float>(),
+                                         m_fragment_colors[fragment]);
                                 }
+                        }
                 });
 
             diagnostic_stats.open(diagnostic_dir / "mesh_comparison.csv", std::ios::binary);
@@ -1713,26 +1577,13 @@ void GLGizmoTracery::rebuild_colored_overlay()
 
     for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
         for (size_t volume = 0; volume < geometry.size(); ++volume) {
-            GLModel::Geometry& data = geometry[volume][fragment];
-            if (data.is_empty())
+            CpuGeometry& data = geometry[volume][fragment];
+            if (data.empty())
                 continue;
-            indexed_triangle_set surface = data.get_as_indexed_triangle_set();
+            indexed_triangle_set surface = std::move(data.surface);
             if (diagnostic_ready) {
-                size_t invalid_indices = 0;
                 size_t tiny_faces = 0;
-                bool positions_equal = surface.vertices.size() == data.vertices_count();
-                bool indices_equal = surface.indices.size() == data.indices_count() / 3;
-                for (size_t vertex = 0; positions_equal && vertex < surface.vertices.size(); ++vertex)
-                    positions_equal = (surface.vertices[vertex] - data.extract_position_3(vertex)).squaredNorm() == 0.0f;
                 for (size_t face = 0; face < surface.indices.size(); ++face) {
-                    const size_t first = face * 3;
-                    for (size_t corner = 0; corner < 3; ++corner) {
-                        const unsigned int index = data.indices[first + corner];
-                        if (index >= data.vertices_count())
-                            ++invalid_indices;
-                        if (surface.indices[face][corner] != index)
-                            indices_equal = false;
-                    }
                     if (surface.indices[face][0] < surface.vertices.size() &&
                         surface.indices[face][1] < surface.vertices.size() &&
                         surface.indices[face][2] < surface.vertices.size()) {
@@ -1743,26 +1594,23 @@ void GLGizmoTracery::rebuild_colored_overlay()
                             ++tiny_faces;
                     }
                 }
-                diagnostic_stats << volume << ',' << fragment << ',' << data.vertices_count() << ',' << data.indices_count() / 3
-                                 << ',' << surface.vertices.size() << ',' << surface.indices.size() << ',' << invalid_indices
-                                 << ',' << tiny_faces << ',' << positions_equal << ',' << indices_equal << '\n';
+                diagnostic_stats << volume << ',' << fragment << ',' << surface.vertices.size() << ',' << surface.indices.size()
+                                 << ',' << surface.vertices.size() << ',' << surface.indices.size() << ",0," << tiny_faces << ",1,1\n";
             }
-            auto overlay = std::make_unique<GLModel>();
-            overlay->init_from(std::move(data));
-            m_overlay_volumes[volume].fragments.emplace_back(OverlayFragment{ fragment, std::move(overlay), std::move(surface) });
+            m_generated_fragments[volume].emplace_back(GeneratedFragment{ fragment, std::move(surface) });
         }
     }
 
     if (diagnostic_ready) {
         try {
             size_t exported_faces = 0;
-            for (const OverlayVolume& volume : m_overlay_volumes)
-                for (const OverlayFragment& fragment : volume.fragments)
+            for (const auto& volume : m_generated_fragments)
+                for (const GeneratedFragment& fragment : volume)
                     exported_faces += fragment.surface.indices.size();
             write_tracery_diagnostic_ply(diagnostic_dir / "03_exported_surface.ply", exported_faces,
                 [&](const auto& emit) {
-                    for (size_t volume = 0; volume < m_overlay_volumes.size(); ++volume)
-                        for (const OverlayFragment& fragment : m_overlay_volumes[volume].fragments)
+                    for (size_t volume = 0; volume < m_generated_fragments.size(); ++volume)
+                        for (const GeneratedFragment& fragment : m_generated_fragments[volume])
                             for (const stl_triangle_vertex_indices& face : fragment.surface.indices)
                                 for (size_t corner = 0; corner < 3; ++corner) {
                                     Vec3f local = Vec3f::Zero();
@@ -2010,19 +1858,10 @@ void GLGizmoTracery::apply_stained_glass_colors()
     m_fragment_mixed_filament_ids.resize(fragment_palette.size(), 0);
     for (size_t fragment = 0; fragment < fragment_palette.size(); ++fragment) {
         m_fragment_mixed_filament_ids[fragment] = palette_filament_ids[fragment_palette[fragment]];
-        const wxColour& preview = palette_preview_colours[fragment_palette[fragment]];
-        const ColorRGBA preview_colour(float(preview.Red()) / 255.0f, float(preview.Green()) / 255.0f,
-            float(preview.Blue()) / 255.0f, 1.0f);
-        for (OverlayVolume& volume : m_overlay_volumes)
-            for (OverlayFragment& overlay : volume.fragments)
-                if (overlay.fragment_id == fragment)
-                    overlay.model->set_color(preview_colour);
     }
 
     if (auto* definitions = bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
         definitions->value = mixed_manager.serialize_custom_entries();
-    if (auto* routes = bundle->project_config.option<ConfigOptionString>("stained_glass_color_routes"))
-        routes->value.clear();
     bake_fragments_to_mmu_painting();
     wxGetApp().sidebar().update_color_mix_panel();
     wxGetApp().plater()->post_slice_state_change_update();
@@ -2051,8 +1890,8 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting()
         };
         std::vector<GeneratedPaint> generated;
         BoundingBoxf3 region;
-        if (volume_index < m_overlay_volumes.size()) {
-            for (const OverlayFragment &fragment : m_overlay_volumes[volume_index].fragments) {
+        if (volume_index < m_generated_fragments.size()) {
+            for (const GeneratedFragment &fragment : m_generated_fragments[volume_index]) {
                 if (fragment.fragment_id >= m_fragment_mixed_filament_ids.size())
                     continue;
                 const unsigned int filament = m_fragment_mixed_filament_ids[fragment.fragment_id];
@@ -2097,9 +1936,6 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting()
             }
             updated |= volume->mmu_segmentation_facets.set(selector);
         }
-        // New edits are normal paint only. Clear a legacy overlay when this
-        // object is touched so it cannot enter the special render/slice path.
-        volume->tracery_facets.reset();
         ++volume_index;
     }
     if (updated) {
@@ -2110,11 +1946,9 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting()
         m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
         wxGetApp().plater()->notify_filament_usage_changed();
     }
-    // The generated meshes were only classifiers for baking. Keeping none of
-    // them after the commit prevents a later canvas pass from treating glass
-    // as an independent renderable layer.
-    m_overlay_volumes.clear();
-    m_overlay_object_id = ObjectID();
+    // Generated surfaces are CPU-only classifiers; release them immediately
+    // after their colours have been committed to regular MMU paint.
+    m_generated_fragments.clear();
 }
 
 void GLGizmoTracery::update_from_model_object(bool)
@@ -2145,8 +1979,7 @@ void GLGizmoTracery::update_from_model_object(bool)
     if (!restore_mask) {
         m_mask_data.clear();
         m_stained_glass_base_paint_data.clear();
-        m_overlay_volumes.clear();
-        m_overlay_object_id = ObjectID();
+        m_generated_fragments.clear();
         m_mask_object_index = -1;
     }
     m_triangle_selectors.clear();
@@ -2164,16 +1997,10 @@ void GLGizmoTracery::update_from_model_object(bool)
             m_triangle_selectors.back()->deserialize(m_mask_data[selector_idx], false);
         m_triangle_selectors.back()->request_update_render_data();
     }
-    // Leaving the editor clears the paint selectors, not the finished glass
-    // geometry. Reopening the same unchanged object only restores the tools;
-    // it must not generate a different overlay for the same saved mask.
-    const bool can_reuse_overlay = restore_mask && model_object->id() == m_overlay_object_id &&
-        m_overlay_volumes.size() == m_triangle_selectors.size() && has_colored_overlay();
-    if (restore_mask && !m_mask_data.empty() && !can_reuse_overlay)
-        rebuild_colored_overlay();
+    // The finished effect is ordinary MMU paint. Reopening restores only the
+    // editing mask; it never recreates a renderable fragment layer.
     record_display_diagnostic_state("editor_reopen_end",
-        std::string("restore_mask=") + (restore_mask ? "1" : "0") +
-        ",can_reuse_overlay=" + (can_reuse_overlay ? "1" : "0"));
+        std::string("restore_mask=") + (restore_mask ? "1" : "0"));
     m_display_diagnostics_phase = "reentered";
     m_display_diagnostics_last_canvas_state.clear();
     set_display_canvas_probe_phase(m_display_diagnostics_phase);
@@ -2195,8 +2022,7 @@ void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
     record_display_diagnostic_state("load_begin");
     GLGizmoPainterBase::on_load(ar);
     ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength);
-    m_overlay_volumes.clear();
-    m_overlay_object_id = ObjectID();
+    m_generated_fragments.clear();
     record_display_diagnostic_state("load_end");
 }
 

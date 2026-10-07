@@ -23,6 +23,20 @@ SCENARIO("Reading 3mf file", "[3mf]") {
     }
 }
 
+SCENARIO("Reading a pre-stained-glass project", "[3mf]") {
+    // This fixture predates the stained-glass metadata extension and contains
+    // no Metadata/stained_glass.bin entry. Keep it readable while the retired
+    // overlay data path is removed.
+    Model model;
+    DynamicPrintConfig config;
+    ConfigSubstitutionContext ctxt{ ForwardCompatibilitySubstitutionRule::Disable };
+    const std::string path = std::string(TEST_DATA_DIR) + "/test_3mf/Geräte/Büchse.3mf";
+
+    REQUIRE(load_3mf(path.c_str(), config, ctxt, &model, false));
+    REQUIRE_FALSE(model.objects.empty());
+    REQUIRE_FALSE(model.objects.front()->volumes.empty());
+}
+
 SCENARIO("Export+Import geometry to/from 3mf file cycle", "[3mf]") {
     GIVEN("world vertices coordinates before save") {
         // load a model from stl file

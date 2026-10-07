@@ -8537,15 +8537,10 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
     if (GLGizmoTracery::global_display_diagnostics_active() &&
         type == GLVolumeCollection::ERenderType::Opaque) {
         const GLGizmosManager& gizmos = get_gizmos_manager();
-        const int overlay_index = gizmos.tracery_overlay_object_index();
         int active_volumes = 0;
-        int matching_volumes = 0;
         for (const GLVolume* volume : m_volumes.volumes)
-            if (volume->is_active) {
+            if (volume->is_active)
                 ++active_volumes;
-                if (volume->composite_id.object_id == overlay_index)
-                    ++matching_volumes;
-            }
         const bool painter = dynamic_cast<GLGizmoPainterBase*>(gizmos.get_current()) != nullptr;
         const std::string route = painter ?
             (gizmos.get_current_type() == GLGizmosManager::Tracery ? "tracery_painter" : "other_painter") :
@@ -8555,9 +8550,7 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
             ",canvas_type=" + std::to_string(int(m_canvas_type)) +
             ",gizmos_enabled=" + std::to_string(gizmos.is_enabled()) +
             ",current_gizmo=" + std::to_string(int(gizmos.get_current_type())) +
-            ",overlay_index=" + std::to_string(overlay_index) +
             ",active_volumes=" + std::to_string(active_volumes) +
-            ",matching_volumes=" + std::to_string(matching_volumes) +
             ",layers_editing=" + std::to_string(m_layers_editing.is_enabled()) +
             ",volumes_empty=" + std::to_string(m_volumes.empty()));
     }

@@ -1454,7 +1454,7 @@ bool ModelObject::is_seam_painted() const
 bool ModelObject::is_mm_painted() const
 {
     return std::any_of(this->volumes.cbegin(), this->volumes.cend(), [](const ModelVolume *mv) {
-        return mv->is_mm_painted() || !mv->tracery_facets.empty();
+        return mv->is_mm_painted();
     });
 }
 
@@ -1965,7 +1965,6 @@ void ModelObject::convert_units(ModelObjectPtrs& new_objects, ConversionType con
             vol->supported_facets.assign(volume->supported_facets);
             vol->seam_facets.assign(volume->seam_facets);
             vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
-            vol->tracery_facets.assign(volume->tracery_facets);
             vol->fuzzy_skin_facets.assign(volume->fuzzy_skin_facets);
 
             // Perform conversion only if the target "imperial" state is different from the current one.
@@ -2183,7 +2182,6 @@ void ModelObject::split(ModelObjectPtrs* new_objects)
                 if (new_vol->mmu_segmentation_facets.timestamp() == volume->mmu_segmentation_facets.timestamp())
                     new_vol->mmu_segmentation_facets.reset(); // BBS: let next assign take effect
                 new_vol->mmu_segmentation_facets.assign(volume->mmu_segmentation_facets);
-                new_vol->tracery_facets.assign(volume->tracery_facets);
             }
 
             // BBS: clear volume's config, as we already set them into object
@@ -2665,20 +2663,6 @@ void ModelVolume::remap_extruder_ids(size_t extruder_count, const EnforcerBlocke
             break;
         }
     }
-    if (!tracery_facets.empty()) {
-        auto &patches = tracery_facets.patches;
-        bool changed = false;
-        for (TraceryPatch &patch : patches) {
-            const unsigned int old_id = patch.filament_id;
-            const unsigned int next_id = old_id < state_map.size() ? unsigned(state_map[old_id]) : 0;
-            changed |= next_id != old_id;
-            patch.filament_id = next_id;
-        }
-        const auto end = std::remove_if(patches.begin(), patches.end(), [](const TraceryPatch &patch) { return patch.filament_id == 0; });
-        changed |= end != patches.end();
-        patches.erase(end, patches.end());
-        if (changed) tracery_facets.touch();
-    }
 }
 
 void ModelVolume::center_geometry_after_creation(bool update_source_offset)
@@ -2867,7 +2851,6 @@ size_t ModelVolume::split(unsigned int max_extruders)
 
             // BBS: reset facet annotations
             this->mmu_segmentation_facets.reset();
-            this->tracery_facets.reset();
             this->exterior_facets.reset();
             this->supported_facets.reset();
             this->seam_facets.reset();
@@ -2932,7 +2915,6 @@ void ModelVolume::assign_new_unique_ids_recursive()
     supported_facets.set_new_unique_id();
     seam_facets.set_new_unique_id();
     mmu_segmentation_facets.set_new_unique_id();
-    tracery_facets.set_new_unique_id();
     fuzzy_skin_facets.set_new_unique_id();
 }
 
@@ -2969,10 +2951,6 @@ void ModelVolume::mirror(Axis axis)
 void ModelVolume::scale_geometry_after_creation(const Vec3f& versor)
 {
 	const_cast<TriangleMesh*>(m_mesh.get())->scale(versor);
-    for (TraceryPatch &patch : tracery_facets.patches)
-        for (Vec3f &vertex : patch.surface.vertices)
-            vertex = vertex.cwiseProduct(versor);
-    if (!tracery_facets.empty()) tracery_facets.touch();
     if (m_convex_hull->empty())
         //BBS: recompute the convex hull if it is null for previous too small
         this->calculate_convex_hull();
@@ -2984,13 +2962,6 @@ void ModelVolume::transform_this_mesh(const Transform3d &mesh_trafo, bool fix_le
 {
 	TriangleMesh mesh = this->mesh();
 	mesh.transform(mesh_trafo, fix_left_handed);
-    for (TraceryPatch &patch : tracery_facets.patches) {
-        for (Vec3f &vertex : patch.surface.vertices)
-            vertex = (mesh_trafo.cast<float>() * vertex).eval();
-        if (fix_left_handed && mesh_trafo.linear().determinant() < 0.)
-            its_flip_triangles(patch.surface);
-    }
-    if (!tracery_facets.empty()) tracery_facets.touch();
 	this->set_mesh(std::move(mesh));
     TriangleMesh convex_hull = this->get_convex_hull();
     convex_hull.transform(mesh_trafo, fix_left_handed);
@@ -3003,13 +2974,6 @@ void ModelVolume::transform_this_mesh(const Matrix3d &matrix, bool fix_left_hand
 {
 	TriangleMesh mesh = this->mesh();
 	mesh.transform(matrix, fix_left_handed);
-    for (TraceryPatch &patch : tracery_facets.patches) {
-        for (Vec3f &vertex : patch.surface.vertices)
-            vertex = (matrix.cast<float>() * vertex).eval();
-        if (fix_left_handed && matrix.determinant() < 0.)
-            its_flip_triangles(patch.surface);
-    }
-    if (!tracery_facets.empty()) tracery_facets.touch();
 	this->set_mesh(std::move(mesh));
     TriangleMesh convex_hull = this->get_convex_hull();
     convex_hull.transform(matrix, fix_left_handed);
@@ -3823,8 +3787,7 @@ bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObjec
     return model_property_changed(mo, mo_new,
         [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
         [](const ModelVolume &mv_old, const ModelVolume &mv_new){
-            return mv_old.mmu_segmentation_facets.timestamp_matches(mv_new.mmu_segmentation_facets) &&
-                   mv_old.tracery_facets.timestamp_matches(mv_new.tracery_facets);
+            return mv_old.mmu_segmentation_facets.timestamp_matches(mv_new.mmu_segmentation_facets);
         });
 }
 

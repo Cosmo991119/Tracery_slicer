@@ -10,7 +10,6 @@ class ExPolygon;
 class ModelVolume;
 class PrintObject;
 class FacetsAnnotation;
-class TraceryAnnotation;
 
 using ExPolygons = std::vector<ExPolygon>;
 
@@ -35,7 +34,6 @@ struct ModelVolumeFacetsInfo {
     const bool              is_painted;
     // Indicate if the default extruder (TriangleStateType::NONE) should be replaced with the volume extruder.
     const bool              replace_default_extruder;
-    const TraceryAnnotation *tracery = nullptr;
 };
 
 // Returns segmentation based on painting in segmentation gizmos.
@@ -50,7 +48,6 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
 
 // Returns multi-material segmentation based on painting in multi-material segmentation gizmo
 std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);
-std::vector<std::vector<ExPolygons>> stained_glass_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);
 
 // Returns fuzzy skin segmentation based on painting in fuzzy skin segmentation gizmo
 std::vector<std::vector<ExPolygons>> fuzzy_skin_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);

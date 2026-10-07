@@ -83,7 +83,6 @@ static inline void model_volume_list_copy_configs(ModelObject &model_object_dst,
         mv_dst.seam_facets.assign(mv_src.seam_facets);
         assert(mv_dst.mmu_segmentation_facets.id() == mv_src.mmu_segmentation_facets.id());
         mv_dst.mmu_segmentation_facets.assign(mv_src.mmu_segmentation_facets);
-        mv_dst.tracery_facets.assign(mv_src.tracery_facets);
         assert(mv_dst.fuzzy_skin_facets.id() == mv_src.fuzzy_skin_facets.id());
         mv_dst.fuzzy_skin_facets.assign(mv_src.fuzzy_skin_facets);
         //FIXME what to do with the materials?
@@ -737,7 +736,7 @@ static const ModelVolume *root_model_part_for_parent_region(const PrintObjectReg
 static bool mm_paint_applies_to_parent_region(const PrintObjectRegions::LayerRangeRegions &layer_range, int parent_region_id)
 {
     const ModelVolume *root_model_part = root_model_part_for_parent_region(layer_range, parent_region_id);
-    return root_model_part != nullptr && (root_model_part->is_mm_painted() || !root_model_part->tracery_facets.empty());
+    return root_model_part != nullptr && root_model_part->is_mm_painted();
 }
 
 PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &default_or_parent_region_config, const DynamicPrintConfig *layer_range_config, const ModelVolume &volume, size_t num_extruders);
@@ -1013,7 +1012,7 @@ static PrintObjectRegions* generate_print_object_regions(
     }
 
     const bool is_mm_painted = num_extruders > 1 && std::any_of(model_volumes.cbegin(), model_volumes.cend(), [](const ModelVolume *mv) {
-        return mv->is_mm_painted() || !mv->tracery_facets.empty();
+        return mv->is_mm_painted();
     });
     update_volume_bboxes(layer_ranges_regions, out->cached_volume_ids, model_volumes, out->trafo_bboxes, is_mm_painted ? 0.f : std::max(0.f, xy_contour_compensation));
 
@@ -1266,7 +1265,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     new_full_config.option("mixed_filament_surface_indentation", true);
     new_full_config.option("mixed_filament_region_collapse", true);
     new_full_config.option("mixed_filament_definitions", true);
-    new_full_config.option("stained_glass_color_routes", true);
     m_config.option("dithering_z_step_size", true);
     m_config.option("dithering_local_z_mode", true);
     m_config.option("dithering_local_z_whole_objects", true);
@@ -1283,7 +1281,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_config.option("mixed_filament_surface_indentation", true);
     m_config.option("mixed_filament_region_collapse", true);
     m_config.option("mixed_filament_definitions", true);
-    m_config.option("stained_glass_color_routes", true);
     m_default_object_config.option("dithering_z_step_size", true);
     m_default_object_config.option("dithering_local_z_mode", true);
     m_default_object_config.option("dithering_local_z_whole_objects", true);
@@ -1300,7 +1297,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     m_default_object_config.option("mixed_filament_surface_indentation", true);
     m_default_object_config.option("mixed_filament_region_collapse", true);
     m_default_object_config.option("mixed_filament_definitions", true);
-    m_default_object_config.option("stained_glass_color_routes", true);
     // BBS
     int used_filaments = this->extruders(true).size();
 
@@ -1460,86 +1456,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                                                  mixed_height_lower,
                                                  mixed_height_upper,
                                                  mixed_advanced_dither);
-    m_stained_glass_routes.clear();
-    const bool has_stained_glass = std::any_of(model.objects.begin(), model.objects.end(), [](const ModelObject *object) {
-        return std::any_of(object->volumes.begin(), object->volumes.end(), [](const ModelVolume *volume) {
-            return !volume->tracery_facets.empty();
-        });
-    });
-    if (has_stained_glass) {
-        const auto *routes = new_full_config.option<ConfigOptionString>("stained_glass_color_routes");
-        std::map<uint64_t, unsigned int> stable_to_virtual;
-        std::map<uint64_t, const MixedFilament *> stable_to_row;
-        unsigned int virtual_id = static_cast<unsigned int>(num_extruders);
-        for (const MixedFilament &row : m_mixed_filament_mgr.mixed_filaments())
-            if (row.enabled && !row.deleted) {
-                stable_to_virtual[row.stable_id] = ++virtual_id;
-                stable_to_row[row.stable_id] = &row;
-            }
-        std::set<unsigned int> cmyw_ids;
-        std::set<std::string> found_cmyw;
-        for (size_t index = 0; index < physical_filament_colors.size(); ++index) {
-            std::string colour = physical_filament_colors[index];
-            std::transform(colour.begin(), colour.end(), colour.begin(), [](unsigned char c) { return char(std::toupper(c)); });
-            if (colour == "#08ABFB" || colour == "#D93B90" || colour == "#F9ED3D" || colour == "#FFFFFF") {
-                cmyw_ids.insert(unsigned(index + 1));
-                found_cmyw.insert(colour);
-            }
-        }
-        if (found_cmyw.size() != 4)
-            throw std::runtime_error("Stained glass requires all four CMYW printing filaments");
-        const auto is_cmyw_recipe = [&cmyw_ids, num_extruders](const MixedFilament &recipe) {
-            const auto ingredients = MixedFilamentManager::decode_gradient_component_ids(recipe.gradient_component_ids, num_extruders);
-            return recipe.manual_pattern.empty() && !ingredients.empty() &&
-                cmyw_ids.count(recipe.component_a) && cmyw_ids.count(recipe.component_b) &&
-                std::all_of(ingredients.begin(), ingredients.end(), [&cmyw_ids](unsigned int id) { return cmyw_ids.count(id) != 0; });
-        };
-        for (const ModelObject *object : model.objects)
-            for (const ModelVolume *volume : object->volumes)
-                for (const TraceryPatch &patch : volume->tracery_facets.patches) {
-                    const MixedFilament *recipe = m_mixed_filament_mgr.mixed_filament_from_id(patch.filament_id, num_extruders);
-                    if (recipe == nullptr || !is_cmyw_recipe(*recipe))
-                        throw std::runtime_error("A stained-glass fragment is missing its CMYW recipe");
-                }
-        m_stained_glass_routes.resize(virtual_id + 1, 0);
-        size_t begin = 0;
-        while (routes != nullptr && begin < routes->value.size()) {
-            const size_t end = routes->value.find(';', begin);
-            const std::string pair = routes->value.substr(begin, end == std::string::npos ? end : end - begin);
-            const size_t colon = pair.find(':');
-            if (colon == std::string::npos)
-                throw std::runtime_error("Invalid stained-glass colour route");
-            char *tail = nullptr;
-            unsigned int source = 0;
-            if (pair.front() == 'v') {
-                const uint64_t source_stable = std::strtoull(pair.c_str() + 1, &tail, 10);
-                if (tail != pair.c_str() + colon || stable_to_virtual.count(source_stable) == 0)
-                    throw std::runtime_error("Missing original mixed-filament colour");
-                source = stable_to_virtual.at(source_stable);
-            } else {
-                const unsigned long physical = std::strtoul(pair.c_str(), &tail, 10);
-                if (tail != pair.c_str() + colon || physical < 1 || physical > num_extruders)
-                    throw std::runtime_error("Invalid stained-glass source filament");
-                source = static_cast<unsigned int>(physical);
-            }
-            const uint64_t stable_id = std::strtoull(pair.c_str() + colon + 1, &tail, 10);
-            if (*tail != '\0' || stable_to_virtual.count(stable_id) == 0)
-                throw std::runtime_error("Missing stained-glass CMYW mixed recipe");
-            const MixedFilament &recipe = *stable_to_row.at(stable_id);
-            if (!is_cmyw_recipe(recipe))
-                throw std::runtime_error("Stained-glass recipe uses a filament outside the CMYW palette");
-            m_stained_glass_routes[source] = stable_to_virtual.at(stable_id);
-            if (end == std::string::npos) break;
-            begin = end + 1;
-        }
-        for (const ModelObject *object : model.objects)
-            for (const ModelVolume *volume : object->volumes) {
-                const auto &states = volume->mmu_segmentation_facets.get_data().used_states;
-                for (size_t source = 1; source < states.size(); ++source)
-                    if (states[source] && (source >= m_stained_glass_routes.size() || m_stained_glass_routes[source] == 0))
-                        throw std::runtime_error("A painted model colour is missing its CMYW recipe");
-            }
-    }
     size_t mixed_custom_count = 0;
     for (const auto &mf : m_mixed_filament_mgr.mixed_filaments())
         if (mf.custom)
@@ -1936,7 +1852,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         const bool same_layer_mode_active = same_layer_pointillism_enabled(m_mixed_filament_mgr);
         if (const auto &volumes = print_object.model_object()->volumes;
             num_extruders > 1 &&
-            std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return !v->mmu_segmentation_facets.empty() || !v->tracery_facets.empty(); }) != volumes.end()) {
+            std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return !v->mmu_segmentation_facets.empty(); }) != volumes.end()) {
 
             std::array<bool, static_cast<size_t>(EnforcerBlockerType::ExtruderMax) + 1> used_facet_states{};
             for (const ModelVolume *volume : volumes) {
@@ -1945,9 +1861,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 assert(volume_used_facet_states.size() == used_facet_states.size());
                 for (size_t state_idx = 0; state_idx < std::min(volume_used_facet_states.size(), used_facet_states.size()); ++state_idx)
                     used_facet_states[state_idx] |= volume_used_facet_states[state_idx];
-                for (const TraceryPatch &patch : volume->tracery_facets.patches)
-                    if (patch.filament_id < used_facet_states.size())
-                        used_facet_states[patch.filament_id] = true;
             }
 
             size_t dropped_painted_states = 0;
@@ -1955,10 +1868,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 if (!used_facet_states[state_idx])
                     continue;
                 if (state_idx <= num_total_filaments) {
-                    const unsigned int routed_id = stained_glass_route(static_cast<unsigned int>(state_idx));
-                    painting_extruders.emplace_back(routed_id);
+                    painting_extruders.emplace_back(static_cast<unsigned int>(state_idx));
                     append_mixed_component_extruders(m_mixed_filament_mgr,
-                                                     routed_id,
+                                                     static_cast<unsigned int>(state_idx),
                                                      num_extruders,
                                                      painting_extruders);
                 } else

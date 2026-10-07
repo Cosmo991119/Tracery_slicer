@@ -964,10 +964,6 @@ public:
     const PrintRegionConfig& default_region_config() const { return m_default_region_config; }
     const MixedFilamentManager& mixed_filament_manager() const { return m_mixed_filament_mgr; }
     MixedFilamentManager&       mixed_filament_manager()       { return m_mixed_filament_mgr; }
-    unsigned int stained_glass_route(unsigned int source_id) const {
-        return source_id < m_stained_glass_routes.size() && m_stained_glass_routes[source_id] != 0 ?
-            m_stained_glass_routes[source_id] : source_id;
-    }
     ConstPrintObjectPtrsAdaptor objects() const { return ConstPrintObjectPtrsAdaptor(&m_objects); }
     PrintObject*                get_object(size_t idx) { return const_cast<PrintObject*>(m_objects[idx]); }
     const PrintObject*          get_object(size_t idx) const { return m_objects[idx]; }
@@ -1102,7 +1098,6 @@ private:
     PrintObjectConfig                       m_default_object_config;
     PrintRegionConfig                       m_default_region_config;
     MixedFilamentManager                    m_mixed_filament_mgr;
-    std::vector<unsigned int>               m_stained_glass_routes;
     PrintObjectPtrs                         m_objects;
     PrintRegionPtrs                         m_print_regions;
     

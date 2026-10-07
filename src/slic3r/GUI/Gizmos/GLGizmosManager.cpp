@@ -597,35 +597,6 @@ void GLGizmosManager::render_painter_gizmo()
     gizmo->render_painter_gizmo();
 }
 
-void GLGizmosManager::render_tracery_overlay()
-{
-    if (!m_enabled || m_gizmos.size() <= EType::Tracery)
-        return;
-
-    auto* gizmo = dynamic_cast<GLGizmoTracery*>(m_gizmos[EType::Tracery].get());
-    if (gizmo != nullptr)
-        gizmo->render_colored_overlay();
-}
-
-void GLGizmosManager::render_tracery_surface_mask()
-{
-    if (!m_enabled || m_gizmos.size() <= EType::Tracery)
-        return;
-
-    auto* gizmo = dynamic_cast<GLGizmoTracery*>(m_gizmos[EType::Tracery].get());
-    if (gizmo != nullptr)
-        gizmo->render_surface_mask();
-}
-
-int GLGizmosManager::tracery_overlay_object_index() const
-{
-    if (!m_enabled || m_gizmos.size() <= EType::Tracery)
-        return -1;
-
-    const auto* gizmo = dynamic_cast<const GLGizmoTracery*>(m_gizmos[EType::Tracery].get());
-    return gizmo != nullptr ? gizmo->overlay_object_index() : -1;
-}
-
 void GLGizmosManager::render_painter_assemble_view() const
 {
     if (m_assemble_view_data && m_assemble_view_data->model_objects_clipper())

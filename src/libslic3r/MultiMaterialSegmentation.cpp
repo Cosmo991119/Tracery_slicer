@@ -1216,8 +1216,7 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                 const Transform3d volume_trafo = object_trafo * mv->get_matrix();
                 for (size_t extruder_idx = 0; extruder_idx < num_facets_states; ++extruder_idx) {
                     const ModelVolumeFacetsInfo info = extract_facets_info(*mv);
-                    const indexed_triangle_set painted = info.tracery != nullptr ? info.tracery->facets(unsigned(extruder_idx)) :
-                        info.facets_annotation.get_facets_strict(*mv, EnforcerBlockerType(extruder_idx));
+                    const indexed_triangle_set painted = info.facets_annotation.get_facets_strict(*mv, EnforcerBlockerType(extruder_idx));
 #ifdef MM_SEGMENTATION_DEBUG_TOP_BOTTOM
                     {
                         static int iRun = 0;
@@ -2035,8 +2034,7 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
         tbb::parallel_for(tbb::blocked_range<size_t>(1, num_facets_states), [&mv, &print_object, &facets_info, &layers, &edge_grids, &painted_lines, &painted_lines_mutex, &input_expolygons, &throw_on_cancel_callback](const tbb::blocked_range<size_t> &range) {
             for (size_t extruder_idx = range.begin(); extruder_idx < range.end(); ++extruder_idx) {
                 throw_on_cancel_callback();
-                const indexed_triangle_set custom_facets = facets_info.tracery != nullptr ? facets_info.tracery->facets(unsigned(extruder_idx)) :
-                    facets_info.facets_annotation.get_facets(*mv, EnforcerBlockerType(extruder_idx));
+                const indexed_triangle_set custom_facets = facets_info.facets_annotation.get_facets(*mv, EnforcerBlockerType(extruder_idx));
                 if (!mv->is_model_part() || custom_facets.indices.empty())
                     continue;
 
@@ -2234,18 +2232,6 @@ std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(con
     };
 
     return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_width, interlocking_depth, interlocking_beam, IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback);
-}
-
-std::vector<std::vector<ExPolygons>> stained_glass_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback) {
-    const size_t physical = print_object.print()->config().filament_colour.size();
-    const size_t channels = print_object.print()->mixed_filament_manager().total_filaments(physical) + 1;
-    const auto extract = [](const ModelVolume &mv) -> ModelVolumeFacetsInfo {
-        return {mv.mmu_segmentation_facets, !mv.tracery_facets.empty(), false, &mv.tracery_facets};
-    };
-    return segmentation_by_painting(print_object, extract, channels,
-        float(print_object.config().mmu_segmented_region_max_width.value),
-        float(print_object.config().mmu_segmented_region_interlocking_depth.value),
-        print_object.config().interlocking_beam.value, IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback);
 }
 
 // Returns fuzzy skin segmentation based on painting in fuzzy skin segmentation gizmo

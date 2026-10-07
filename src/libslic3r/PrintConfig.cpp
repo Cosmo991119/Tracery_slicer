@@ -4421,13 +4421,6 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
 
-    def = this->add("stained_glass_color_routes", coString);
-    def->label = L("Stained glass source colour routes");
-    def->tooltip = L("Original physical filament IDs mapped to CMYW mixed-filament stable IDs for slicing. The model colours are unchanged.");
-    def->gui_flags = "serialized";
-    def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString(""));
-
     def = this->add("dithering_z_step_size", coFloat);
     def->label = L("Dithering Z step size");
     def->category = L("Others");
