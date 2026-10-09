@@ -1640,24 +1640,33 @@ void GLGizmoTracery::apply_stained_glass_colors()
         m_display_diagnostics_last_canvas_state.clear();
         set_display_canvas_probe_phase(m_display_diagnostics_phase);
     });
+
+    auto plan = prepare_stained_glass_apply();
+    if (!plan)
+        return;
+
+    if (m_paint_mode == PaintMode::THROUGH)
+        generate_through_fragments();
+
+    commit_stained_glass_apply(std::move(*plan));
+}
+
+std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_stained_glass_apply()
+{
     if (m_fragment_colors.empty()) {
         // An empty selector means the user erased the complete glass mask.
         // Commit the base snapshot so those facets return to their ordinary
         // paint rather than retaining the last generated leaf states.
-        if (!m_stained_glass_base_paint_data.empty()) {
-            bake_fragments_to_mmu_painting();
-            wxGetApp().sidebar().update_color_mix_panel();
-            wxGetApp().plater()->post_slice_state_change_update();
-            m_parent.set_as_dirty();
-        }
-        return;
+        if (m_stained_glass_base_paint_data.empty())
+            return std::nullopt;
+        return StainedGlassApplyPlan{};
     }
     PresetBundle* bundle = wxGetApp().preset_bundle;
     if (bundle == nullptr)
-        return;
+        return std::nullopt;
     auto* colour_option = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
     if (colour_option == nullptr)
-        return;
+        return std::nullopt;
     auto& mixed_manager = bundle->mixed_filaments;
 
     const std::array<wxColour, 4> cmyw = {
@@ -1685,7 +1694,7 @@ void GLGizmoTracery::apply_stained_glass_colors()
         projected_manager.total_filaments(projected_colours.size()) > MAXIMUM_FILAMENT_NUMBER) {
         wxMessageBox(_L("There are not enough slots for the original colours and CMYW ingredients."),
             _L("Stained glass"), wxOK | wxICON_WARNING);
-        return;
+        return std::nullopt;
     }
 
     // Add all missing base colours in one Sidebar update. Adding a physical
@@ -1695,14 +1704,14 @@ void GLGizmoTracery::apply_stained_glass_colors()
     record_display_diagnostic_state("after_add_custom_filaments");
     colour_option = bundle->project_config.option<ConfigOptionStrings>("filament_colour");
     if (colour_option == nullptr)
-        return;
+        return std::nullopt;
     std::array<unsigned int, 4> cmyw_ids = {};
     std::vector<std::string> cmyw_colours;
     cmyw_colours.reserve(cmyw.size());
     for (size_t index = 0; index < cmyw.size(); ++index) {
         const int physical_index = find_physical_colour(colour_option->values, cmyw[index]);
         if (physical_index < 0)
-            return;
+            return std::nullopt;
         cmyw_ids[index] = unsigned(physical_index + 1);
         cmyw_colours.emplace_back(colour_option->values[size_t(physical_index)]);
     }
@@ -1759,7 +1768,6 @@ void GLGizmoTracery::apply_stained_glass_colors()
             }
         }
     }
-
     std::vector<unsigned int> palette_filament_ids(candidates.size(), 0);
     std::vector<wxColour> palette_preview_colours;
     palette_preview_colours.reserve(candidates.size());
@@ -1837,7 +1845,7 @@ void GLGizmoTracery::apply_stained_glass_colors()
     if (new_rows.size() > available_mixed || has_unresolved_recipe) {
         wxMessageBox(_L("Unable to make CMYW recipes for every model and stained-glass colour."),
             _L("Stained glass"), wxOK | wxICON_WARNING);
-        return;
+        return std::nullopt;
     }
     std::vector<unsigned int> assigned_ids;
     mixed_manager.add_batch_custom_filaments(new_rows, colour_option->values, &assigned_ids);
@@ -1849,15 +1857,36 @@ void GLGizmoTracery::apply_stained_glass_colors()
     if (std::any_of(palette_filament_ids.begin(), palette_filament_ids.end(), [](unsigned int id) { return id == 0; })) {
         wxMessageBox(_L("Unable to assign a CMYW recipe to every stained-glass colour."),
             _L("Stained glass"), wxOK | wxICON_WARNING);
-        return;
+        return std::nullopt;
     }
-    m_fragment_mixed_filament_ids.resize(fragment_palette.size(), 0);
+    StainedGlassApplyPlan plan;
+    plan.mode = StainedGlassApplyPlan::Mode::BakeFragments;
+    plan.fragment_mixed_filament_ids.resize(fragment_palette.size(), 0);
     for (size_t fragment = 0; fragment < fragment_palette.size(); ++fragment) {
-        m_fragment_mixed_filament_ids[fragment] = palette_filament_ids[fragment_palette[fragment]];
+        plan.fragment_mixed_filament_ids[fragment] = palette_filament_ids[fragment_palette[fragment]];
     }
 
-    if (auto* definitions = bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
-        definitions->value = mixed_manager.serialize_custom_entries();
+    plan.mixed_filament_definitions = mixed_manager.serialize_custom_entries();
+    return plan;
+}
+
+void GLGizmoTracery::generate_through_fragments()
+{
+    // Through mode will project the front-side generated fragments onto the
+    // opposite surface before the common MMU paint commit. The function is
+    // intentionally empty until that projection representation is defined.
+}
+
+void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
+{
+    if (plan.mode == StainedGlassApplyPlan::Mode::BakeFragments) {
+        m_fragment_mixed_filament_ids = std::move(plan.fragment_mixed_filament_ids);
+        if (PresetBundle* bundle = wxGetApp().preset_bundle) {
+            if (auto* definitions = bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
+                definitions->value = std::move(plan.mixed_filament_definitions);
+        }
+    }
+
     bake_fragments_to_mmu_painting();
     wxGetApp().sidebar().update_color_mix_panel();
     wxGetApp().plater()->post_slice_state_change_update();

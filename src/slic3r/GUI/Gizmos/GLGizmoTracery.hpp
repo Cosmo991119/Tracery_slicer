@@ -8,6 +8,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -72,6 +73,19 @@ private:
     void capture_mask_and_generate();
     void generate_paint_plan();
     void apply_stained_glass_colors();
+    struct StainedGlassApplyPlan {
+        enum class Mode {
+            RestoreBasePaint,
+            BakeFragments
+        };
+
+        Mode                      mode = Mode::RestoreBasePaint;
+        std::vector<unsigned int> fragment_mixed_filament_ids;
+        std::string               mixed_filament_definitions;
+    };
+    std::optional<StainedGlassApplyPlan> prepare_stained_glass_apply();
+    void                                 generate_through_fragments();
+    void                                 commit_stained_glass_apply(StainedGlassApplyPlan&& plan);
     void bake_fragments_to_mmu_painting();
     void start_display_diagnostics();
     void stop_display_diagnostics();
