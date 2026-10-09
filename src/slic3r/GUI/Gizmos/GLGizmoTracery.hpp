@@ -72,6 +72,8 @@ private:
 
     void capture_mask_and_generate();
     void generate_paint_plan();
+    struct GenerationInput;
+    bool collect_generation_input(GenerationInput& input);
     void apply_stained_glass_colors();
     struct StainedGlassApplyPlan {
         enum class Mode {

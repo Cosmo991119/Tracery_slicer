@@ -321,6 +321,32 @@ double tracery_recipe_balance_penalty(const std::array<int, 4>& weights)
 
 namespace Slic3r::GUI {
 
+struct GLGizmoTracery::GenerationInput {
+    struct SurfaceTriangle {
+        size_t    mesh_idx;
+        Vec3f     a;
+        Vec3f     b;
+        Vec3f     c;
+        Vec3f     world_a;
+        Vec3f     world_b;
+        Vec3f     world_c;
+        Vec3f     normal;
+        ColorRGBA source_color;
+    };
+    struct ColorSource {
+        ColorRGBA                   color;
+        indexed_triangle_set        facets;
+        std::unique_ptr<AABBMesh>   aabb;
+    };
+
+    bool                                                        export_diagnostics;
+    const ModelObject*                                          model_object;
+    std::vector<SurfaceTriangle>&                               surface_triangles;
+    std::vector<std::vector<std::unique_ptr<ColorSource>>>&    color_sources;
+    std::vector<Transform3d>&                                   volume_transforms;
+    double&                                                     surface_area;
+};
+
 GLGizmoTracery::GLGizmoTracery(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoPainterBase(parent, icon_filename, sprite_id)
     , m_current_tool(ImGui::CircleButtonIcon)
@@ -752,64 +778,16 @@ void GLGizmoTracery::capture_mask_and_generate()
     generate_paint_plan();
 }
 
-void GLGizmoTracery::generate_paint_plan()
+bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
 {
-    record_display_diagnostic_state("generation_begin");
-    ScopeGuard log_generation_end([this]() { record_display_diagnostic_state("generation_end"); });
-    const bool export_diagnostics = std::exchange(m_export_next_generation, false);
-    m_generated_fragments.clear();
-    m_fragment_colors.clear();
-    m_fragment_mixed_filament_ids.clear();
-    const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
-        m_c->selection_info()->model_object() : nullptr;
-    if (model_object == nullptr || model_object->id() != m_mask_object_id) {
-        if (export_diagnostics)
-            wxMessageBox(_L("Select a model and paint a stained-glass area before exporting diagnostics."),
-                         _L("Stained glass"), wxOK | wxICON_INFORMATION);
-        return;
-    }
-
-    m_generated_fragments.resize(m_triangle_selectors.size());
-
-    struct SurfaceTriangle {
-        size_t mesh_idx;
-        Vec3f  a;
-        Vec3f  b;
-        Vec3f  c;
-        Vec3f  world_a;
-        Vec3f  world_b;
-        Vec3f  world_c;
-        Vec3f  normal;
-        ColorRGBA source_color;
-    };
-    struct WorkTriangle {
-        size_t mesh_idx;
-        Vec3f  a;
-        Vec3f  b;
-        Vec3f  c;
-        Vec3f  world_a;
-        Vec3f  world_b;
-        Vec3f  world_c;
-        Vec3f  normal;
-        ColorRGBA source_color;
-        size_t color_group;
-        float area;
-    };
-    struct ColorSource {
-        ColorRGBA color;
-        indexed_triangle_set facets;
-        std::unique_ptr<AABBMesh> aabb;
-    };
-    struct ColorGroup {
-        size_t component_id;
-        ColorRGBA color;
-    };
+    using SurfaceTriangle = GenerationInput::SurfaceTriangle;
+    using ColorSource = GenerationInput::ColorSource;
 
     const Model* canvas_model = m_parent.get_model();
     int object_idx = -1;
     if (canvas_model != nullptr) {
         for (size_t idx = 0; idx < canvas_model->objects.size(); ++idx) {
-            if (canvas_model->objects[idx] == model_object) {
+            if (canvas_model->objects[idx] == input.model_object) {
                 object_idx = int(idx);
                 break;
             }
@@ -829,14 +807,9 @@ void GLGizmoTracery::generate_paint_plan()
     };
 
     const std::vector<ColorRGBA> extruder_colors = ::get_extruders_colors();
-    std::vector<ColorGroup> color_groups;
-    std::vector<std::vector<std::unique_ptr<ColorSource>>> color_sources(m_triangle_selectors.size());
-    std::vector<SurfaceTriangle> surface_triangles;
-    std::vector<Transform3d> volume_transforms;
-    double surface_area = 0.0;
     size_t mesh_idx = 0;
-    for (size_t volume_idx = 0; volume_idx < model_object->volumes.size(); ++volume_idx) {
-        const ModelVolume* volume = model_object->volumes[volume_idx];
+    for (size_t volume_idx = 0; volume_idx < input.model_object->volumes.size(); ++volume_idx) {
+        const ModelVolume* volume = input.model_object->volumes[volume_idx];
         if (!volume->is_model_part())
             continue;
         if (mesh_idx >= m_triangle_selectors.size())
@@ -844,13 +817,13 @@ void GLGizmoTracery::generate_paint_plan()
 
         const indexed_triangle_set facets = m_triangle_selectors[mesh_idx]->get_facets_strict(EnforcerBlockerType::ENFORCER);
         const Transform3d& volume_transform = volume->get_matrix();
-        volume_transforms.emplace_back(volume_transform);
+        input.volume_transforms.emplace_back(volume_transform);
         const ColorRGBA source_color = volume_source_color(int(volume_idx));
 
         // Multi-material painting stores its colours per surface facet, not
         // per ModelVolume. Mirror the same facet sets used by the normal
-        // model renderer and use an AABB lookup below to sample the actual
-        // source colour at each selected surface position.
+        // renderer so later stages can sample the original colour at a
+        // temporary work-surface position.
         std::vector<indexed_triangle_set> facets_per_color;
         if (mesh_idx < m_stained_glass_base_paint_data.size()) {
             TriangleSelector base_selector(volume->mesh());
@@ -877,7 +850,7 @@ void GLGizmoTracery::generate_paint_plan()
                 source->color = painted_color;
                 source->facets = std::move(facets_per_color[color_idx]);
                 source->aabb = std::make_unique<AABBMesh>(source->facets);
-                color_sources[mesh_idx].emplace_back(std::move(source));
+                input.color_sources[mesh_idx].emplace_back(std::move(source));
             }
         }
         for (const stl_triangle_vertex_indices& face : facets.indices) {
@@ -892,16 +865,74 @@ void GLGizmoTracery::generate_paint_plan()
             const Vec3f world_a = (volume_transform * a.cast<double>()).cast<float>();
             const Vec3f world_b = (volume_transform * b.cast<double>()).cast<float>();
             const Vec3f world_c = (volume_transform * c.cast<double>()).cast<float>();
-            surface_area += 0.5 * double((world_b - world_a).cross(world_c - world_a).norm());
-            surface_triangles.push_back({ mesh_idx, a, b, c, world_a, world_b, world_c, normal, source_color });
+            input.surface_area += 0.5 * double((world_b - world_a).cross(world_c - world_a).norm());
+            input.surface_triangles.push_back({ mesh_idx, a, b, c, world_a, world_b, world_c, normal, source_color });
         }
         ++mesh_idx;
     }
-    if (surface_triangles.empty()) {
-        if (export_diagnostics)
+
+    if (input.surface_triangles.empty()) {
+        if (input.export_diagnostics)
             wxMessageBox(_L("Paint a stained-glass area before exporting diagnostics."), _L("Stained glass"), wxOK | wxICON_INFORMATION);
+        return false;
+    }
+    return true;
+}
+
+void GLGizmoTracery::generate_paint_plan()
+{
+    record_display_diagnostic_state("generation_begin");
+    ScopeGuard log_generation_end([this]() { record_display_diagnostic_state("generation_end"); });
+    const bool export_diagnostics = std::exchange(m_export_next_generation, false);
+    m_generated_fragments.clear();
+    m_fragment_colors.clear();
+    m_fragment_mixed_filament_ids.clear();
+    const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
+        m_c->selection_info()->model_object() : nullptr;
+    if (model_object == nullptr || model_object->id() != m_mask_object_id) {
+        if (export_diagnostics)
+            wxMessageBox(_L("Select a model and paint a stained-glass area before exporting diagnostics."),
+                         _L("Stained glass"), wxOK | wxICON_INFORMATION);
         return;
     }
+
+    // Preserve the original preparation order: collectors and their
+    // TriangleSelectors run after the output slots have been created.
+    m_generated_fragments.resize(m_triangle_selectors.size());
+
+    using SurfaceTriangle = GenerationInput::SurfaceTriangle;
+    using ColorSource = GenerationInput::ColorSource;
+    struct WorkTriangle {
+        size_t mesh_idx;
+        Vec3f  a;
+        Vec3f  b;
+        Vec3f  c;
+        Vec3f  world_a;
+        Vec3f  world_b;
+        Vec3f  world_c;
+        Vec3f  normal;
+        ColorRGBA source_color;
+        size_t color_group;
+        float area;
+    };
+    struct ColorGroup {
+        size_t component_id;
+        ColorRGBA color;
+    };
+
+    // Keep the working data in this function exactly as before the collection
+    // helper was introduced. GenerationInput is deliberately only a set of
+    // references used while collecting; it does not own or relocate data that
+    // later generation stages read through captured callbacks.
+    std::vector<ColorGroup> color_groups;
+    std::vector<std::vector<std::unique_ptr<ColorSource>>> color_sources(m_triangle_selectors.size());
+    std::vector<SurfaceTriangle> surface_triangles;
+    std::vector<Transform3d> volume_transforms;
+    double surface_area = 0.0;
+    GenerationInput input{ export_diagnostics, model_object, surface_triangles, color_sources, volume_transforms, surface_area };
+
+    if (!collect_generation_input(input))
+        return;
 
     // Edge keys are used later to rebuild fine same-colour regions and to
     // find real borders between different original colours.
