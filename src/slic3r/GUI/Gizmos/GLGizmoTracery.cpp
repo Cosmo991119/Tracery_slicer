@@ -333,10 +333,6 @@ bool GLGizmoTracery::on_init()
 
 bool GLGizmoTracery::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down)
 {
-    // The through mode is an interface placeholder until its projection rules
-    // are defined. Do not silently apply ordinary surface painting in it.
-    if (m_paint_mode == PaintMode::THROUGH)
-        return true;
     return GLGizmoPainterBase::gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
 }
 
@@ -584,7 +580,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         ImGui::StainedSurfaceModeIcon, ImGui::StainedThroughModeIcon
     };
     const std::array<wxString, 2> mode_tips = {
-        _L("Normal: paint the visible surface"), _L("Through: painting will be available later")
+        _L("Normal: paint the visible surface"), _L("Through: paint both sides of the model")
     };
     for (size_t i = 0; i < mode_icons.size(); ++i) {
         if (i != 0)
@@ -1872,9 +1868,156 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
 
 void GLGizmoTracery::generate_through_fragments()
 {
-    // Through mode will project the front-side generated fragments onto the
-    // opposite surface before the common MMU paint commit. The function is
-    // intentionally empty until that projection representation is defined.
+    Model& model = wxGetApp().plater()->model();
+    ModelObject* object = nullptr;
+    for (ModelObject* candidate : model.objects)
+        if (candidate->id() == m_mask_object_id) {
+            object = candidate;
+            break;
+        }
+    if (object == nullptr && m_mask_object_index >= 0 && size_t(m_mask_object_index) < model.objects.size())
+        object = model.objects[size_t(m_mask_object_index)];
+    if (object == nullptr || m_generated_fragments.empty())
+        return;
+
+    struct ProjectionKey {
+        std::array<int64_t, 6> value;
+
+        bool operator<(const ProjectionKey& other) const { return value < other.value; }
+    };
+    struct ProjectionResult {
+        bool  valid = false;
+        Vec3f position = Vec3f::Zero();
+        Vec3f normal = Vec3f::Zero();
+        int   face = -1;
+    };
+    const auto quantize = [](const Vec3f& position, const Vec3f& normal) {
+        constexpr double position_scale = 100000.0;
+        constexpr double normal_scale = 1000000.0;
+        return ProjectionKey{{
+            int64_t(std::llround(double(position.x()) * position_scale)),
+            int64_t(std::llround(double(position.y()) * position_scale)),
+            int64_t(std::llround(double(position.z()) * position_scale)),
+            int64_t(std::llround(double(normal.x()) * normal_scale)),
+            int64_t(std::llround(double(normal.y()) * normal_scale)),
+            int64_t(std::llround(double(normal.z()) * normal_scale))
+        }};
+    };
+
+    size_t volume_index = 0;
+    for (ModelVolume* volume : object->volumes) {
+        if (!volume->is_model_part())
+            continue;
+        if (volume_index >= m_generated_fragments.size())
+            break;
+
+        // Work against only this volume's mesh. A through stroke must never
+        // jump to a neighbouring or overlapping part of the same object.
+        const TriangleMesh& volume_mesh = volume->mesh();
+        const indexed_triangle_set& mesh = volume_mesh.its;
+        if (mesh.vertices.empty() || mesh.indices.empty()) {
+            ++volume_index;
+            continue;
+        }
+        AABBMesh target_surface(volume_mesh);
+        const std::vector<Vec3i32>& face_neighbours = target_surface.face_neighbor_index();
+
+        Vec3f minimum = mesh.vertices.front();
+        Vec3f maximum = minimum;
+        for (const Vec3f& vertex : mesh.vertices) {
+            minimum = minimum.cwiseMin(vertex);
+            maximum = maximum.cwiseMax(vertex);
+        }
+        // Offset the ray into the solid so the source triangle cannot be
+        // selected as its own destination. Scale the epsilon with the mesh,
+        // while retaining a safe lower bound for very small models.
+        const float ray_epsilon = std::max(1e-5f, (maximum - minimum).norm() * 1e-6f);
+
+        const auto faces_are_compatible = [&face_neighbours](int first, int second) {
+            if (first < 0 || second < 0)
+                return false;
+            if (first == second)
+                return true;
+            if (size_t(first) >= face_neighbours.size() || size_t(second) >= face_neighbours.size())
+                return false;
+            for (int edge = 0; edge < 3; ++edge) {
+                if (face_neighbours[size_t(first)][edge] == second ||
+                    face_neighbours[size_t(second)][edge] == first)
+                    return true;
+            }
+            return false;
+        };
+
+        std::map<ProjectionKey, ProjectionResult> projection_cache;
+        const auto project_vertex = [&target_surface, &projection_cache, &quantize, ray_epsilon](const Vec3f& point, const Vec3f& normal) {
+            const ProjectionKey key = quantize(point, normal);
+            auto [cached, inserted] = projection_cache.emplace(key, ProjectionResult{});
+            if (!inserted)
+                return cached->second;
+
+            const Vec3d direction = -normal.cast<double>();
+            const Vec3d origin = point.cast<double>() + direction * double(ray_epsilon);
+            const AABBMesh::hit_result hit = target_surface.query_ray_hit(origin, direction);
+            // From a point just inside a closed shell, the nearest valid hit
+            // must be an exit intersection. Any ambiguous hit is rejected;
+            // this conservative path prefers a small gap to misplaced paint.
+            if (hit.is_hit() && hit.distance() > double(ray_epsilon) && hit.is_inside()) {
+                cached->second.valid = true;
+                cached->second.position = hit.position().cast<float>();
+                cached->second.normal = hit.normal().cast<float>();
+                cached->second.face = hit.face();
+            }
+            return cached->second;
+        };
+
+        const size_t front_fragment_count = m_generated_fragments[volume_index].size();
+        for (size_t fragment_index = 0; fragment_index < front_fragment_count; ++fragment_index) {
+            const GeneratedFragment& front = m_generated_fragments[volume_index][fragment_index];
+            if (front.fragment_id >= m_fragment_colors.size() || front.surface.indices.empty())
+                continue;
+
+            indexed_triangle_set back_surface;
+            for (const stl_triangle_vertex_indices& face : front.surface.indices) {
+                if (face[0] < 0 || face[1] < 0 || face[2] < 0 ||
+                    size_t(face[0]) >= front.surface.vertices.size() ||
+                    size_t(face[1]) >= front.surface.vertices.size() ||
+                    size_t(face[2]) >= front.surface.vertices.size())
+                    continue;
+                const Vec3f& a = front.surface.vertices[size_t(face[0])];
+                const Vec3f& b = front.surface.vertices[size_t(face[1])];
+                const Vec3f& c = front.surface.vertices[size_t(face[2])];
+                Vec3f normal = (b - a).cross(c - a);
+                if (normal.squaredNorm() <= 1e-12f)
+                    continue;
+                normal.normalize();
+
+                const ProjectionResult projected_a = project_vertex(a, normal);
+                const ProjectionResult projected_b = project_vertex(b, normal);
+                const ProjectionResult projected_c = project_vertex(c, normal);
+                if (!projected_a.valid || !projected_b.valid || !projected_c.valid ||
+                    !faces_are_compatible(projected_a.face, projected_b.face) ||
+                    !faces_are_compatible(projected_b.face, projected_c.face) ||
+                    !faces_are_compatible(projected_c.face, projected_a.face))
+                    continue;
+
+                const Vec3f projected_normal = (projected_b.position - projected_a.position).cross(projected_c.position - projected_a.position);
+                if (projected_normal.squaredNorm() <= 1e-12f)
+                    continue;
+                const unsigned int first = unsigned(back_surface.vertices.size());
+                back_surface.vertices.emplace_back(projected_a.position);
+                back_surface.vertices.emplace_back(projected_b.position);
+                back_surface.vertices.emplace_back(projected_c.position);
+                const Vec3f target_normal = projected_a.normal + projected_b.normal + projected_c.normal;
+                if (projected_normal.dot(target_normal) < 0.0f)
+                    back_surface.indices.emplace_back(stl_triangle_vertex_indices{ int(first), int(first + 2), int(first + 1) });
+                else
+                    back_surface.indices.emplace_back(stl_triangle_vertex_indices{ int(first), int(first + 1), int(first + 2) });
+            }
+            if (!back_surface.indices.empty())
+                m_generated_fragments[volume_index].emplace_back(GeneratedFragment{ front.fragment_id, std::move(back_surface) });
+        }
+        ++volume_index;
+    }
 }
 
 void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
