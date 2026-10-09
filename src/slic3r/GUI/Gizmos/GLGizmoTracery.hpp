@@ -35,6 +35,9 @@ public:
     std::string get_tooltip() const override { return _u8L("Stained glass"); }
 
 protected:
+    // The stained-glass mask is input to the CPU baker only. Unlike ordinary
+    // paint gizmos it must never be drawn over the committed MMU result.
+    void        render_triangles(const Selection&) const override {}
     void        on_render_input_window(float x, float y, float bottom_limit) override;
     std::string on_get_name() const override;
     wxString    handle_snapshot_action_name(bool shift_down, Button button_down) const override;

@@ -347,15 +347,10 @@ std::string GLGizmoTracery::on_get_name() const
 
 void GLGizmoTracery::render_painter_gizmo()
 {
-    // Generated colours are baked into normal MMU paint before this pass.
-    // Only editing aids are rendered here.
-    glsafe(::glEnable(GL_BLEND));
-    glsafe(::glEnable(GL_DEPTH_TEST));
-    m_c->object_clipper()->render_cut();
-    m_c->instances_hider()->render_cut();
-    if (m_paint_mode == PaintMode::SURFACE)
-        render_cursor();
-    glsafe(::glDisable(GL_BLEND));
+    // The complete result is regular MMU paint. Do not draw a selection mask,
+    // cursor, clip cap or instance hider over that same surface: any of these
+    // coplanar editing aids can be mistaken for a stained-glass fragment and
+    // can depth-fight with the committed colour triangles.
 }
 
 void GLGizmoTracery::start_display_diagnostics()
@@ -881,6 +876,7 @@ void GLGizmoTracery::generate_paint_plan()
                     painted_color = adjust_color_for_rendering(extruder_colors[color_idx - 1]);
                 }
                 painted_color.a(1.0f);
+                //save model color source data
                 auto source = std::make_unique<ColorSource>();
                 source->color = painted_color;
                 source->facets = std::move(facets_per_color[color_idx]);
