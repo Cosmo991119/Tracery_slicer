@@ -102,6 +102,31 @@ private:
                                                const std::vector<ColorGroup>& color_groups,
                                                const std::vector<std::vector<size_t>>& group_triangles,
                                                const std::vector<double>& group_areas) const;
+    struct FragmentSeed;
+    struct CpuGeometry;
+    struct FragmentGenerationIntegrity;
+    bool generate_fragments(const std::vector<WorkTriangle>& work_triangles,
+                            const std::vector<ColorGroup>& color_groups,
+                            const std::vector<std::vector<size_t>>& group_triangles,
+                            const std::vector<double>& group_areas,
+                            float target_edge, float maximum_fragment_diameter, bool export_diagnostics,
+                            std::map<EdgeKey, size_t>& work_edge_owners,
+                            size_t& fragment_count, std::vector<FragmentSeed>& seeds,
+                            std::vector<std::vector<CpuGeometry>>& geometry,
+                            std::vector<size_t>& fragment_for_triangle,
+                            std::vector<std::set<size_t>>& fragment_neighbours,
+                            std::vector<float>& fragment_boundary_distance,
+                            std::vector<size_t>& fragment_boundary_neighbor,
+                            bool verify_integrity, FragmentGenerationIntegrity* builder_integrity);
+    FragmentGenerationIntegrity inspect_fragment_generation(
+        const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
+        const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas,
+        float target_edge, size_t fragment_count, const std::vector<FragmentSeed>& seeds,
+        const std::vector<std::vector<CpuGeometry>>& geometry,
+        const std::vector<size_t>& fragment_for_triangle,
+        const std::vector<std::set<size_t>>& fragment_neighbours,
+        const std::vector<float>& fragment_boundary_distance,
+        const std::vector<size_t>& fragment_boundary_neighbor) const;
     void apply_stained_glass_colors();
     struct StainedGlassApplyPlan {
         enum class Mode {

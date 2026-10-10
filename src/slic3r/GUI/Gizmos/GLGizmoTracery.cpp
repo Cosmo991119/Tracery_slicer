@@ -378,6 +378,33 @@ struct GLGizmoTracery::ColorRegionIntegrity {
     bool   immutable_input_preserved = true;
 };
 
+struct GLGizmoTracery::FragmentSeed {
+    Vec3f  position;
+    size_t color_group;
+    size_t stable_id;
+};
+
+struct GLGizmoTracery::CpuGeometry {
+    indexed_triangle_set surface;
+
+    bool empty() const { return surface.indices.empty(); }
+    void add_vertex(const Vec3f& vertex) { surface.vertices.emplace_back(vertex); }
+    void add_triangle(unsigned int first, unsigned int second, unsigned int third)
+    {
+        surface.indices.emplace_back(stl_triangle_vertex_indices{int(first), int(second), int(third)});
+    }
+};
+
+struct GLGizmoTracery::FragmentGenerationIntegrity {
+    size_t input_hash = 0;
+    size_t output_hash = 0;
+    size_t seed_count = 0;
+    size_t assigned_triangle_count = 0;
+    size_t nonempty_geometry_count = 0;
+    bool   valid = false;
+    bool   immutable_input_preserved = true;
+};
+
 GLGizmoTracery::GLGizmoTracery(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoPainterBase(parent, icon_filename, sprite_id)
     , m_current_tool(ImGui::CircleButtonIcon)
@@ -1138,122 +1165,140 @@ GLGizmoTracery::ColorRegionIntegrity GLGizmoTracery::build_color_regions(
     return result;
 }
 
-void GLGizmoTracery::generate_paint_plan()
+GLGizmoTracery::FragmentGenerationIntegrity GLGizmoTracery::inspect_fragment_generation(
+    const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
+    const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas,
+    float target_edge, size_t fragment_count, const std::vector<FragmentSeed>& seeds,
+    const std::vector<std::vector<CpuGeometry>>& geometry, const std::vector<size_t>& fragment_for_triangle,
+    const std::vector<std::set<size_t>>& fragment_neighbours, const std::vector<float>& fragment_boundary_distance,
+    const std::vector<size_t>& fragment_boundary_neighbor) const
 {
-    record_display_diagnostic_state("generation_begin");
-    ScopeGuard log_generation_end([this]() { record_display_diagnostic_state("generation_end"); });
-    const bool export_diagnostics = std::exchange(m_export_next_generation, false);
-    m_generated_fragments.clear();
-    m_fragment_colors.clear();
-    m_fragment_mixed_filament_ids.clear();
-    m_generation_integrity_valid = true;
-    const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
-        m_c->selection_info()->model_object() : nullptr;
-    if (model_object == nullptr || model_object->id() != m_mask_object_id) {
-        if (export_diagnostics)
-            wxMessageBox(_L("Select a model and paint a stained-glass area before exporting diagnostics."),
-                         _L("Stained glass"), wxOK | wxICON_INFORMATION);
-        return;
-    }
-
-    // Preserve the original preparation order: collectors and their
-    // TriangleSelectors run after the output slots have been created.
-    m_generated_fragments.resize(m_triangle_selectors.size());
-
-    using SurfaceTriangle = GenerationInput::SurfaceTriangle;
-    using ColorSource = GenerationInput::ColorSource;
-
-    // Keep the working data in this function exactly as before the collection
-    // helper was introduced. GenerationInput is deliberately only a set of
-    // references used while collecting; it does not own or relocate data that
-    // later generation stages read through captured callbacks.
-    std::vector<ColorGroup> color_groups;
-    std::vector<std::vector<std::unique_ptr<ColorSource>>> color_sources(m_triangle_selectors.size());
-    std::vector<SurfaceTriangle> surface_triangles;
-    std::vector<Transform3d> volume_transforms;
-    double surface_area = 0.0;
-    GenerationInput input{ export_diagnostics, model_object, surface_triangles, color_sources, volume_transforms, surface_area };
-
-    if (!collect_generation_input(input))
-        return;
-
-    // Fragment dimensions are expressed in model units (millimetres), never
-    // as a fraction of the painted area. Larger selections gain more shards,
-    // not larger circular cells.
-    const float target_edge = 6.5f - 4.0f * m_fragment_density;
-    const float maximum_fragment_diameter = target_edge * 1.35f;
-    // Fragment ownership is evaluated on a substantially finer temporary
-    // mesh than the fragment size. This lets the resulting boundary follow a
-    // smooth curve while leaving the source model itself untouched.
-    // Curves are tessellated on a common fine mesh.  This is deliberately
-    // finer than the shard spacing: visual smoothness must not depend on the
-    // original model's triangle size.
-    float boundary_sample_edge = std::max(0.012f, target_edge * 0.05f);
-    // The temporary surface must stay bounded even for a large painted model.
-    // Without this cap, two density changes can each create millions of work
-    // triangles and block the UI while their maps and adjacency lists rebuild.
-    constexpr size_t max_work_triangles = 120000;
-    const auto estimated_work_triangles = [&surface_triangles](float sample_edge) {
-        double result = 0.0;
-        for (const SurfaceTriangle& source : surface_triangles) {
-            const float longest = std::max({ (source.world_b - source.world_a).norm(),
-                (source.world_c - source.world_b).norm(), (source.world_a - source.world_c).norm() });
-            const size_t subdivisions = size_t(std::clamp(int(std::ceil(longest / sample_edge)), 1, 96));
-            result += double(subdivisions) * double(subdivisions);
-        }
-        return result;
+    const auto mix_hash = [](size_t& hash, size_t value) {
+        hash = (hash * size_t(0x9e3779b1U)) ^ value;
     };
-    for (int pass = 0; pass < 3; ++pass) {
-        const double estimate = estimated_work_triangles(boundary_sample_edge);
-        if (estimate <= max_work_triangles)
-            break;
-        boundary_sample_edge *= float(std::sqrt(estimate / double(max_work_triangles)));
+    const auto mix_float = [&mix_hash](size_t& hash, float value) {
+        mix_hash(hash, std::hash<float>{}(value));
+    };
+    const auto mix_color = [&mix_float](size_t& hash, const ColorRGBA& color) {
+        mix_float(hash, color.r());
+        mix_float(hash, color.g());
+        mix_float(hash, color.b());
+        mix_float(hash, color.a());
+    };
+
+    FragmentGenerationIntegrity result;
+    result.input_hash = size_t(0x27d4eb2fU);
+    mix_float(result.input_hash, target_edge);
+    mix_hash(result.input_hash, work_triangles.size());
+    for (const WorkTriangle& triangle : work_triangles) {
+        mix_hash(result.input_hash, triangle.mesh_idx);
+        mix_hash(result.input_hash, triangle.color_group);
+        for (const Vec3f* point : { &triangle.a, &triangle.b, &triangle.c, &triangle.world_a, &triangle.world_b,
+                                    &triangle.world_c, &triangle.normal }) {
+            mix_float(result.input_hash, point->x());
+            mix_float(result.input_hash, point->y());
+            mix_float(result.input_hash, point->z());
+        }
+        mix_color(result.input_hash, triangle.source_color);
+        mix_float(result.input_hash, triangle.area);
     }
-    std::vector<WorkTriangle> work_triangles;
-    build_work_surface(input, boundary_sample_edge, work_triangles);
-    // Keep the original region workspaces owned by generate_paint_plan() for
-    // the whole generation. build_color_regions() only fills these objects.
-    std::vector<size_t> work_parents;
-    std::map<EdgeKey, size_t> work_edge_owners;
-    std::map<size_t, std::array<int64_t, 4>> work_anchors;
-    std::map<size_t, size_t> work_group_indices;
-    std::vector<std::vector<size_t>> group_triangles;
-    std::vector<double> group_areas;
-    const bool verify_color_regions = m_display_diagnostics_active;
-    const ColorRegionIntegrity builder_integrity = build_color_regions(
-        work_triangles, color_groups, group_triangles, group_areas, work_parents, work_edge_owners,
-        work_anchors, work_group_indices, verify_color_regions);
-    if (verify_color_regions) {
-        const ColorRegionIntegrity caller_integrity = inspect_color_regions(
-            work_triangles, color_groups, group_triangles, group_areas);
-        const auto describe_integrity = [](const ColorRegionIntegrity& integrity) {
-            return "valid=" + std::to_string(integrity.valid) +
-                ",immutable=" + std::to_string(integrity.immutable_input_preserved) +
-                ",work_triangles=" + std::to_string(integrity.work_triangle_count) +
-                ",grouped_triangles=" + std::to_string(integrity.grouped_triangle_count) +
-                ",groups=" + std::to_string(integrity.group_count) +
-                ",work_area=" + std::to_string(integrity.work_area) +
-                ",grouped_area=" + std::to_string(integrity.grouped_area) +
-                ",immutable_hash=" + std::to_string(integrity.immutable_hash) +
-                ",output_hash=" + std::to_string(integrity.output_hash);
-        };
-        const bool caller_matches_builder = builder_integrity.immutable_hash == caller_integrity.immutable_hash &&
-            builder_integrity.output_hash == caller_integrity.output_hash &&
-            builder_integrity.work_triangle_count == caller_integrity.work_triangle_count &&
-            builder_integrity.grouped_triangle_count == caller_integrity.grouped_triangle_count &&
-            builder_integrity.group_count == caller_integrity.group_count &&
-            builder_integrity.work_area == caller_integrity.work_area &&
-            builder_integrity.grouped_area == caller_integrity.grouped_area;
-        record_display_diagnostic_state("color_regions_builder", describe_integrity(builder_integrity));
-        record_display_diagnostic_state("color_regions_caller", describe_integrity(caller_integrity));
-        if (!builder_integrity.valid || !caller_integrity.valid || !builder_integrity.immutable_input_preserved ||
-            !caller_matches_builder) {
-            m_generation_integrity_valid = false;
-            record_display_diagnostic_state("color_regions_integrity_failed");
-            return;
+    mix_hash(result.input_hash, color_groups.size());
+    for (const ColorGroup& group : color_groups) {
+        mix_hash(result.input_hash, group.component_id);
+        mix_color(result.input_hash, group.color);
+    }
+    mix_hash(result.input_hash, group_triangles.size());
+    for (const auto& group : group_triangles) {
+        mix_hash(result.input_hash, group.size());
+        for (size_t triangle : group)
+            mix_hash(result.input_hash, triangle);
+    }
+    mix_hash(result.input_hash, group_areas.size());
+    for (double area : group_areas)
+        mix_hash(result.input_hash, std::hash<double>{}(area));
+
+    result.seed_count = seeds.size();
+    result.output_hash = size_t(0x165667b1U);
+    mix_hash(result.output_hash, fragment_count);
+    mix_hash(result.output_hash, seeds.size());
+    bool valid = fragment_count != 0 && seeds.size() == fragment_count &&
+        geometry.size() == m_triangle_selectors.size() && fragment_for_triangle.size() == work_triangles.size() &&
+        fragment_neighbours.size() == fragment_count && fragment_boundary_distance.size() == fragment_count &&
+        fragment_boundary_neighbor.size() == fragment_count;
+    for (size_t index = 0; index < seeds.size(); ++index) {
+        const FragmentSeed& seed = seeds[index];
+        mix_float(result.output_hash, seed.position.x());
+        mix_float(result.output_hash, seed.position.y());
+        mix_float(result.output_hash, seed.position.z());
+        mix_hash(result.output_hash, seed.color_group);
+        mix_hash(result.output_hash, seed.stable_id);
+        if (seed.color_group >= color_groups.size())
+            valid = false;
+    }
+    for (const auto& per_volume : geometry) {
+        mix_hash(result.output_hash, per_volume.size());
+        if (per_volume.size() != fragment_count)
+            valid = false;
+        for (const CpuGeometry& data : per_volume) {
+            mix_hash(result.output_hash, data.surface.vertices.size());
+            mix_hash(result.output_hash, data.surface.indices.size());
+            if (!data.empty())
+                ++result.nonempty_geometry_count;
+            for (const Vec3f& vertex : data.surface.vertices) {
+                mix_float(result.output_hash, vertex.x());
+                mix_float(result.output_hash, vertex.y());
+                mix_float(result.output_hash, vertex.z());
+            }
+            for (const stl_triangle_vertex_indices& face : data.surface.indices) {
+                for (int vertex : face) {
+                    mix_hash(result.output_hash, size_t(vertex));
+                    if (vertex < 0 || size_t(vertex) >= data.surface.vertices.size())
+                        valid = false;
+                }
+            }
         }
     }
+    for (size_t triangle = 0; triangle < fragment_for_triangle.size(); ++triangle) {
+        const size_t fragment = fragment_for_triangle[triangle];
+        mix_hash(result.output_hash, fragment);
+        if (fragment == fragment_count)
+            continue;
+        if (fragment >= fragment_count || seeds[fragment].color_group != work_triangles[triangle].color_group)
+            valid = false;
+        else
+            ++result.assigned_triangle_count;
+    }
+    for (size_t fragment = 0; fragment < fragment_neighbours.size(); ++fragment) {
+        mix_hash(result.output_hash, fragment_neighbours[fragment].size());
+        for (size_t neighbour : fragment_neighbours[fragment]) {
+            mix_hash(result.output_hash, neighbour);
+            if (neighbour >= fragment_count || neighbour == fragment ||
+                !fragment_neighbours[neighbour].count(fragment))
+                valid = false;
+        }
+        mix_float(result.output_hash, fragment_boundary_distance[fragment]);
+        mix_hash(result.output_hash, fragment_boundary_neighbor[fragment]);
+        if (fragment_boundary_neighbor[fragment] > color_groups.size())
+            valid = false;
+    }
+    valid = valid && result.assigned_triangle_count == work_triangles.size();
+    result.valid = valid;
+    return result;
+}
 
+bool GLGizmoTracery::generate_fragments(
+    const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
+    const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas,
+    float target_edge, float maximum_fragment_diameter, bool export_diagnostics,
+    std::map<EdgeKey, size_t>& work_edge_owners, size_t& fragment_count, std::vector<FragmentSeed>& seeds,
+    std::vector<std::vector<CpuGeometry>>& geometry, std::vector<size_t>& fragment_for_triangle,
+    std::vector<std::set<size_t>>& fragment_neighbours, std::vector<float>& fragment_boundary_distance,
+    std::vector<size_t>& fragment_boundary_neighbor, bool verify_integrity,
+    FragmentGenerationIntegrity* builder_integrity)
+{
+    const size_t input_hash_before = verify_integrity ? inspect_fragment_generation(
+        work_triangles, color_groups, group_triangles, group_areas, target_edge, 0, seeds, geometry,
+        fragment_for_triangle, fragment_neighbours, fragment_boundary_distance, fragment_boundary_neighbor).input_hash : 0;
     std::vector<size_t> group_fragment_counts(color_groups.size(), 0);
     const size_t minimum_fragments_per_region = std::clamp<size_t>(
         size_t(std::lround(8.0f + 16.0f * m_fragment_density)), 8, 24);
@@ -1271,7 +1316,7 @@ void GLGizmoTracery::generate_paint_plan()
         group_fragment_counts[group] = std::min(group_triangles[group].size(),
             std::max(minimum_fragments_per_region, area_count));
     }
-    size_t fragment_count = 0;
+    fragment_count = 0;
     for (size_t count : group_fragment_counts)
         fragment_count += count;
     // A full-surface bucket fill must not allocate an unbounded number of
@@ -1293,12 +1338,7 @@ void GLGizmoTracery::generate_paint_plan()
         }
     }
 
-    struct FragmentSeed {
-        Vec3f position;
-        size_t color_group;
-        size_t stable_id;
-    };
-    std::vector<FragmentSeed> seeds;
+    seeds.clear();
     seeds.reserve(fragment_count);
     for (size_t group = 0; group < group_triangles.size(); ++group) {
         const std::vector<size_t>& triangles = group_triangles[group];
@@ -1345,20 +1385,10 @@ void GLGizmoTracery::generate_paint_plan()
         if (export_diagnostics)
             wxMessageBox(_L("No stained-glass fragments were generated for the painted area."),
                          _L("Stained glass"), wxOK | wxICON_INFORMATION);
-        return;
+        return false;
     }
 
-    struct CpuGeometry {
-        indexed_triangle_set surface;
-
-        bool empty() const { return surface.indices.empty(); }
-        void add_vertex(const Vec3f& vertex) { surface.vertices.emplace_back(vertex); }
-        void add_triangle(unsigned int first, unsigned int second, unsigned int third)
-        {
-            surface.indices.emplace_back(stl_triangle_vertex_indices{int(first), int(second), int(third)});
-        }
-    };
-    std::vector<std::vector<CpuGeometry>> geometry(m_triangle_selectors.size(), std::vector<CpuGeometry>(fragment_count));
+    geometry.assign(m_triangle_selectors.size(), std::vector<CpuGeometry>(fragment_count));
 
     const auto warped_position = [target_edge](const Vec3f& point) {
         // One continuous field is shared by every seed. Unlike per-seed
@@ -1465,7 +1495,7 @@ void GLGizmoTracery::generate_paint_plan()
         return result;
     };
 
-    std::vector<size_t> fragment_for_triangle(work_triangles.size(), fragment_count);
+    fragment_for_triangle.assign(work_triangles.size(), fragment_count);
     for (size_t triangle_index = 0; triangle_index < work_triangles.size(); ++triangle_index) {
         const WorkTriangle& triangle = work_triangles[triangle_index];
         if (triangle.mesh_idx >= geometry.size() || triangle.color_group >= group_seed_trees.size() ||
@@ -1621,7 +1651,7 @@ void GLGizmoTracery::generate_paint_plan()
     // Approximate the visible fragment adjacency from adjacent source faces.
     // This catches normal shard boundaries without treating merely nearby,
     // folded model faces as neighbours.
-    std::vector<std::set<size_t>> fragment_neighbours(fragment_count);
+    fragment_neighbours.assign(fragment_count, {});
     for (size_t triangle = 0; triangle < work_adjacency.size(); ++triangle) {
         const size_t fragment = fragment_for_triangle[triangle];
         if (fragment >= fragment_count)
@@ -1669,8 +1699,8 @@ void GLGizmoTracery::generate_paint_plan()
         }
     }
 
-    std::vector<float> fragment_boundary_distance(fragment_count, std::numeric_limits<float>::max());
-    std::vector<size_t> fragment_boundary_neighbor(fragment_count, no_group);
+    fragment_boundary_distance.assign(fragment_count, std::numeric_limits<float>::max());
+    fragment_boundary_neighbor.assign(fragment_count, no_group);
     for (size_t triangle = 0; triangle < work_triangles.size(); ++triangle) {
         const size_t fragment = fragment_for_triangle[triangle];
         if (fragment == fragment_count || boundary_distance[triangle] >= fragment_boundary_distance[fragment])
@@ -1679,6 +1709,181 @@ void GLGizmoTracery::generate_paint_plan()
         fragment_boundary_neighbor[fragment] = boundary_neighbor[triangle];
     }
 
+    if (builder_integrity != nullptr) {
+        if (verify_integrity) {
+            *builder_integrity = inspect_fragment_generation(work_triangles, color_groups, group_triangles, group_areas,
+                target_edge, fragment_count, seeds, geometry, fragment_for_triangle, fragment_neighbours,
+                fragment_boundary_distance, fragment_boundary_neighbor);
+            builder_integrity->immutable_input_preserved = builder_integrity->input_hash == input_hash_before;
+            builder_integrity->valid = builder_integrity->valid && builder_integrity->immutable_input_preserved;
+        } else {
+            *builder_integrity = {};
+        }
+    }
+    return true;
+}
+
+void GLGizmoTracery::generate_paint_plan()
+{
+    record_display_diagnostic_state("generation_begin");
+    ScopeGuard log_generation_end([this]() { record_display_diagnostic_state("generation_end"); });
+    const bool export_diagnostics = std::exchange(m_export_next_generation, false);
+    m_generated_fragments.clear();
+    m_fragment_colors.clear();
+    m_fragment_mixed_filament_ids.clear();
+    m_generation_integrity_valid = true;
+    const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
+        m_c->selection_info()->model_object() : nullptr;
+    if (model_object == nullptr || model_object->id() != m_mask_object_id) {
+        if (export_diagnostics)
+            wxMessageBox(_L("Select a model and paint a stained-glass area before exporting diagnostics."),
+                         _L("Stained glass"), wxOK | wxICON_INFORMATION);
+        return;
+    }
+
+    // Preserve the original preparation order: collectors and their
+    // TriangleSelectors run after the output slots have been created.
+    m_generated_fragments.resize(m_triangle_selectors.size());
+
+    using SurfaceTriangle = GenerationInput::SurfaceTriangle;
+    using ColorSource = GenerationInput::ColorSource;
+
+    // Keep the working data in this function exactly as before the collection
+    // helper was introduced. GenerationInput is deliberately only a set of
+    // references used while collecting; it does not own or relocate data that
+    // later generation stages read through captured callbacks.
+    std::vector<ColorGroup> color_groups;
+    std::vector<std::vector<std::unique_ptr<ColorSource>>> color_sources(m_triangle_selectors.size());
+    std::vector<SurfaceTriangle> surface_triangles;
+    std::vector<Transform3d> volume_transforms;
+    double surface_area = 0.0;
+    GenerationInput input{ export_diagnostics, model_object, surface_triangles, color_sources, volume_transforms, surface_area };
+
+    if (!collect_generation_input(input))
+        return;
+
+    // Fragment dimensions are expressed in model units (millimetres), never
+    // as a fraction of the painted area. Larger selections gain more shards,
+    // not larger circular cells.
+    const float target_edge = 6.5f - 4.0f * m_fragment_density;
+    const float maximum_fragment_diameter = target_edge * 1.35f;
+    // Fragment ownership is evaluated on a substantially finer temporary
+    // mesh than the fragment size. This lets the resulting boundary follow a
+    // smooth curve while leaving the source model itself untouched.
+    // Curves are tessellated on a common fine mesh.  This is deliberately
+    // finer than the shard spacing: visual smoothness must not depend on the
+    // original model's triangle size.
+    float boundary_sample_edge = std::max(0.012f, target_edge * 0.05f);
+    // The temporary surface must stay bounded even for a large painted model.
+    // Without this cap, two density changes can each create millions of work
+    // triangles and block the UI while their maps and adjacency lists rebuild.
+    constexpr size_t max_work_triangles = 120000;
+    const auto estimated_work_triangles = [&surface_triangles](float sample_edge) {
+        double result = 0.0;
+        for (const SurfaceTriangle& source : surface_triangles) {
+            const float longest = std::max({ (source.world_b - source.world_a).norm(),
+                (source.world_c - source.world_b).norm(), (source.world_a - source.world_c).norm() });
+            const size_t subdivisions = size_t(std::clamp(int(std::ceil(longest / sample_edge)), 1, 96));
+            result += double(subdivisions) * double(subdivisions);
+        }
+        return result;
+    };
+    for (int pass = 0; pass < 3; ++pass) {
+        const double estimate = estimated_work_triangles(boundary_sample_edge);
+        if (estimate <= max_work_triangles)
+            break;
+        boundary_sample_edge *= float(std::sqrt(estimate / double(max_work_triangles)));
+    }
+    std::vector<WorkTriangle> work_triangles;
+    build_work_surface(input, boundary_sample_edge, work_triangles);
+    // Keep the original region workspaces owned by generate_paint_plan() for
+    // the whole generation. build_color_regions() only fills these objects.
+    std::vector<size_t> work_parents;
+    std::map<EdgeKey, size_t> work_edge_owners;
+    std::map<size_t, std::array<int64_t, 4>> work_anchors;
+    std::map<size_t, size_t> work_group_indices;
+    std::vector<std::vector<size_t>> group_triangles;
+    std::vector<double> group_areas;
+    const bool verify_color_regions = m_display_diagnostics_active;
+    const ColorRegionIntegrity builder_integrity = build_color_regions(
+        work_triangles, color_groups, group_triangles, group_areas, work_parents, work_edge_owners,
+        work_anchors, work_group_indices, verify_color_regions);
+    if (verify_color_regions) {
+        const ColorRegionIntegrity caller_integrity = inspect_color_regions(
+            work_triangles, color_groups, group_triangles, group_areas);
+        const auto describe_integrity = [](const ColorRegionIntegrity& integrity) {
+            return "valid=" + std::to_string(integrity.valid) +
+                ",immutable=" + std::to_string(integrity.immutable_input_preserved) +
+                ",work_triangles=" + std::to_string(integrity.work_triangle_count) +
+                ",grouped_triangles=" + std::to_string(integrity.grouped_triangle_count) +
+                ",groups=" + std::to_string(integrity.group_count) +
+                ",work_area=" + std::to_string(integrity.work_area) +
+                ",grouped_area=" + std::to_string(integrity.grouped_area) +
+                ",immutable_hash=" + std::to_string(integrity.immutable_hash) +
+                ",output_hash=" + std::to_string(integrity.output_hash);
+        };
+        const bool caller_matches_builder = builder_integrity.immutable_hash == caller_integrity.immutable_hash &&
+            builder_integrity.output_hash == caller_integrity.output_hash &&
+            builder_integrity.work_triangle_count == caller_integrity.work_triangle_count &&
+            builder_integrity.grouped_triangle_count == caller_integrity.grouped_triangle_count &&
+            builder_integrity.group_count == caller_integrity.group_count &&
+            builder_integrity.work_area == caller_integrity.work_area &&
+            builder_integrity.grouped_area == caller_integrity.grouped_area;
+        record_display_diagnostic_state("color_regions_builder", describe_integrity(builder_integrity));
+        record_display_diagnostic_state("color_regions_caller", describe_integrity(caller_integrity));
+        if (!builder_integrity.valid || !caller_integrity.valid || !builder_integrity.immutable_input_preserved ||
+            !caller_matches_builder) {
+            m_generation_integrity_valid = false;
+            record_display_diagnostic_state("color_regions_integrity_failed");
+            return;
+        }
+    }
+
+    // Keep every cross-stage container owned by generate_paint_plan(). The
+    // helper only fills these exact local objects; it neither moves the work
+    // surface nor returns an owning state bundle.
+    size_t fragment_count = 0;
+    std::vector<FragmentSeed> seeds;
+    std::vector<std::vector<CpuGeometry>> geometry;
+    std::vector<size_t> fragment_for_triangle;
+    std::vector<std::set<size_t>> fragment_neighbours;
+    std::vector<float> fragment_boundary_distance;
+    std::vector<size_t> fragment_boundary_neighbor;
+    const bool verify_fragment_generation = m_display_diagnostics_active;
+    FragmentGenerationIntegrity fragment_builder_integrity;
+    if (!generate_fragments(work_triangles, color_groups, group_triangles, group_areas, target_edge,
+                            maximum_fragment_diameter, export_diagnostics, work_edge_owners, fragment_count,
+                            seeds, geometry, fragment_for_triangle, fragment_neighbours, fragment_boundary_distance,
+                            fragment_boundary_neighbor, verify_fragment_generation, &fragment_builder_integrity))
+        return;
+    if (verify_fragment_generation) {
+        const FragmentGenerationIntegrity fragment_caller_integrity = inspect_fragment_generation(
+            work_triangles, color_groups, group_triangles, group_areas, target_edge, fragment_count, seeds, geometry,
+            fragment_for_triangle, fragment_neighbours, fragment_boundary_distance, fragment_boundary_neighbor);
+        const bool caller_matches_builder = fragment_builder_integrity.input_hash == fragment_caller_integrity.input_hash &&
+            fragment_builder_integrity.output_hash == fragment_caller_integrity.output_hash &&
+            fragment_builder_integrity.seed_count == fragment_caller_integrity.seed_count &&
+            fragment_builder_integrity.assigned_triangle_count == fragment_caller_integrity.assigned_triangle_count &&
+            fragment_builder_integrity.nonempty_geometry_count == fragment_caller_integrity.nonempty_geometry_count;
+        const auto describe_integrity = [](const FragmentGenerationIntegrity& integrity) {
+            return "valid=" + std::to_string(integrity.valid) +
+                ",immutable=" + std::to_string(integrity.immutable_input_preserved) +
+                ",input_hash=" + std::to_string(integrity.input_hash) +
+                ",output_hash=" + std::to_string(integrity.output_hash) +
+                ",seeds=" + std::to_string(integrity.seed_count) +
+                ",assigned_triangles=" + std::to_string(integrity.assigned_triangle_count) +
+                ",nonempty_geometry=" + std::to_string(integrity.nonempty_geometry_count);
+        };
+        record_display_diagnostic_state("fragment_generation_builder", describe_integrity(fragment_builder_integrity));
+        record_display_diagnostic_state("fragment_generation_caller", describe_integrity(fragment_caller_integrity));
+        if (!fragment_builder_integrity.valid || !fragment_caller_integrity.valid ||
+            !fragment_builder_integrity.immutable_input_preserved || !caller_matches_builder) {
+            m_generation_integrity_valid = false;
+            record_display_diagnostic_state("fragment_generation_integrity_failed");
+            return;
+        }
+    }
+    const size_t no_group = color_groups.size();
     std::vector<ColorRGBA> base_colors;
     base_colors.reserve(fragment_count);
     for (const FragmentSeed& seed : seeds)
