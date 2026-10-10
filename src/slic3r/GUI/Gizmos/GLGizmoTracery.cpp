@@ -350,6 +350,7 @@ struct GLGizmoTracery::GenerationInput {
 
 struct GLGizmoTracery::WorkTriangle {
     size_t    mesh_idx;
+    int       original_facet_id = -1;
     Vec3f     a;
     Vec3f     b;
     Vec3f     c;
@@ -387,12 +388,16 @@ struct GLGizmoTracery::FragmentSeed {
 
 struct GLGizmoTracery::CpuGeometry {
     indexed_triangle_set surface;
+    // Parallel to surface.indices. A Voronoi polygon is triangulated into
+    // several faces, all of which retain the source model facet.
+    std::vector<int>     source_facet_ids;
 
     bool empty() const { return surface.indices.empty(); }
     void add_vertex(const Vec3f& vertex) { surface.vertices.emplace_back(vertex); }
-    void add_triangle(unsigned int first, unsigned int second, unsigned int third)
+    void add_triangle(unsigned int first, unsigned int second, unsigned int third, int source_facet_id)
     {
         surface.indices.emplace_back(stl_triangle_vertex_indices{int(first), int(second), int(third)});
+        source_facet_ids.emplace_back(source_facet_id);
     }
 };
 
@@ -1002,13 +1007,13 @@ void GLGizmoTracery::build_work_surface(const GenerationInput& input, float boun
                 const Vec3f world_b = point(source.world_a, source.world_b, source.world_c, i + 1, j);
                 const Vec3f world_c = point(source.world_a, source.world_b, source.world_c, i, j + 1);
                 const ColorRGBA color = sampled_source_color(source.mesh_idx, (a + b + c) / 3.0f, source.source_color);
-                work_triangles.push_back({ source.mesh_idx, a, b, c, world_a, world_b, world_c, source.normal, color, 0,
+                work_triangles.push_back({ source.mesh_idx, source.original_facet_id, a, b, c, world_a, world_b, world_c, source.normal, color, 0,
                     0.5f * (world_b - world_a).cross(world_c - world_a).norm() });
                 if (j < subdivisions - i - 1) {
                     const Vec3f d = point(source.a, source.b, source.c, i + 1, j + 1);
                     const Vec3f world_d = point(source.world_a, source.world_b, source.world_c, i + 1, j + 1);
                     const ColorRGBA color = sampled_source_color(source.mesh_idx, (b + d + c) / 3.0f, source.source_color);
-                    work_triangles.push_back({ source.mesh_idx, b, d, c, world_b, world_d, world_c, source.normal, color, 0,
+                    work_triangles.push_back({ source.mesh_idx, source.original_facet_id, b, d, c, world_b, world_d, world_c, source.normal, color, 0,
                         0.5f * (world_d - world_b).cross(world_c - world_b).norm() });
                 }
             }
@@ -1037,8 +1042,12 @@ GLGizmoTracery::ColorRegionIntegrity GLGizmoTracery::inspect_color_regions(
     result.work_triangle_count = work_triangles.size();
     result.group_count = color_groups.size();
     result.immutable_hash = size_t(0x85ebca6bU);
+    bool source_ids_valid = true;
     for (const WorkTriangle& triangle : work_triangles) {
         mix_hash(result.immutable_hash, triangle.mesh_idx);
+        mix_hash(result.immutable_hash, size_t(triangle.original_facet_id));
+        if (triangle.original_facet_id < 0)
+            source_ids_valid = false;
         for (const Vec3f* point : { &triangle.a, &triangle.b, &triangle.c, &triangle.world_a, &triangle.world_b,
                                     &triangle.world_c, &triangle.normal }) {
             mix_float(result.immutable_hash, point->x());
@@ -1060,7 +1069,7 @@ GLGizmoTracery::ColorRegionIntegrity GLGizmoTracery::inspect_color_regions(
     mix_hash(result.output_hash, group_triangles.size());
     mix_hash(result.output_hash, group_areas.size());
     std::vector<unsigned char> seen(work_triangles.size(), 0);
-    bool assignments_valid = group_shapes_match;
+    bool assignments_valid = group_shapes_match && source_ids_valid;
     for (size_t group = 0; group < group_triangles.size(); ++group) {
         const double area = group < group_areas.size() ? group_areas[group] : 0.0;
         result.grouped_area += area;
@@ -1214,8 +1223,15 @@ GLGizmoTracery::FragmentGenerationIntegrity GLGizmoTracery::inspect_fragment_gen
     result.input_hash = size_t(0x27d4eb2fU);
     mix_float(result.input_hash, target_edge);
     mix_hash(result.input_hash, work_triangles.size());
+    bool source_ids_valid = true;
+    std::vector<std::set<int>> source_facets_by_mesh(m_triangle_selectors.size());
     for (const WorkTriangle& triangle : work_triangles) {
         mix_hash(result.input_hash, triangle.mesh_idx);
+        mix_hash(result.input_hash, size_t(triangle.original_facet_id));
+        if (triangle.mesh_idx >= source_facets_by_mesh.size() || triangle.original_facet_id < 0)
+            source_ids_valid = false;
+        else
+            source_facets_by_mesh[triangle.mesh_idx].insert(triangle.original_facet_id);
         mix_hash(result.input_hash, triangle.color_group);
         for (const Vec3f* point : { &triangle.a, &triangle.b, &triangle.c, &triangle.world_a, &triangle.world_b,
                                     &triangle.world_c, &triangle.normal }) {
@@ -1245,7 +1261,7 @@ GLGizmoTracery::FragmentGenerationIntegrity GLGizmoTracery::inspect_fragment_gen
     result.output_hash = size_t(0x165667b1U);
     mix_hash(result.output_hash, fragment_count);
     mix_hash(result.output_hash, seeds.size());
-    bool valid = fragment_count != 0 && seeds.size() == fragment_count &&
+    bool valid = source_ids_valid && fragment_count != 0 && seeds.size() == fragment_count &&
         geometry.size() == m_triangle_selectors.size() && fragment_for_triangle.size() == work_triangles.size() &&
         fragment_neighbours.size() == fragment_count && fragment_boundary_distance.size() == fragment_count &&
         fragment_boundary_neighbor.size() == fragment_count;
@@ -1259,21 +1275,33 @@ GLGizmoTracery::FragmentGenerationIntegrity GLGizmoTracery::inspect_fragment_gen
         if (seed.color_group >= color_groups.size())
             valid = false;
     }
-    for (const auto& per_volume : geometry) {
+    for (size_t volume = 0; volume < geometry.size(); ++volume) {
+        const auto& per_volume = geometry[volume];
         mix_hash(result.output_hash, per_volume.size());
         if (per_volume.size() != fragment_count)
             valid = false;
         for (const CpuGeometry& data : per_volume) {
             mix_hash(result.output_hash, data.surface.vertices.size());
             mix_hash(result.output_hash, data.surface.indices.size());
+            mix_hash(result.output_hash, data.source_facet_ids.size());
             if (!data.empty())
                 ++result.nonempty_geometry_count;
+            if (data.source_facet_ids.size() != data.surface.indices.size())
+                valid = false;
             for (const Vec3f& vertex : data.surface.vertices) {
                 mix_float(result.output_hash, vertex.x());
                 mix_float(result.output_hash, vertex.y());
                 mix_float(result.output_hash, vertex.z());
             }
-            for (const stl_triangle_vertex_indices& face : data.surface.indices) {
+            for (size_t face_index = 0; face_index < data.surface.indices.size(); ++face_index) {
+                const stl_triangle_vertex_indices& face = data.surface.indices[face_index];
+                if (face_index < data.source_facet_ids.size()) {
+                    const int source_facet_id = data.source_facet_ids[face_index];
+                    mix_hash(result.output_hash, size_t(source_facet_id));
+                    if (source_facet_id < 0 || volume >= source_facets_by_mesh.size() ||
+                        !source_facets_by_mesh[volume].count(source_facet_id))
+                        valid = false;
+                }
                 for (int vertex : face) {
                     mix_hash(result.output_hash, size_t(vertex));
                     if (vertex < 0 || size_t(vertex) >= data.surface.vertices.size())
@@ -1413,9 +1441,11 @@ GLGizmoTracery::PublishGeneratedFragmentsIntegrity GLGizmoTracery::inspect_publi
             mix_hash(result.published_hash, fragment.fragment_id);
             mix_hash(result.published_hash, fragment.surface.vertices.size());
             mix_hash(result.published_hash, fragment.surface.indices.size());
+            mix_hash(result.published_hash, fragment.source_facet_ids.size());
             ++result.published_fragments;
             result.published_faces += fragment.surface.indices.size();
             if (fragment.fragment_id >= fragment_count || fragment.surface.indices.empty() ||
+                fragment.source_facet_ids.size() != fragment.surface.indices.size() ||
                 (has_previous && fragment.fragment_id <= previous))
                 result.valid = false;
             previous = fragment.fragment_id;
@@ -1425,12 +1455,20 @@ GLGizmoTracery::PublishGeneratedFragmentsIntegrity GLGizmoTracery::inspect_publi
                 mix_float(result.published_hash, vertex.y());
                 mix_float(result.published_hash, vertex.z());
             }
-            for (const stl_triangle_vertex_indices& face : fragment.surface.indices)
+            for (size_t face_index = 0; face_index < fragment.surface.indices.size(); ++face_index) {
+                const stl_triangle_vertex_indices& face = fragment.surface.indices[face_index];
+                if (face_index < fragment.source_facet_ids.size()) {
+                    const int source_facet_id = fragment.source_facet_ids[face_index];
+                    mix_hash(result.published_hash, size_t(source_facet_id));
+                    if (source_facet_id < 0)
+                        result.valid = false;
+                }
                 for (int vertex : face) {
                     mix_hash(result.published_hash, size_t(vertex));
                     if (vertex < 0 || size_t(vertex) >= fragment.surface.vertices.size())
                         result.valid = false;
                 }
+            }
         }
     }
     return result;
@@ -1715,7 +1753,7 @@ bool GLGizmoTracery::generate_fragments(
             for (const ClipVertex& vertex : polygon)
                 data.add_vertex(vertex.local);
             for (unsigned int index = 1; index + 1 < polygon.size(); ++index)
-                data.add_triangle(first, first + index, first + index + 1);
+                data.add_triangle(first, first + index, first + index + 1, triangle.original_facet_id);
         }
     }
 
@@ -2036,19 +2074,30 @@ void GLGizmoTracery::publish_generated_fragments(
             mix_hash(expected.expected_hash, fragment);
             mix_hash(expected.expected_hash, data.surface.vertices.size());
             mix_hash(expected.expected_hash, data.surface.indices.size());
+            mix_hash(expected.expected_hash, data.source_facet_ids.size());
             ++expected.expected_fragments;
             expected.expected_faces += data.surface.indices.size();
+            if (data.source_facet_ids.size() != data.surface.indices.size())
+                layout_valid = false;
             for (const Vec3f& vertex : data.surface.vertices) {
                 mix_float(expected.expected_hash, vertex.x());
                 mix_float(expected.expected_hash, vertex.y());
                 mix_float(expected.expected_hash, vertex.z());
             }
-            for (const stl_triangle_vertex_indices& face : data.surface.indices)
+            for (size_t face_index = 0; face_index < data.surface.indices.size(); ++face_index) {
+                const stl_triangle_vertex_indices& face = data.surface.indices[face_index];
+                if (face_index < data.source_facet_ids.size()) {
+                    const int source_facet_id = data.source_facet_ids[face_index];
+                    mix_hash(expected.expected_hash, size_t(source_facet_id));
+                    if (source_facet_id < 0)
+                        layout_valid = false;
+                }
                 for (int vertex : face) {
                     mix_hash(expected.expected_hash, size_t(vertex));
                     if (vertex < 0 || size_t(vertex) >= data.surface.vertices.size())
                         layout_valid = false;
                 }
+            }
         }
     }
     std::filesystem::path diagnostic_dir;
@@ -2131,7 +2180,8 @@ void GLGizmoTracery::publish_generated_fragments(
                 diagnostic_stats << volume << ',' << fragment << ',' << surface.vertices.size() << ',' << surface.indices.size()
                                  << ',' << surface.vertices.size() << ',' << surface.indices.size() << ",0," << tiny_faces << ",1,1\n";
             }
-            m_generated_fragments[volume].emplace_back(GeneratedFragment{ fragment, std::move(surface) });
+            m_generated_fragments[volume].emplace_back(
+                GeneratedFragment{ fragment, std::move(surface), std::move(data.source_facet_ids) });
         }
     }
 

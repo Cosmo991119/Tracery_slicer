@@ -175,6 +175,9 @@ private:
     struct GeneratedFragment {
         size_t                   fragment_id = 0;
         indexed_triangle_set     surface;
+        // Parallel to surface.indices: identifies the original model facet
+        // from which each generated triangle was derived.
+        std::vector<int>         source_facet_ids;
     };
 
     enum class PaintMode { SURFACE, THROUGH };
