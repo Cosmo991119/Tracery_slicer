@@ -143,6 +143,14 @@ private:
         const std::vector<size_t>& fragment_boundary_neighbor,
         size_t fragment_count, float target_edge, float refraction_strength,
         const std::vector<ColorRGBA>& fragment_colors) const;
+    struct PublishGeneratedFragmentsIntegrity;
+    void publish_generated_fragments(const std::vector<WorkTriangle>& work_triangles,
+                                     std::vector<std::vector<CpuGeometry>>& geometry,
+                                     const std::vector<Transform3d>& volume_transforms,
+                                     size_t fragment_count, bool export_diagnostics,
+                                     bool verify_integrity,
+                                     PublishGeneratedFragmentsIntegrity* builder_integrity);
+    PublishGeneratedFragmentsIntegrity inspect_published_fragments(size_t fragment_count) const;
     void apply_stained_glass_colors();
     struct StainedGlassApplyPlan {
         enum class Mode {
