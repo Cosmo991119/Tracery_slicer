@@ -324,6 +324,7 @@ namespace Slic3r::GUI {
 struct GLGizmoTracery::GenerationInput {
     struct SurfaceTriangle {
         size_t    mesh_idx;
+        int       original_facet_id = -1;
         Vec3f     a;
         Vec3f     b;
         Vec3f     c;
@@ -891,7 +892,10 @@ bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
         if (mesh_idx >= m_triangle_selectors.size())
             break;
 
-        const indexed_triangle_set facets = m_triangle_selectors[mesh_idx]->get_facets_strict(EnforcerBlockerType::ENFORCER);
+        const TriangleSelector::StrictFacetsWithSources selected_facets =
+            m_triangle_selectors[mesh_idx]->get_facets_strict_with_sources(EnforcerBlockerType::ENFORCER);
+        const indexed_triangle_set& facets = selected_facets.facets;
+        assert(facets.indices.size() == selected_facets.source_facet_ids.size());
         const Transform3d& volume_transform = volume->get_matrix();
         input.volume_transforms.emplace_back(volume_transform);
         const ColorRGBA source_color = volume_source_color(int(volume_idx));
@@ -929,7 +933,9 @@ bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
                 input.color_sources[mesh_idx].emplace_back(std::move(source));
             }
         }
-        for (const stl_triangle_vertex_indices& face : facets.indices) {
+        for (size_t face_index = 0; face_index < facets.indices.size(); ++face_index) {
+            const stl_triangle_vertex_indices& face = facets.indices[face_index];
+            const int original_facet_id = selected_facets.source_facet_ids[face_index];
             const Vec3f a = facets.vertices[face[0]];
             const Vec3f b = facets.vertices[face[1]];
             const Vec3f c = facets.vertices[face[2]];
@@ -942,7 +948,7 @@ bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
             const Vec3f world_b = (volume_transform * b.cast<double>()).cast<float>();
             const Vec3f world_c = (volume_transform * c.cast<double>()).cast<float>();
             input.surface_area += 0.5 * double((world_b - world_a).cross(world_c - world_a).norm());
-            input.surface_triangles.push_back({ mesh_idx, a, b, c, world_a, world_b, world_c, normal, source_color });
+            input.surface_triangles.push_back({ mesh_idx, original_facet_id, a, b, c, world_a, world_b, world_c, normal, source_color });
         }
         ++mesh_idx;
     }

@@ -334,6 +334,14 @@ public:
     indexed_triangle_set get_facets(EnforcerBlockerType state) const;
     // Get facets at a given state. Triangulate T-joints.
     indexed_triangle_set get_facets_strict(EnforcerBlockerType state) const;
+    // Strict facets together with the index of the original mesh facet that
+    // produced each output triangle. T-joint triangulation may emit several
+    // output triangles for one original facet.
+    struct StrictFacetsWithSources {
+        indexed_triangle_set facets;
+        std::vector<int>     source_facet_ids;
+    };
+    StrictFacetsWithSources get_facets_strict_with_sources(EnforcerBlockerType state) const;
     // Get edges around the selected area by seed fill.
     std::vector<Vec2i32> get_seed_fill_contour() const;
 
@@ -525,8 +533,11 @@ private:
         const Triangle                              &tr,
         const Vec3i32                                 &neighbors,
         EnforcerBlockerType                          state,
-        std::vector<stl_triangle_vertex_indices>    &out_triangles) const;
-    void get_facets_split_by_tjoints(const Vec3i32 &vertices, const Vec3i32 &neighbors, std::vector<stl_triangle_vertex_indices> &out_triangles) const;
+        std::vector<stl_triangle_vertex_indices>    &out_triangles,
+        std::vector<int>                             *source_facet_ids) const;
+    void get_facets_split_by_tjoints(const Vec3i32 &vertices, const Vec3i32 &neighbors,
+                                     std::vector<stl_triangle_vertex_indices> &out_triangles,
+                                     std::vector<int> *source_facet_ids, int source_facet_id) const;
 
     void get_seed_fill_contour_recursive(int facet_idx, const Vec3i32 &neighbors, const Vec3i32 &neighbors_propagated, std::vector<Vec2i32> &edges_out) const;
 

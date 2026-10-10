@@ -1557,7 +1557,7 @@ indexed_triangle_set TriangleSelector::get_facets_strict(EnforcerBlockerType sta
         }
 
     for (int itriangle = 0; itriangle < m_orig_size_indices; ++ itriangle)
-        this->get_facets_strict_recursive(m_triangles[itriangle], m_neighbors[itriangle], state, out.indices);
+        this->get_facets_strict_recursive(m_triangles[itriangle], m_neighbors[itriangle], state, out.indices, nullptr);
 
     for (auto &triangle : out.indices)
         for (int i = 0; i < 3; ++ i)
@@ -1566,23 +1566,55 @@ indexed_triangle_set TriangleSelector::get_facets_strict(EnforcerBlockerType sta
     return out;
 }
 
+TriangleSelector::StrictFacetsWithSources TriangleSelector::get_facets_strict_with_sources(EnforcerBlockerType state) const
+{
+    StrictFacetsWithSources out;
+
+    size_t num_vertices = 0;
+    for (const Vertex &v : m_vertices)
+        if (v.ref_cnt > 0)
+            ++num_vertices;
+    out.facets.vertices.reserve(num_vertices);
+    std::vector<int> vertex_map(m_vertices.size(), -1);
+    for (size_t i = 0; i < m_vertices.size(); ++i)
+        if (const Vertex &v = m_vertices[i]; v.ref_cnt > 0) {
+            vertex_map[i] = int(out.facets.vertices.size());
+            out.facets.vertices.emplace_back(v.v);
+        }
+
+    for (int itriangle = 0; itriangle < m_orig_size_indices; ++itriangle)
+        this->get_facets_strict_recursive(m_triangles[itriangle], m_neighbors[itriangle], state,
+                                          out.facets.indices, &out.source_facet_ids);
+
+    for (auto &triangle : out.facets.indices)
+        for (int i = 0; i < 3; ++i)
+            triangle(i) = vertex_map[triangle(i)];
+
+    assert(out.facets.indices.size() == out.source_facet_ids.size());
+    return out;
+}
+
 void TriangleSelector::get_facets_strict_recursive(
     const Triangle                              &tr,
     const Vec3i32                                 &neighbors,
     EnforcerBlockerType                          state,
-    std::vector<stl_triangle_vertex_indices>    &out_triangles) const
+    std::vector<stl_triangle_vertex_indices>    &out_triangles,
+    std::vector<int>                             *source_facet_ids) const
 {
     if (tr.is_split()) {
         for (int i = 0; i <= tr.number_of_split_sides(); ++ i)
             this->get_facets_strict_recursive(
                 m_triangles[tr.children[i]],
                 this->child_neighbors(tr, neighbors, i),
-                state, out_triangles);
+                state, out_triangles, source_facet_ids);
     } else if (tr.get_state() == state)
-        this->get_facets_split_by_tjoints({tr.verts_idxs[0], tr.verts_idxs[1], tr.verts_idxs[2]}, neighbors, out_triangles);
+        this->get_facets_split_by_tjoints({tr.verts_idxs[0], tr.verts_idxs[1], tr.verts_idxs[2]}, neighbors,
+                                           out_triangles, source_facet_ids, tr.source_triangle);
 }
 
-void TriangleSelector::get_facets_split_by_tjoints(const Vec3i32 &vertices, const Vec3i32 &neighbors, std::vector<stl_triangle_vertex_indices> &out_triangles) const
+void TriangleSelector::get_facets_split_by_tjoints(const Vec3i32 &vertices, const Vec3i32 &neighbors,
+                                                    std::vector<stl_triangle_vertex_indices> &out_triangles,
+                                                    std::vector<int> *source_facet_ids, int source_facet_id) const
 {
 // Export this triangle, but first collect the T-joint vertices along its edges.
     Vec3i32 midpoints(
@@ -1594,6 +1626,8 @@ void TriangleSelector::get_facets_split_by_tjoints(const Vec3i32 &vertices, cons
     case 0:
         // Just emit this triangle.
         out_triangles.emplace_back(vertices(0), vertices(1), vertices(2));
+        if (source_facet_ids != nullptr)
+            source_facet_ids->emplace_back(source_facet_id);
         break;
     case 1:
     {
@@ -1606,13 +1640,13 @@ void TriangleSelector::get_facets_split_by_tjoints(const Vec3i32 &vertices, cons
             { neighbors(i),
               this->neighbor_child(neighbors(j), vertices(k), vertices(j), Partition::Second),
               -1 },
-              out_triangles);
+              out_triangles, source_facet_ids, source_facet_id);
         this->get_facets_split_by_tjoints(
             { midpoints(j), vertices(k), vertices(i) },
             { this->neighbor_child(neighbors(j), vertices(k), vertices(j), Partition::First),
               neighbors(k),
               -1 },
-              out_triangles);
+              out_triangles, source_facet_ids, source_facet_id);
         break;
     }
     case 2:
@@ -1626,18 +1660,18 @@ void TriangleSelector::get_facets_split_by_tjoints(const Vec3i32 &vertices, cons
             { this->neighbor_child(neighbors(i), vertices(j), vertices(i), Partition::Second),
               -1,
               this->neighbor_child(neighbors(k), vertices(i), vertices(k), Partition::First) },
-              out_triangles);
+              out_triangles, source_facet_ids, source_facet_id);
         this->get_facets_split_by_tjoints(
             { midpoints(i), vertices(j), midpoints(k) },
             { this->neighbor_child(neighbors(i), vertices(j), vertices(i), Partition::First),
               -1, -1 },
-              out_triangles);
+              out_triangles, source_facet_ids, source_facet_id);
         this->get_facets_split_by_tjoints(
             { vertices(j), vertices(k), midpoints(k) },
             { neighbors(j),
               this->neighbor_child(neighbors(k), vertices(i), vertices(k), Partition::Second),
               -1 },
-              out_triangles);
+              out_triangles, source_facet_ids, source_facet_id);
         break;
     }
     default:
@@ -1648,20 +1682,22 @@ void TriangleSelector::get_facets_split_by_tjoints(const Vec3i32 &vertices, cons
             { this->neighbor_child(neighbors(0), vertices(1), vertices(0), Partition::Second),
               -1, 
               this->neighbor_child(neighbors(2), vertices(0), vertices(2), Partition::First) },
-              out_triangles);
+              out_triangles, source_facet_ids, source_facet_id);
         this->get_facets_split_by_tjoints(
             { midpoints(0), vertices(1), midpoints(1) },
             { this->neighbor_child(neighbors(0), vertices(1), vertices(0), Partition::First),
               this->neighbor_child(neighbors(1), vertices(2), vertices(1), Partition::Second),
               -1 },
-              out_triangles);
+              out_triangles, source_facet_ids, source_facet_id);
         this->get_facets_split_by_tjoints(
             { midpoints(1), vertices(2), midpoints(2) },
             { this->neighbor_child(neighbors(1), vertices(2), vertices(1), Partition::First),
               this->neighbor_child(neighbors(2), vertices(0), vertices(2), Partition::Second),
               -1 },
-              out_triangles);
+              out_triangles, source_facet_ids, source_facet_id);
         out_triangles.emplace_back(midpoints);
+        if (source_facet_ids != nullptr)
+            source_facet_ids->emplace_back(source_facet_id);
         break;
     }
 }
