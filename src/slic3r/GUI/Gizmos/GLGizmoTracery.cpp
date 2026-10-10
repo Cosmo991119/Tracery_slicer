@@ -361,6 +361,23 @@ struct GLGizmoTracery::WorkTriangle {
     float     area;
 };
 
+struct GLGizmoTracery::ColorGroup {
+    size_t    component_id;
+    ColorRGBA color;
+};
+
+struct GLGizmoTracery::ColorRegionIntegrity {
+    size_t immutable_hash = 0;
+    size_t output_hash = 0;
+    size_t work_triangle_count = 0;
+    size_t grouped_triangle_count = 0;
+    size_t group_count = 0;
+    double work_area = 0.0;
+    double grouped_area = 0.0;
+    bool   valid = false;
+    bool   immutable_input_preserved = true;
+};
+
 GLGizmoTracery::GLGizmoTracery(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoPainterBase(parent, icon_filename, sprite_id)
     , m_current_tool(ImGui::CircleButtonIcon)
@@ -948,6 +965,179 @@ void GLGizmoTracery::build_work_surface(const GenerationInput& input, float boun
     }
 }
 
+GLGizmoTracery::ColorRegionIntegrity GLGizmoTracery::inspect_color_regions(
+    const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
+    const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas) const
+{
+    const auto mix_hash = [](size_t& hash, size_t value) {
+        hash = (hash * size_t(0x9e3779b1U)) ^ value;
+    };
+    const auto mix_float = [&mix_hash](size_t& hash, float value) {
+        mix_hash(hash, std::hash<float>{}(value));
+    };
+    const auto mix_color = [&mix_float](size_t& hash, const ColorRGBA& color) {
+        mix_float(hash, color.r());
+        mix_float(hash, color.g());
+        mix_float(hash, color.b());
+        mix_float(hash, color.a());
+    };
+
+    ColorRegionIntegrity result;
+    result.work_triangle_count = work_triangles.size();
+    result.group_count = color_groups.size();
+    result.immutable_hash = size_t(0x85ebca6bU);
+    for (const WorkTriangle& triangle : work_triangles) {
+        mix_hash(result.immutable_hash, triangle.mesh_idx);
+        for (const Vec3f* point : { &triangle.a, &triangle.b, &triangle.c, &triangle.world_a, &triangle.world_b,
+                                    &triangle.world_c, &triangle.normal }) {
+            mix_float(result.immutable_hash, point->x());
+            mix_float(result.immutable_hash, point->y());
+            mix_float(result.immutable_hash, point->z());
+        }
+        mix_color(result.immutable_hash, triangle.source_color);
+        mix_float(result.immutable_hash, triangle.area);
+        result.work_area += triangle.area;
+    }
+
+    result.output_hash = size_t(0xc2b2ae35U);
+    mix_hash(result.output_hash, color_groups.size());
+    for (const ColorGroup& group : color_groups) {
+        mix_hash(result.output_hash, group.component_id);
+        mix_color(result.output_hash, group.color);
+    }
+    const bool group_shapes_match = group_triangles.size() == color_groups.size() && group_areas.size() == color_groups.size();
+    mix_hash(result.output_hash, group_triangles.size());
+    mix_hash(result.output_hash, group_areas.size());
+    std::vector<unsigned char> seen(work_triangles.size(), 0);
+    bool assignments_valid = group_shapes_match;
+    for (size_t group = 0; group < group_triangles.size(); ++group) {
+        const double area = group < group_areas.size() ? group_areas[group] : 0.0;
+        result.grouped_area += area;
+        mix_hash(result.output_hash, group_triangles[group].size());
+        mix_hash(result.output_hash, std::hash<double>{}(area));
+        for (size_t triangle_index : group_triangles[group]) {
+            mix_hash(result.output_hash, triangle_index);
+            if (triangle_index >= work_triangles.size() || group >= color_groups.size() || seen[triangle_index] != 0) {
+                assignments_valid = false;
+                continue;
+            }
+            const WorkTriangle& triangle = work_triangles[triangle_index];
+            if (triangle.color_group != group || triangle.source_color != color_groups[group].color)
+                assignments_valid = false;
+            seen[triangle_index] = 1;
+            ++result.grouped_triangle_count;
+        }
+    }
+    for (size_t index = 0; index < work_triangles.size(); ++index) {
+        const WorkTriangle& triangle = work_triangles[index];
+        mix_hash(result.output_hash, triangle.color_group);
+        if (triangle.color_group >= color_groups.size() || seen[index] != 1)
+            assignments_valid = false;
+    }
+    const double area_epsilon = std::max(1e-5, std::abs(result.work_area) * 1e-6);
+    result.valid = assignments_valid && result.grouped_triangle_count == result.work_triangle_count &&
+        std::abs(result.grouped_area - result.work_area) <= area_epsilon;
+    return result;
+}
+
+GLGizmoTracery::ColorRegionIntegrity GLGizmoTracery::build_color_regions(
+    std::vector<WorkTriangle>& work_triangles, std::vector<ColorGroup>& color_groups,
+    std::vector<std::vector<size_t>>& group_triangles, std::vector<double>& group_areas,
+    std::vector<size_t>& work_parents, std::map<EdgeKey, size_t>& work_edge_owners,
+    std::map<size_t, std::array<int64_t, 4>>& work_anchors, std::map<size_t, size_t>& work_group_indices,
+    bool verify_integrity) const
+{
+    const size_t immutable_hash_before = verify_integrity ?
+        inspect_color_regions(work_triangles, color_groups, group_triangles, group_areas).immutable_hash : 0;
+    const auto quantize_point = [](const Vec3f& point) {
+        return std::array<int64_t, 3>{
+            int64_t(std::llround(point.x() * 100000.0f)),
+            int64_t(std::llround(point.y() * 100000.0f)),
+            int64_t(std::llround(point.z() * 100000.0f))
+        };
+    };
+    const auto edge_key = [&quantize_point](size_t mesh_idx, const Vec3f& first, const Vec3f& second) {
+        std::array<int64_t, 3> a = quantize_point(first);
+        std::array<int64_t, 3> b = quantize_point(second);
+        if (b < a)
+            std::swap(a, b);
+        return EdgeKey{ mesh_idx, { a[0], a[1], a[2], b[0], b[1], b[2] } };
+    };
+
+    color_groups.clear();
+    work_parents.resize(work_triangles.size());
+    for (size_t index = 0; index < work_parents.size(); ++index)
+        work_parents[index] = index;
+    const auto find_work_root = [&work_parents](size_t node) {
+        while (work_parents[node] != node) {
+            work_parents[node] = work_parents[work_parents[node]];
+            node = work_parents[node];
+        }
+        return node;
+    };
+    const auto merge_work = [&find_work_root, &work_parents](size_t first, size_t second) {
+        first = find_work_root(first);
+        second = find_work_root(second);
+        if (first != second)
+            work_parents[second] = first;
+    };
+    work_edge_owners.clear();
+    for (size_t index = 0; index < work_triangles.size(); ++index) {
+        const WorkTriangle& triangle = work_triangles[index];
+        const std::array<EdgeKey, 3> edges = {
+            edge_key(triangle.mesh_idx, triangle.a, triangle.b),
+            edge_key(triangle.mesh_idx, triangle.b, triangle.c),
+            edge_key(triangle.mesh_idx, triangle.c, triangle.a)
+        };
+        for (const EdgeKey& edge : edges) {
+            const auto owner = work_edge_owners.find(edge);
+            if (owner == work_edge_owners.end())
+                work_edge_owners.emplace(edge, index);
+            else if (work_triangles[owner->second].source_color == triangle.source_color)
+                merge_work(index, owner->second);
+        }
+    }
+
+    work_anchors.clear();
+    for (size_t index = 0; index < work_triangles.size(); ++index) {
+        const std::array<int64_t, 3> point = quantize_point(work_triangles[index].a);
+        const std::array<int64_t, 4> anchor = { int64_t(work_triangles[index].mesh_idx), point[0], point[1], point[2] };
+        const size_t root = find_work_root(index);
+        const auto current = work_anchors.find(root);
+        if (current == work_anchors.end() || anchor < current->second)
+            work_anchors[root] = anchor;
+    }
+    work_group_indices.clear();
+    for (size_t index = 0; index < work_triangles.size(); ++index) {
+        const size_t root = find_work_root(index);
+        auto group = work_group_indices.find(root);
+        if (group == work_group_indices.end()) {
+            size_t stable_id = 0;
+            for (int64_t value : work_anchors[root])
+                stable_id = (stable_id * size_t(0x9e3779b1U)) ^ size_t(value);
+            group = work_group_indices.emplace(root, color_groups.size()).first;
+            color_groups.emplace_back(ColorGroup{ stable_id, work_triangles[index].source_color });
+        }
+        work_triangles[index].color_group = group->second;
+    }
+
+    group_triangles.clear();
+    group_triangles.resize(color_groups.size());
+    group_areas.assign(color_groups.size(), 0.0);
+    for (size_t index = 0; index < work_triangles.size(); ++index) {
+        const WorkTriangle& triangle = work_triangles[index];
+        group_triangles[triangle.color_group].emplace_back(index);
+        group_areas[triangle.color_group] += triangle.area;
+    }
+
+    if (!verify_integrity)
+        return {};
+    ColorRegionIntegrity result = inspect_color_regions(work_triangles, color_groups, group_triangles, group_areas);
+    result.immutable_input_preserved = result.immutable_hash == immutable_hash_before;
+    result.valid = result.valid && result.immutable_input_preserved;
+    return result;
+}
+
 void GLGizmoTracery::generate_paint_plan()
 {
     record_display_diagnostic_state("generation_begin");
@@ -956,6 +1146,7 @@ void GLGizmoTracery::generate_paint_plan()
     m_generated_fragments.clear();
     m_fragment_colors.clear();
     m_fragment_mixed_filament_ids.clear();
+    m_generation_integrity_valid = true;
     const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
         m_c->selection_info()->model_object() : nullptr;
     if (model_object == nullptr || model_object->id() != m_mask_object_id) {
@@ -971,10 +1162,6 @@ void GLGizmoTracery::generate_paint_plan()
 
     using SurfaceTriangle = GenerationInput::SurfaceTriangle;
     using ColorSource = GenerationInput::ColorSource;
-    struct ColorGroup {
-        size_t component_id;
-        ColorRGBA color;
-    };
 
     // Keep the working data in this function exactly as before the collection
     // helper was introduced. GenerationInput is deliberately only a set of
@@ -990,29 +1177,6 @@ void GLGizmoTracery::generate_paint_plan()
     if (!collect_generation_input(input))
         return;
 
-    // Edge keys are used later to rebuild fine same-colour regions and to
-    // find real borders between different original colours.
-    struct EdgeKey {
-        size_t mesh_idx;
-        std::array<int64_t, 6> points;
-        bool operator<(const EdgeKey& other) const {
-            return mesh_idx != other.mesh_idx ? mesh_idx < other.mesh_idx : points < other.points;
-        }
-    };
-    const auto quantize_point = [](const Vec3f& point) {
-        return std::array<int64_t, 3>{
-            int64_t(std::llround(point.x() * 100000.0f)),
-            int64_t(std::llround(point.y() * 100000.0f)),
-            int64_t(std::llround(point.z() * 100000.0f))
-        };
-    };
-    const auto edge_key = [&quantize_point](size_t mesh_idx, const Vec3f& first, const Vec3f& second) {
-        std::array<int64_t, 3> a = quantize_point(first);
-        std::array<int64_t, 3> b = quantize_point(second);
-        if (b < a)
-            std::swap(a, b);
-        return EdgeKey{ mesh_idx, { a[0], a[1], a[2], b[0], b[1], b[2] } };
-    };
     // Fragment dimensions are expressed in model units (millimetres), never
     // as a fraction of the painted area. Larger selections gain more shards,
     // not larger circular cells.
@@ -1047,77 +1211,47 @@ void GLGizmoTracery::generate_paint_plan()
     }
     std::vector<WorkTriangle> work_triangles;
     build_work_surface(input, boundary_sample_edge, work_triangles);
-
-    // The original mesh is often very coarse. Rebuild the regions from the
-    // fine surface samples instead: two samples belong together only when
-    // they share an edge *and* have the same original displayed colour. This
-    // keeps separate red islands independent and gives every colour region
-    // its own fragment layout.
-    color_groups.clear();
-    std::vector<size_t> work_parents(work_triangles.size());
-    for (size_t index = 0; index < work_parents.size(); ++index)
-        work_parents[index] = index;
-    const auto find_work_root = [&work_parents](size_t node) {
-        while (work_parents[node] != node) {
-            work_parents[node] = work_parents[work_parents[node]];
-            node = work_parents[node];
-        }
-        return node;
-    };
-    const auto merge_work = [&find_work_root, &work_parents](size_t first, size_t second) {
-        first = find_work_root(first);
-        second = find_work_root(second);
-        if (first != second)
-            work_parents[second] = first;
-    };
+    // Keep the original region workspaces owned by generate_paint_plan() for
+    // the whole generation. build_color_regions() only fills these objects.
+    std::vector<size_t> work_parents;
     std::map<EdgeKey, size_t> work_edge_owners;
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const WorkTriangle& triangle = work_triangles[index];
-        const std::array<EdgeKey, 3> edges = {
-            edge_key(triangle.mesh_idx, triangle.a, triangle.b),
-            edge_key(triangle.mesh_idx, triangle.b, triangle.c),
-            edge_key(triangle.mesh_idx, triangle.c, triangle.a)
-        };
-        for (const EdgeKey& edge : edges) {
-            const auto owner = work_edge_owners.find(edge);
-            if (owner == work_edge_owners.end())
-                work_edge_owners.emplace(edge, index);
-            else if (work_triangles[owner->second].source_color == triangle.source_color)
-                merge_work(index, owner->second);
-        }
-    }
-
     std::map<size_t, std::array<int64_t, 4>> work_anchors;
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const std::array<int64_t, 3> point = quantize_point(work_triangles[index].a);
-        const std::array<int64_t, 4> anchor = { int64_t(work_triangles[index].mesh_idx), point[0], point[1], point[2] };
-        const size_t root = find_work_root(index);
-        const auto current = work_anchors.find(root);
-        if (current == work_anchors.end() || anchor < current->second)
-            work_anchors[root] = anchor;
-    }
     std::map<size_t, size_t> work_group_indices;
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const size_t root = find_work_root(index);
-        auto group = work_group_indices.find(root);
-        if (group == work_group_indices.end()) {
-            size_t stable_id = 0;
-            for (int64_t value : work_anchors[root])
-                stable_id = (stable_id * size_t(0x9e3779b1U)) ^ size_t(value);
-            group = work_group_indices.emplace(root, color_groups.size()).first;
-            color_groups.emplace_back(ColorGroup{ stable_id, work_triangles[index].source_color });
+    std::vector<std::vector<size_t>> group_triangles;
+    std::vector<double> group_areas;
+    const bool verify_color_regions = m_display_diagnostics_active;
+    const ColorRegionIntegrity builder_integrity = build_color_regions(
+        work_triangles, color_groups, group_triangles, group_areas, work_parents, work_edge_owners,
+        work_anchors, work_group_indices, verify_color_regions);
+    if (verify_color_regions) {
+        const ColorRegionIntegrity caller_integrity = inspect_color_regions(
+            work_triangles, color_groups, group_triangles, group_areas);
+        const auto describe_integrity = [](const ColorRegionIntegrity& integrity) {
+            return "valid=" + std::to_string(integrity.valid) +
+                ",immutable=" + std::to_string(integrity.immutable_input_preserved) +
+                ",work_triangles=" + std::to_string(integrity.work_triangle_count) +
+                ",grouped_triangles=" + std::to_string(integrity.grouped_triangle_count) +
+                ",groups=" + std::to_string(integrity.group_count) +
+                ",work_area=" + std::to_string(integrity.work_area) +
+                ",grouped_area=" + std::to_string(integrity.grouped_area) +
+                ",immutable_hash=" + std::to_string(integrity.immutable_hash) +
+                ",output_hash=" + std::to_string(integrity.output_hash);
+        };
+        const bool caller_matches_builder = builder_integrity.immutable_hash == caller_integrity.immutable_hash &&
+            builder_integrity.output_hash == caller_integrity.output_hash &&
+            builder_integrity.work_triangle_count == caller_integrity.work_triangle_count &&
+            builder_integrity.grouped_triangle_count == caller_integrity.grouped_triangle_count &&
+            builder_integrity.group_count == caller_integrity.group_count &&
+            builder_integrity.work_area == caller_integrity.work_area &&
+            builder_integrity.grouped_area == caller_integrity.grouped_area;
+        record_display_diagnostic_state("color_regions_builder", describe_integrity(builder_integrity));
+        record_display_diagnostic_state("color_regions_caller", describe_integrity(caller_integrity));
+        if (!builder_integrity.valid || !caller_integrity.valid || !builder_integrity.immutable_input_preserved ||
+            !caller_matches_builder) {
+            m_generation_integrity_valid = false;
+            record_display_diagnostic_state("color_regions_integrity_failed");
+            return;
         }
-        work_triangles[index].color_group = group->second;
-    }
-
-    // A fragment is confined to one original-colour region. A red part can
-    // therefore never be recoloured blue merely because another seed is near.
-    std::vector<std::vector<size_t>> group_triangles(color_groups.size());
-    std::vector<double> group_areas(color_groups.size(), 0.0);
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const WorkTriangle& triangle = work_triangles[index];
-        group_triangles[triangle.color_group].emplace_back(index);
-        group_areas[triangle.color_group] += triangle.area;
     }
 
     std::vector<size_t> group_fragment_counts(color_groups.size(), 0);
@@ -1242,6 +1376,45 @@ void GLGizmoTracery::generate_paint_plan()
     for (const FragmentSeed& seed : seeds)
         warped_seeds.emplace_back(warped_position(seed.position));
 
+    const bool trace_fragment_clipping = m_display_diagnostics_active;
+    std::vector<size_t> seed_nearest_hits;
+    std::vector<size_t> seed_candidate_visits;
+    std::vector<size_t> seed_nonempty_polygons;
+    std::vector<size_t> seed_written_faces;
+    if (trace_fragment_clipping) {
+        seed_nearest_hits.assign(fragment_count, 0);
+        seed_candidate_visits.assign(fragment_count, 0);
+        seed_nonempty_polygons.assign(fragment_count, 0);
+        seed_written_faces.assign(fragment_count, 0);
+
+        std::vector<std::set<std::array<int64_t, 3>>> unique_positions(color_groups.size());
+        std::vector<size_t> group_seed_counts(color_groups.size(), 0);
+        for (size_t seed = 0; seed < seeds.size(); ++seed) {
+            const FragmentSeed& item = seeds[seed];
+            if (item.color_group < group_seed_counts.size()) {
+                ++group_seed_counts[item.color_group];
+                unique_positions[item.color_group].insert({
+                    int64_t(std::llround(item.position.x() * 100000.0f)),
+                    int64_t(std::llround(item.position.y() * 100000.0f)),
+                    int64_t(std::llround(item.position.z() * 100000.0f))
+                });
+            }
+            record_display_diagnostic_state("fragment_seed",
+                "seed=" + std::to_string(seed) +
+                ",group=" + std::to_string(item.color_group) +
+                ",stable_id=" + std::to_string(item.stable_id) +
+                ",position=" + std::to_string(item.position.x()) + "," + std::to_string(item.position.y()) + "," + std::to_string(item.position.z()) +
+                ",warped=" + std::to_string(warped_seeds[seed].x()) + "," + std::to_string(warped_seeds[seed].y()) + "," + std::to_string(warped_seeds[seed].z()));
+        }
+        for (size_t group = 0; group < group_seed_counts.size(); ++group) {
+            record_display_diagnostic_state("fragment_seed_group",
+                "group=" + std::to_string(group) +
+                ",seeds=" + std::to_string(group_seed_counts[group]) +
+                ",unique_positions=" + std::to_string(unique_positions[group].size()) +
+                ",regeneration_version=" + std::to_string(m_regeneration_version));
+        }
+    }
+
     const auto seed_coordinate = [&warped_seeds](size_t index, size_t dimension) {
         return warped_seeds[index][dimension];
     };
@@ -1320,6 +1493,8 @@ void GLGizmoTracery::generate_paint_plan()
                 continue;
         }
         fragment_for_triangle[triangle_index] = nearest;
+        if (trace_fragment_clipping)
+            ++seed_nearest_hits[nearest];
 
         // If the centre's nearest seed is distance d away and the triangle's
         // radius is r, no seed farther than d + 2r can own any part of it.
@@ -1339,6 +1514,8 @@ void GLGizmoTracery::generate_paint_plan()
         std::sort(candidates.begin(), candidates.end());
         candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
         for (const size_t candidate : candidates) {
+            if (trace_fragment_clipping)
+                ++seed_candidate_visits[candidate];
             std::vector<ClipVertex> polygon(vertices.begin(), vertices.end());
             for (const size_t other : candidates) {
                 if (other == candidate || polygon.empty())
@@ -1349,6 +1526,10 @@ void GLGizmoTracery::generate_paint_plan()
             }
             if (polygon.size() < 3)
                 continue;
+            if (trace_fragment_clipping) {
+                ++seed_nonempty_polygons[candidate];
+                seed_written_faces[candidate] += polygon.size() - 2;
+            }
             CpuGeometry& data = geometry[triangle.mesh_idx][candidate];
             const unsigned int first = unsigned(data.surface.vertices.size());
             for (const ClipVertex& vertex : polygon)
@@ -1358,9 +1539,56 @@ void GLGizmoTracery::generate_paint_plan()
         }
     }
 
+    if (trace_fragment_clipping) {
+        std::vector<size_t> seed_final_faces(fragment_count, 0);
+        for (const auto& per_volume : geometry)
+            for (size_t seed = 0; seed < per_volume.size(); ++seed)
+                seed_final_faces[seed] += per_volume[seed].surface.indices.size();
+        std::vector<size_t> group_nearest_hits(color_groups.size(), 0);
+        std::vector<size_t> group_nonempty_seeds(color_groups.size(), 0);
+        for (size_t seed = 0; seed < seeds.size(); ++seed) {
+            const size_t group = seeds[seed].color_group;
+            if (group < group_nearest_hits.size()) {
+                group_nearest_hits[group] += seed_nearest_hits[seed];
+                if (seed_final_faces[seed] != 0)
+                    ++group_nonempty_seeds[group];
+            }
+            record_display_diagnostic_state("fragment_clip_seed",
+                "seed=" + std::to_string(seed) +
+                ",group=" + std::to_string(group) +
+                ",nearest_hits=" + std::to_string(seed_nearest_hits[seed]) +
+                ",candidate_visits=" + std::to_string(seed_candidate_visits[seed]) +
+                ",nonempty_polygons=" + std::to_string(seed_nonempty_polygons[seed]) +
+                ",written_faces=" + std::to_string(seed_written_faces[seed]) +
+                ",final_faces=" + std::to_string(seed_final_faces[seed]));
+        }
+        for (size_t group = 0; group < group_nearest_hits.size(); ++group) {
+            record_display_diagnostic_state("fragment_clip_group",
+                "group=" + std::to_string(group) +
+                ",nearest_hits=" + std::to_string(group_nearest_hits[group]) +
+                ",nonempty_seeds=" + std::to_string(group_nonempty_seeds[group]));
+        }
+    }
+
     struct BoundarySample {
         size_t first_triangle;
         size_t second_triangle;
+    };
+    // Reuse the region edge map, preserving the same object lifetime as the
+    // pre-split path while rebuilding it for post-clipping adjacency.
+    const auto quantize_point = [](const Vec3f& point) {
+        return std::array<int64_t, 3>{
+            int64_t(std::llround(point.x() * 100000.0f)),
+            int64_t(std::llround(point.y() * 100000.0f)),
+            int64_t(std::llround(point.z() * 100000.0f))
+        };
+    };
+    const auto edge_key = [&quantize_point](size_t mesh_idx, const Vec3f& first, const Vec3f& second) {
+        std::array<int64_t, 3> a = quantize_point(first);
+        std::array<int64_t, 3> b = quantize_point(second);
+        if (b < a)
+            std::swap(a, b);
+        return EdgeKey{ mesh_idx, { a[0], a[1], a[2], b[0], b[1], b[2] } };
     };
     std::vector<BoundarySample> boundaries;
     std::vector<std::vector<std::pair<size_t, float>>> work_adjacency(work_triangles.size());
@@ -1681,6 +1909,11 @@ void GLGizmoTracery::apply_stained_glass_colors()
         m_display_diagnostics_last_canvas_state.clear();
         set_display_canvas_probe_phase(m_display_diagnostics_phase);
     });
+
+    if (!m_generation_integrity_valid) {
+        record_display_diagnostic_state("mix_skipped_integrity_failure");
+        return;
+    }
 
     auto plan = prepare_stained_glass_apply();
     if (!plan)

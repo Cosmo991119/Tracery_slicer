@@ -6,7 +6,10 @@
 
 #include "slic3r/GUI/I18N.hpp"
 
+#include <array>
+#include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -77,6 +80,28 @@ private:
     struct WorkTriangle;
     void build_work_surface(const GenerationInput& input, float boundary_sample_edge,
                             std::vector<WorkTriangle>& work_triangles) const;
+    struct ColorGroup;
+    struct ColorRegionIntegrity;
+    struct EdgeKey {
+        size_t mesh_idx;
+        std::array<int64_t, 6> points;
+        bool operator<(const EdgeKey& other) const {
+            return mesh_idx != other.mesh_idx ? mesh_idx < other.mesh_idx : points < other.points;
+        }
+    };
+    ColorRegionIntegrity build_color_regions(std::vector<WorkTriangle>& work_triangles,
+                                             std::vector<ColorGroup>& color_groups,
+                                             std::vector<std::vector<size_t>>& group_triangles,
+                                             std::vector<double>& group_areas,
+                                             std::vector<size_t>& work_parents,
+                                             std::map<EdgeKey, size_t>& work_edge_owners,
+                                             std::map<size_t, std::array<int64_t, 4>>& work_anchors,
+                                             std::map<size_t, size_t>& work_group_indices,
+                                             bool verify_integrity) const;
+    ColorRegionIntegrity inspect_color_regions(const std::vector<WorkTriangle>& work_triangles,
+                                               const std::vector<ColorGroup>& color_groups,
+                                               const std::vector<std::vector<size_t>>& group_triangles,
+                                               const std::vector<double>& group_areas) const;
     void apply_stained_glass_colors();
     struct StainedGlassApplyPlan {
         enum class Mode {
@@ -113,6 +138,7 @@ private:
     bool    m_export_next_generation = false;
     bool    m_diagnostic_strong_depth_bias = false;
     bool    m_display_diagnostics_active = false;
+    bool    m_generation_integrity_valid = true;
     std::filesystem::path m_display_diagnostics_dir;
     std::string m_display_diagnostics_phase;
     std::string m_display_diagnostics_last_canvas_state;
