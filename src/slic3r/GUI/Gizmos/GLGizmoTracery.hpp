@@ -74,6 +74,9 @@ private:
     void generate_paint_plan();
     struct GenerationInput;
     bool collect_generation_input(GenerationInput& input);
+    struct WorkTriangle;
+    void build_work_surface(const GenerationInput& input, float boundary_sample_edge,
+                            std::vector<WorkTriangle>& work_triangles) const;
     void apply_stained_glass_colors();
     struct StainedGlassApplyPlan {
         enum class Mode {

@@ -347,6 +347,20 @@ struct GLGizmoTracery::GenerationInput {
     double&                                                     surface_area;
 };
 
+struct GLGizmoTracery::WorkTriangle {
+    size_t    mesh_idx;
+    Vec3f     a;
+    Vec3f     b;
+    Vec3f     c;
+    Vec3f     world_a;
+    Vec3f     world_b;
+    Vec3f     world_c;
+    Vec3f     normal;
+    ColorRGBA source_color;
+    size_t    color_group;
+    float     area;
+};
+
 GLGizmoTracery::GLGizmoTracery(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoPainterBase(parent, icon_filename, sprite_id)
     , m_current_tool(ImGui::CircleButtonIcon)
@@ -879,6 +893,61 @@ bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
     return true;
 }
 
+void GLGizmoTracery::build_work_surface(const GenerationInput& input, float boundary_sample_edge,
+                                        std::vector<WorkTriangle>& work_triangles) const
+{
+    using SurfaceTriangle = GenerationInput::SurfaceTriangle;
+    using ColorSource = GenerationInput::ColorSource;
+
+    const auto& color_sources = input.color_sources;
+    const auto sampled_source_color = [&color_sources](size_t mesh_idx, const Vec3f& local_position,
+                                                        const ColorRGBA& fallback) {
+        if (mesh_idx >= color_sources.size() || color_sources[mesh_idx].empty())
+            return fallback;
+        ColorRGBA result = fallback;
+        double closest_distance = std::numeric_limits<double>::max();
+        for (const std::unique_ptr<ColorSource>& source : color_sources[mesh_idx]) {
+            const double distance = source->aabb->squared_distance(local_position.cast<double>());
+            if (distance < closest_distance) {
+                closest_distance = distance;
+                result = source->color;
+            }
+        }
+        return result;
+    };
+
+    work_triangles.clear();
+    work_triangles.reserve(input.surface_triangles.size() * 24);
+    for (const SurfaceTriangle& source : input.surface_triangles) {
+        const float longest_edge = std::max({ (source.world_b - source.world_a).norm(), (source.world_c - source.world_b).norm(), (source.world_a - source.world_c).norm() });
+        const int subdivisions = std::clamp(int(std::ceil(longest_edge / boundary_sample_edge)), 1, 96);
+        const float inv_subdivisions = 1.0f / float(subdivisions);
+        const auto point = [inv_subdivisions](const Vec3f& a, const Vec3f& b, const Vec3f& c, int i, int j) {
+            return a + (b - a) * (float(i) * inv_subdivisions) + (c - a) * (float(j) * inv_subdivisions);
+        };
+        for (int i = 0; i < subdivisions; ++i) {
+            for (int j = 0; j < subdivisions - i; ++j) {
+                const Vec3f a = point(source.a, source.b, source.c, i, j);
+                const Vec3f b = point(source.a, source.b, source.c, i + 1, j);
+                const Vec3f c = point(source.a, source.b, source.c, i, j + 1);
+                const Vec3f world_a = point(source.world_a, source.world_b, source.world_c, i, j);
+                const Vec3f world_b = point(source.world_a, source.world_b, source.world_c, i + 1, j);
+                const Vec3f world_c = point(source.world_a, source.world_b, source.world_c, i, j + 1);
+                const ColorRGBA color = sampled_source_color(source.mesh_idx, (a + b + c) / 3.0f, source.source_color);
+                work_triangles.push_back({ source.mesh_idx, a, b, c, world_a, world_b, world_c, source.normal, color, 0,
+                    0.5f * (world_b - world_a).cross(world_c - world_a).norm() });
+                if (j < subdivisions - i - 1) {
+                    const Vec3f d = point(source.a, source.b, source.c, i + 1, j + 1);
+                    const Vec3f world_d = point(source.world_a, source.world_b, source.world_c, i + 1, j + 1);
+                    const ColorRGBA color = sampled_source_color(source.mesh_idx, (b + d + c) / 3.0f, source.source_color);
+                    work_triangles.push_back({ source.mesh_idx, b, d, c, world_b, world_d, world_c, source.normal, color, 0,
+                        0.5f * (world_d - world_b).cross(world_c - world_b).norm() });
+                }
+            }
+        }
+    }
+}
+
 void GLGizmoTracery::generate_paint_plan()
 {
     record_display_diagnostic_state("generation_begin");
@@ -902,19 +971,6 @@ void GLGizmoTracery::generate_paint_plan()
 
     using SurfaceTriangle = GenerationInput::SurfaceTriangle;
     using ColorSource = GenerationInput::ColorSource;
-    struct WorkTriangle {
-        size_t mesh_idx;
-        Vec3f  a;
-        Vec3f  b;
-        Vec3f  c;
-        Vec3f  world_a;
-        Vec3f  world_b;
-        Vec3f  world_c;
-        Vec3f  normal;
-        ColorRGBA source_color;
-        size_t color_group;
-        float area;
-    };
     struct ColorGroup {
         size_t component_id;
         ColorRGBA color;
@@ -957,20 +1013,6 @@ void GLGizmoTracery::generate_paint_plan()
             std::swap(a, b);
         return EdgeKey{ mesh_idx, { a[0], a[1], a[2], b[0], b[1], b[2] } };
     };
-    const auto sampled_source_color = [&color_sources](size_t mesh_idx, const Vec3f& local_position, const ColorRGBA& fallback) {
-        if (mesh_idx >= color_sources.size() || color_sources[mesh_idx].empty())
-            return fallback;
-        ColorRGBA result = fallback;
-        double closest_distance = std::numeric_limits<double>::max();
-        for (const std::unique_ptr<ColorSource>& source : color_sources[mesh_idx]) {
-            const double distance = source->aabb->squared_distance(local_position.cast<double>());
-            if (distance < closest_distance) {
-                closest_distance = distance;
-                result = source->color;
-            }
-        }
-        return result;
-    };
     // Fragment dimensions are expressed in model units (millimetres), never
     // as a fraction of the painted area. Larger selections gain more shards,
     // not larger circular cells.
@@ -1004,35 +1046,7 @@ void GLGizmoTracery::generate_paint_plan()
         boundary_sample_edge *= float(std::sqrt(estimate / double(max_work_triangles)));
     }
     std::vector<WorkTriangle> work_triangles;
-    work_triangles.reserve(surface_triangles.size() * 24);
-    for (const SurfaceTriangle& source : surface_triangles) {
-        const float longest_edge = std::max({ (source.world_b - source.world_a).norm(), (source.world_c - source.world_b).norm(), (source.world_a - source.world_c).norm() });
-        const int subdivisions = std::clamp(int(std::ceil(longest_edge / boundary_sample_edge)), 1, 96);
-        const float inv_subdivisions = 1.0f / float(subdivisions);
-        const auto point = [inv_subdivisions](const Vec3f& a, const Vec3f& b, const Vec3f& c, int i, int j) {
-            return a + (b - a) * (float(i) * inv_subdivisions) + (c - a) * (float(j) * inv_subdivisions);
-        };
-        for (int i = 0; i < subdivisions; ++i) {
-            for (int j = 0; j < subdivisions - i; ++j) {
-                const Vec3f a = point(source.a, source.b, source.c, i, j);
-                const Vec3f b = point(source.a, source.b, source.c, i + 1, j);
-                const Vec3f c = point(source.a, source.b, source.c, i, j + 1);
-                const Vec3f world_a = point(source.world_a, source.world_b, source.world_c, i, j);
-                const Vec3f world_b = point(source.world_a, source.world_b, source.world_c, i + 1, j);
-                const Vec3f world_c = point(source.world_a, source.world_b, source.world_c, i, j + 1);
-                const ColorRGBA color = sampled_source_color(source.mesh_idx, (a + b + c) / 3.0f, source.source_color);
-                work_triangles.push_back({ source.mesh_idx, a, b, c, world_a, world_b, world_c, source.normal, color, 0,
-                    0.5f * (world_b - world_a).cross(world_c - world_a).norm() });
-                if (j < subdivisions - i - 1) {
-                    const Vec3f d = point(source.a, source.b, source.c, i + 1, j + 1);
-                    const Vec3f world_d = point(source.world_a, source.world_b, source.world_c, i + 1, j + 1);
-                    const ColorRGBA color = sampled_source_color(source.mesh_idx, (b + d + c) / 3.0f, source.source_color);
-                    work_triangles.push_back({ source.mesh_idx, b, d, c, world_b, world_d, world_c, source.normal, color, 0,
-                        0.5f * (world_d - world_b).cross(world_c - world_b).norm() });
-                }
-            }
-        }
-    }
+    build_work_surface(input, boundary_sample_edge, work_triangles);
 
     // The original mesh is often very coarse. Rebuild the regions from the
     // fine surface samples instead: two samples belong together only when
