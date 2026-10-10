@@ -405,6 +405,14 @@ struct GLGizmoTracery::FragmentGenerationIntegrity {
     bool   immutable_input_preserved = true;
 };
 
+struct GLGizmoTracery::FragmentColorAssignmentIntegrity {
+    size_t input_hash = 0;
+    size_t output_hash = 0;
+    size_t color_count = 0;
+    bool   valid = false;
+    bool   immutable_input_preserved = true;
+};
+
 GLGizmoTracery::GLGizmoTracery(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
     : GLGizmoPainterBase(parent, icon_filename, sprite_id)
     , m_current_tool(ImGui::CircleButtonIcon)
@@ -1286,6 +1294,89 @@ GLGizmoTracery::FragmentGenerationIntegrity GLGizmoTracery::inspect_fragment_gen
     return result;
 }
 
+GLGizmoTracery::FragmentColorAssignmentIntegrity GLGizmoTracery::inspect_fragment_color_assignment(
+    const std::vector<ColorGroup>& color_groups, const std::vector<FragmentSeed>& seeds,
+    const std::vector<std::set<size_t>>& fragment_neighbours,
+    const std::vector<float>& fragment_boundary_distance,
+    const std::vector<size_t>& fragment_boundary_neighbor,
+    size_t fragment_count, float target_edge, float refraction_strength,
+    const std::vector<ColorRGBA>& fragment_colors) const
+{
+    const auto mix_hash = [](size_t& hash, size_t value) {
+        hash = (hash * size_t(0x9e3779b1U)) ^ value;
+    };
+    const auto mix_float = [&mix_hash](size_t& hash, float value) {
+        mix_hash(hash, std::hash<float>{}(value));
+    };
+    const auto mix_color = [&mix_float](size_t& hash, const ColorRGBA& color) {
+        mix_float(hash, color.r());
+        mix_float(hash, color.g());
+        mix_float(hash, color.b());
+        mix_float(hash, color.a());
+    };
+
+    FragmentColorAssignmentIntegrity result;
+    result.input_hash = size_t(0x9e3779b9U);
+    mix_hash(result.input_hash, fragment_count);
+    mix_float(result.input_hash, target_edge);
+    mix_float(result.input_hash, refraction_strength);
+    mix_hash(result.input_hash, color_groups.size());
+    for (const ColorGroup& group : color_groups) {
+        mix_hash(result.input_hash, group.component_id);
+        mix_color(result.input_hash, group.color);
+    }
+    mix_hash(result.input_hash, seeds.size());
+    for (const FragmentSeed& seed : seeds) {
+        mix_float(result.input_hash, seed.position.x());
+        mix_float(result.input_hash, seed.position.y());
+        mix_float(result.input_hash, seed.position.z());
+        mix_hash(result.input_hash, seed.color_group);
+        mix_hash(result.input_hash, seed.stable_id);
+    }
+    mix_hash(result.input_hash, fragment_neighbours.size());
+    for (const auto& neighbours : fragment_neighbours) {
+        mix_hash(result.input_hash, neighbours.size());
+        for (size_t neighbour : neighbours)
+            mix_hash(result.input_hash, neighbour);
+    }
+    mix_hash(result.input_hash, fragment_boundary_distance.size());
+    for (float distance : fragment_boundary_distance)
+        mix_float(result.input_hash, distance);
+    mix_hash(result.input_hash, fragment_boundary_neighbor.size());
+    for (size_t neighbour : fragment_boundary_neighbor)
+        mix_hash(result.input_hash, neighbour);
+
+    result.color_count = fragment_colors.size();
+    result.output_hash = size_t(0x85ebca77U);
+    mix_hash(result.output_hash, fragment_colors.size());
+    bool valid = seeds.size() == fragment_count && fragment_neighbours.size() == fragment_count &&
+        fragment_boundary_distance.size() == fragment_count && fragment_boundary_neighbor.size() == fragment_count &&
+        fragment_colors.size() == fragment_count;
+    for (size_t fragment = 0; fragment < seeds.size(); ++fragment) {
+        if (seeds[fragment].color_group >= color_groups.size())
+            valid = false;
+        if (fragment >= fragment_neighbours.size() || fragment >= fragment_boundary_neighbor.size()) {
+            valid = false;
+            continue;
+        }
+        for (size_t neighbour : fragment_neighbours[fragment])
+            if (neighbour >= fragment_count || neighbour >= fragment_neighbours.size() || neighbour == fragment ||
+                !fragment_neighbours[neighbour].count(fragment))
+                valid = false;
+        if (fragment_boundary_neighbor[fragment] > color_groups.size())
+            valid = false;
+    }
+    for (const ColorRGBA& color : fragment_colors) {
+        mix_color(result.output_hash, color);
+        if (!std::isfinite(color.r()) || !std::isfinite(color.g()) || !std::isfinite(color.b()) || !std::isfinite(color.a()) ||
+            color.r() < 0.0f || color.r() > 1.0f || color.g() < 0.0f || color.g() > 1.0f ||
+            color.b() < 0.0f || color.b() > 1.0f || color.a() != 1.0f)
+            valid = false;
+    }
+    result.valid = valid;
+    return result;
+}
+
 bool GLGizmoTracery::generate_fragments(
     const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
     const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas,
@@ -1723,6 +1814,136 @@ bool GLGizmoTracery::generate_fragments(
     return true;
 }
 
+bool GLGizmoTracery::assign_fragment_colors(
+    const std::vector<ColorGroup>& color_groups, const std::vector<FragmentSeed>& seeds,
+    const std::vector<std::set<size_t>>& fragment_neighbours,
+    const std::vector<float>& fragment_boundary_distance,
+    const std::vector<size_t>& fragment_boundary_neighbor,
+    size_t fragment_count, float target_edge, float refraction_strength,
+    std::vector<ColorRGBA>& fragment_colors, bool verify_integrity,
+    FragmentColorAssignmentIntegrity* builder_integrity)
+{
+    const size_t input_hash_before = verify_integrity ? inspect_fragment_color_assignment(
+        color_groups, seeds, fragment_neighbours, fragment_boundary_distance, fragment_boundary_neighbor,
+        fragment_count, target_edge, refraction_strength, fragment_colors).input_hash : 0;
+    const size_t no_group = color_groups.size();
+    std::vector<ColorRGBA> base_colors;
+    base_colors.reserve(fragment_count);
+    for (const FragmentSeed& seed : seeds)
+        base_colors.emplace_back(color_groups[seed.color_group].color);
+    const std::vector<TraceryEditorRecipe> editor_palette = build_tracery_editor_palette();
+    if (editor_palette.empty())
+        return false;
+    std::vector<ColorRGBA> desired_colors(fragment_count);
+    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
+        ColorRGBA boundary_color = base_colors[fragment];
+        const size_t neighbor = fragment_boundary_neighbor[fragment];
+        if (neighbor != no_group)
+            boundary_color = color_groups[neighbor].color;
+        const float boundary_band = target_edge * 1.7f;
+        const float linear_proximity = fragment_boundary_distance[fragment] < boundary_band ?
+            1.0f - fragment_boundary_distance[fragment] / boundary_band : 0.0f;
+        const float proximity = linear_proximity * linear_proximity * (3.0f - 2.0f * linear_proximity);
+        const float boundary_mix = proximity * (0.16f + 0.42f * refraction_strength);
+        desired_colors[fragment] = glass_color(base_colors[fragment], boundary_color, boundary_mix, seeds[fragment].stable_id);
+    }
+
+    struct CandidateRecipe { size_t palette_index; double score; };
+    std::vector<std::vector<CandidateRecipe>> fragment_candidates(fragment_count);
+    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
+        const wxColour target = tracery_wx_color(desired_colors[fragment]);
+        auto& candidates = fragment_candidates[fragment];
+        candidates.reserve(editor_palette.size());
+        for (size_t recipe = 0; recipe < editor_palette.size(); ++recipe) {
+            const double score = color_delta_e00(target, editor_palette[recipe].preview) +
+                tracery_recipe_balance_penalty(editor_palette[recipe].weights);
+            candidates.push_back({ recipe, score });
+        }
+        std::sort(candidates.begin(), candidates.end(), [](const CandidateRecipe& first, const CandidateRecipe& second) {
+            return first.score < second.score;
+        });
+        if (candidates.size() > 24)
+            candidates.resize(24);
+    }
+
+    std::vector<size_t> order(fragment_count);
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&fragment_neighbours](size_t first, size_t second) {
+        return fragment_neighbours[first].size() > fragment_neighbours[second].size();
+    });
+    std::vector<size_t> selected_recipe(fragment_count, size_t(-1));
+    constexpr double neighbour_minimum_delta_e = 12.0;
+    for (const size_t fragment : order) {
+        size_t fallback = size_t(-1);
+        double fallback_distance = -1.0;
+        for (const CandidateRecipe& candidate : fragment_candidates[fragment]) {
+            double minimum_distance = std::numeric_limits<double>::infinity();
+            for (const size_t neighbour : fragment_neighbours[fragment])
+                if (selected_recipe[neighbour] != size_t(-1))
+                    minimum_distance = std::min(minimum_distance, color_delta_e00(
+                        editor_palette[candidate.palette_index].preview, editor_palette[selected_recipe[neighbour]].preview));
+            if (minimum_distance >= neighbour_minimum_delta_e) {
+                selected_recipe[fragment] = candidate.palette_index;
+                break;
+            }
+            if (minimum_distance > fallback_distance) {
+                fallback = candidate.palette_index;
+                fallback_distance = minimum_distance;
+            }
+        }
+        // A colour family may genuinely be too narrow for the requested shard
+        // density. Keep the most distinct legal in-family candidate instead of
+        // escaping to an unrelated hue.
+        if (selected_recipe[fragment] == size_t(-1))
+            selected_recipe[fragment] = fallback == size_t(-1) ? fragment_candidates[fragment].front().palette_index : fallback;
+    }
+
+    // The slicer has a finite virtual-filament budget. Retain the common
+    // editor recipes first, then project rare choices to the closest retained
+    // legal colour instead of creating one material row per shard.
+    constexpr size_t maximum_editor_recipes = 24;
+    std::map<size_t, size_t> recipe_usage;
+    for (const size_t recipe : selected_recipe)
+        ++recipe_usage[recipe];
+    if (recipe_usage.size() > maximum_editor_recipes) {
+        std::vector<std::pair<size_t, size_t>> ranked(recipe_usage.begin(), recipe_usage.end());
+        std::sort(ranked.begin(), ranked.end(), [](const auto& first, const auto& second) { return first.second > second.second; });
+        std::set<size_t> retained;
+        for (size_t index = 0; index < maximum_editor_recipes; ++index)
+            retained.insert(ranked[index].first);
+        for (size_t& recipe : selected_recipe) {
+            if (retained.count(recipe))
+                continue;
+            const wxColour& source = editor_palette[recipe].preview;
+            recipe = *std::min_element(retained.begin(), retained.end(), [&](size_t first, size_t second) {
+                return color_delta_e00(source, editor_palette[first].preview) < color_delta_e00(source, editor_palette[second].preview);
+            });
+        }
+    }
+
+    fragment_colors.resize(fragment_count);
+    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
+        const TraceryEditorRecipe& recipe = editor_palette[selected_recipe[fragment]];
+        const wxColour& preview = recipe.preview;
+        const ColorRGBA color(float(preview.Red()) / 255.0f, float(preview.Green()) / 255.0f,
+            float(preview.Blue()) / 255.0f, 1.0f);
+        fragment_colors[fragment] = color;
+    }
+
+    if (builder_integrity != nullptr) {
+        if (verify_integrity) {
+            *builder_integrity = inspect_fragment_color_assignment(color_groups, seeds, fragment_neighbours,
+                fragment_boundary_distance, fragment_boundary_neighbor, fragment_count, target_edge,
+                refraction_strength, fragment_colors);
+            builder_integrity->immutable_input_preserved = builder_integrity->input_hash == input_hash_before;
+            builder_integrity->valid = builder_integrity->valid && builder_integrity->immutable_input_preserved;
+        } else {
+            *builder_integrity = {};
+        }
+    }
+    return true;
+}
+
 void GLGizmoTracery::generate_paint_plan()
 {
     record_display_diagnostic_state("generation_begin");
@@ -1883,110 +2104,36 @@ void GLGizmoTracery::generate_paint_plan()
             return;
         }
     }
-    const size_t no_group = color_groups.size();
-    std::vector<ColorRGBA> base_colors;
-    base_colors.reserve(fragment_count);
-    for (const FragmentSeed& seed : seeds)
-        base_colors.emplace_back(color_groups[seed.color_group].color);
-    const std::vector<TraceryEditorRecipe> editor_palette = build_tracery_editor_palette();
-    if (editor_palette.empty())
+    const bool verify_fragment_colors = m_display_diagnostics_active;
+    FragmentColorAssignmentIntegrity color_builder_integrity;
+    if (!assign_fragment_colors(color_groups, seeds, fragment_neighbours, fragment_boundary_distance,
+                                fragment_boundary_neighbor, fragment_count, target_edge, m_refraction_strength,
+                                m_fragment_colors, verify_fragment_colors, &color_builder_integrity))
         return;
-    std::vector<ColorRGBA> desired_colors(fragment_count);
-    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
-        ColorRGBA boundary_color = base_colors[fragment];
-        const size_t neighbor = fragment_boundary_neighbor[fragment];
-        if (neighbor != no_group)
-            boundary_color = color_groups[neighbor].color;
-        const float boundary_band = target_edge * 1.7f;
-        const float linear_proximity = fragment_boundary_distance[fragment] < boundary_band ?
-            1.0f - fragment_boundary_distance[fragment] / boundary_band : 0.0f;
-        const float proximity = linear_proximity * linear_proximity * (3.0f - 2.0f * linear_proximity);
-        const float boundary_mix = proximity * (0.16f + 0.42f * m_refraction_strength);
-        desired_colors[fragment] = glass_color(base_colors[fragment], boundary_color, boundary_mix, seeds[fragment].stable_id);
-    }
-
-    struct CandidateRecipe { size_t palette_index; double score; };
-    std::vector<std::vector<CandidateRecipe>> fragment_candidates(fragment_count);
-    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
-        const wxColour target = tracery_wx_color(desired_colors[fragment]);
-        auto& candidates = fragment_candidates[fragment];
-        candidates.reserve(editor_palette.size());
-        for (size_t recipe = 0; recipe < editor_palette.size(); ++recipe) {
-            const double score = color_delta_e00(target, editor_palette[recipe].preview) +
-                tracery_recipe_balance_penalty(editor_palette[recipe].weights);
-            candidates.push_back({ recipe, score });
-        }
-        std::sort(candidates.begin(), candidates.end(), [](const CandidateRecipe& first, const CandidateRecipe& second) {
-            return first.score < second.score;
-        });
-        if (candidates.size() > 24)
-            candidates.resize(24);
-    }
-
-    std::vector<size_t> order(fragment_count);
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&fragment_neighbours](size_t first, size_t second) {
-        return fragment_neighbours[first].size() > fragment_neighbours[second].size();
-    });
-    std::vector<size_t> selected_recipe(fragment_count, size_t(-1));
-    constexpr double neighbour_minimum_delta_e = 12.0;
-    for (const size_t fragment : order) {
-        size_t fallback = size_t(-1);
-        double fallback_distance = -1.0;
-        for (const CandidateRecipe& candidate : fragment_candidates[fragment]) {
-            double minimum_distance = std::numeric_limits<double>::infinity();
-            for (const size_t neighbour : fragment_neighbours[fragment])
-                if (selected_recipe[neighbour] != size_t(-1))
-                    minimum_distance = std::min(minimum_distance, color_delta_e00(
-                        editor_palette[candidate.palette_index].preview, editor_palette[selected_recipe[neighbour]].preview));
-            if (minimum_distance >= neighbour_minimum_delta_e) {
-                selected_recipe[fragment] = candidate.palette_index;
-                break;
-            }
-            if (minimum_distance > fallback_distance) {
-                fallback = candidate.palette_index;
-                fallback_distance = minimum_distance;
-            }
-        }
-        // A colour family may genuinely be too narrow for the requested shard
-        // density. Keep the most distinct legal in-family candidate instead of
-        // escaping to an unrelated hue.
-        if (selected_recipe[fragment] == size_t(-1))
-            selected_recipe[fragment] = fallback == size_t(-1) ? fragment_candidates[fragment].front().palette_index : fallback;
-    }
-
-    // The slicer has a finite virtual-filament budget. Retain the common
-    // editor recipes first, then project rare choices to the closest retained
-    // legal colour instead of creating one material row per shard.
-    constexpr size_t maximum_editor_recipes = 24;
-    std::map<size_t, size_t> recipe_usage;
-    for (const size_t recipe : selected_recipe)
-        ++recipe_usage[recipe];
-    if (recipe_usage.size() > maximum_editor_recipes) {
-        std::vector<std::pair<size_t, size_t>> ranked(recipe_usage.begin(), recipe_usage.end());
-        std::sort(ranked.begin(), ranked.end(), [](const auto& first, const auto& second) { return first.second > second.second; });
-        std::set<size_t> retained;
-        for (size_t index = 0; index < maximum_editor_recipes; ++index)
-            retained.insert(ranked[index].first);
-        for (size_t& recipe : selected_recipe) {
-            if (retained.count(recipe))
-                continue;
-            const wxColour& source = editor_palette[recipe].preview;
-            recipe = *std::min_element(retained.begin(), retained.end(), [&](size_t first, size_t second) {
-                return color_delta_e00(source, editor_palette[first].preview) < color_delta_e00(source, editor_palette[second].preview);
-            });
+    if (verify_fragment_colors) {
+        const FragmentColorAssignmentIntegrity color_caller_integrity = inspect_fragment_color_assignment(
+            color_groups, seeds, fragment_neighbours, fragment_boundary_distance, fragment_boundary_neighbor,
+            fragment_count, target_edge, m_refraction_strength, m_fragment_colors);
+        const bool caller_matches_builder = color_builder_integrity.input_hash == color_caller_integrity.input_hash &&
+            color_builder_integrity.output_hash == color_caller_integrity.output_hash &&
+            color_builder_integrity.color_count == color_caller_integrity.color_count;
+        const auto describe_integrity = [](const FragmentColorAssignmentIntegrity& integrity) {
+            return "valid=" + std::to_string(integrity.valid) +
+                ",immutable=" + std::to_string(integrity.immutable_input_preserved) +
+                ",input_hash=" + std::to_string(integrity.input_hash) +
+                ",output_hash=" + std::to_string(integrity.output_hash) +
+                ",colors=" + std::to_string(integrity.color_count);
+        };
+        record_display_diagnostic_state("fragment_colors_builder", describe_integrity(color_builder_integrity));
+        record_display_diagnostic_state("fragment_colors_caller", describe_integrity(color_caller_integrity));
+        if (!color_builder_integrity.valid || !color_caller_integrity.valid ||
+            !color_builder_integrity.immutable_input_preserved || !caller_matches_builder) {
+            m_fragment_colors.clear();
+            m_generation_integrity_valid = false;
+            record_display_diagnostic_state("fragment_colors_integrity_failed");
+            return;
         }
     }
-
-    m_fragment_colors.resize(fragment_count);
-    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
-        const TraceryEditorRecipe& recipe = editor_palette[selected_recipe[fragment]];
-        const wxColour& preview = recipe.preview;
-        const ColorRGBA color(float(preview.Red()) / 255.0f, float(preview.Green()) / 255.0f,
-            float(preview.Blue()) / 255.0f, 1.0f);
-        m_fragment_colors[fragment] = color;
-    }
-
     std::filesystem::path diagnostic_dir;
     std::ofstream diagnostic_stats;
     std::string diagnostic_error;

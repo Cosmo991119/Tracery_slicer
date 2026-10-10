@@ -127,6 +127,22 @@ private:
         const std::vector<std::set<size_t>>& fragment_neighbours,
         const std::vector<float>& fragment_boundary_distance,
         const std::vector<size_t>& fragment_boundary_neighbor) const;
+    struct FragmentColorAssignmentIntegrity;
+    bool assign_fragment_colors(const std::vector<ColorGroup>& color_groups,
+                                const std::vector<FragmentSeed>& seeds,
+                                const std::vector<std::set<size_t>>& fragment_neighbours,
+                                const std::vector<float>& fragment_boundary_distance,
+                                const std::vector<size_t>& fragment_boundary_neighbor,
+                                size_t fragment_count, float target_edge, float refraction_strength,
+                                std::vector<ColorRGBA>& fragment_colors, bool verify_integrity,
+                                FragmentColorAssignmentIntegrity* builder_integrity);
+    FragmentColorAssignmentIntegrity inspect_fragment_color_assignment(
+        const std::vector<ColorGroup>& color_groups, const std::vector<FragmentSeed>& seeds,
+        const std::vector<std::set<size_t>>& fragment_neighbours,
+        const std::vector<float>& fragment_boundary_distance,
+        const std::vector<size_t>& fragment_boundary_neighbor,
+        size_t fragment_count, float target_edge, float refraction_strength,
+        const std::vector<ColorRGBA>& fragment_colors) const;
     void apply_stained_glass_colors();
     struct StainedGlassApplyPlan {
         enum class Mode {
