@@ -2864,7 +2864,24 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
     size_t invalid_projections = 0;
     size_t cross_facet_splits = 0;
     size_t depth_limited = 0;
+    size_t degenerate_input = 0;
+    size_t degenerate_projected = 0;
+    size_t invalid_vertices = 0;
+    size_t ray_no_hit = 0;
+    size_t ray_near_hit = 0;
+    size_t ray_entry_facing_hit = 0;
+    size_t source_normal_aligned_faces = 0;
+    size_t source_normal_reversed_faces = 0;
+    size_t source_normal_unavailable_faces = 0;
+    double input_area = 0.0;
+    double emitted_source_area = 0.0;
+    double emitted_target_area = 0.0;
+    double invalid_source_area = 0.0;
+    double depth_limited_source_area = 0.0;
+    double degenerate_source_area = 0.0;
+    double degenerate_projected_source_area = 0.0;
     std::map<int, size_t> target_face_counts;
+    std::map<int, size_t> rejected_face_counts;
     const indexed_triangle_set& target = target_mesh.its;
     if (target.vertices.empty() || target.indices.empty())
         return back_fragment;
@@ -2877,6 +2894,27 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         maximum = maximum.cwiseMax(vertex);
     }
     const float ray_epsilon = std::max(1e-5f, (maximum - minimum).norm() * 1e-6f);
+    const auto triangle_area = [](const Vec3f& a, const Vec3f& b, const Vec3f& c) {
+        return 0.5 * (b - a).cross(c - a).norm();
+    };
+    const int diagnostic_source_facet_id = front_fragment.source_facet_ids.empty() ? -1 : front_fragment.source_facet_ids.front();
+    const auto record_ray_rejection = [this, volume_index, &front_fragment, diagnostic_source_facet_id](
+                                          const char* reason, const Vec3f& point, const Vec3d& direction,
+                                          const AABBMesh::hit_result& hit) {
+        if (!m_display_diagnostics_active)
+            return;
+        const std::filesystem::path path = m_display_diagnostics_dir / "tracery_through_ray_rejections.tsv";
+        const bool new_file = !std::filesystem::exists(path);
+        std::ofstream output(path, std::ios::app | std::ios::binary);
+        if (!output)
+            return;
+        if (new_file)
+            output << "volume\tfragment\tsource_facet\treason\tpoint_x\tpoint_y\tpoint_z\tdirection_x\tdirection_y\tdirection_z\thit_facet\thit_distance\n";
+        output << volume_index << '\t' << front_fragment.fragment_id << '\t' << diagnostic_source_facet_id << '\t'
+               << reason << '\t' << std::setprecision(12) << point.x() << '\t' << point.y() << '\t' << point.z() << '\t'
+               << direction.x() << '\t' << direction.y() << '\t' << direction.z() << '\t'
+               << hit.face() << '\t' << hit.distance() << '\n';
+    };
 
     struct ProjectionResult {
         bool  valid = false;
@@ -2884,25 +2922,46 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         Vec3f normal = Vec3f::Zero();
         int   face = -1;
     };
-    const auto project = [&target_surface, ray_epsilon](const Vec3f& point, const Vec3f& normal) {
+    const auto project = [&target_surface, ray_epsilon, &ray_no_hit, &ray_near_hit, &ray_entry_facing_hit,
+                          &rejected_face_counts, &record_ray_rejection](const Vec3f& point, const Vec3f& normal) {
         ProjectionResult result;
         const Vec3d direction = -normal.cast<double>();
         const Vec3d origin = point.cast<double>() + direction * double(ray_epsilon);
         const AABBMesh::hit_result hit = target_surface.query_ray_hit(origin, direction);
-        if (hit.is_hit() && hit.distance() > double(ray_epsilon) && hit.is_inside()) {
-            result.valid = true;
-            result.position = hit.position().cast<float>();
-            result.normal = hit.normal().cast<float>();
-            result.face = hit.face();
+        if (!hit.is_hit()) {
+            ++ray_no_hit;
+            record_ray_rejection("no_hit", point, direction, hit);
+            return result;
         }
+        if (hit.distance() <= double(ray_epsilon)) {
+            ++ray_near_hit;
+            ++rejected_face_counts[hit.face()];
+            record_ray_rejection("near_hit", point, direction, hit);
+            return result;
+        }
+        if (!hit.is_inside()) {
+            ++ray_entry_facing_hit;
+            ++rejected_face_counts[hit.face()];
+            record_ray_rejection("entry_facing_hit", point, direction, hit);
+            return result;
+        }
+        result.valid = true;
+        result.position = hit.position().cast<float>();
+        result.normal = hit.normal().cast<float>();
+        result.face = hit.face();
         return result;
     };
-    const auto append_projected = [&back_fragment, &projected_faces, &target_face_counts](const ProjectionResult& a,
-                                                                                            const ProjectionResult& b,
-                                                                                            const ProjectionResult& c) {
+    const auto append_projected = [&back_fragment, &projected_faces, &target_face_counts, &triangle_area,
+                                   &emitted_source_area, &emitted_target_area, &degenerate_projected,
+                                   &degenerate_projected_source_area](
+                                      const ProjectionResult& a, const ProjectionResult& b, const ProjectionResult& c,
+                                      const Vec3f& source_a, const Vec3f& source_b, const Vec3f& source_c) {
         const Vec3f projected_normal = (b.position - a.position).cross(c.position - a.position);
-        if (projected_normal.squaredNorm() <= 1e-12f)
+        if (projected_normal.squaredNorm() <= 1e-12f) {
+            ++degenerate_projected;
+            degenerate_projected_source_area += triangle_area(source_a, source_b, source_c);
             return;
+        }
         const unsigned int first = unsigned(back_fragment.surface.vertices.size());
         back_fragment.surface.vertices.emplace_back(a.position);
         back_fragment.surface.vertices.emplace_back(b.position);
@@ -2914,6 +2973,8 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
             back_fragment.surface.indices.emplace_back(stl_triangle_vertex_indices{ int(first), int(first + 1), int(first + 2) });
         back_fragment.source_facet_ids.emplace_back(a.face);
         ++projected_faces;
+        emitted_source_area += triangle_area(source_a, source_b, source_c);
+        emitted_target_area += triangle_area(a.position, b.position, c.position);
         ++target_face_counts[a.face];
     };
 
@@ -2921,23 +2982,30 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
     // emitted triangle belongs to exactly one target facet; never guess an ID
     // for a cross-facet triangle.
     std::function<void(const Vec3f&, const Vec3f&, const Vec3f&, int)> project_triangle;
-    project_triangle = [&project_triangle, &project, &append_projected, &target, &invalid_projections,
-                        &cross_facet_splits, &depth_limited](
+    project_triangle = [&project_triangle, &project, &append_projected, &target, &triangle_area, &invalid_projections,
+                        &invalid_vertices, &invalid_source_area, &cross_facet_splits, &depth_limited,
+                        &depth_limited_source_area, &degenerate_input, &degenerate_source_area](
         const Vec3f& a, const Vec3f& b, const Vec3f& c, int depth) {
         Vec3f normal = (b - a).cross(c - a);
-        if (normal.squaredNorm() <= 1e-12f)
+        const double source_area = triangle_area(a, b, c);
+        if (normal.squaredNorm() <= 1e-12f) {
+            ++degenerate_input;
+            degenerate_source_area += source_area;
             return;
+        }
         normal.normalize();
         const ProjectionResult projected_a = project(a, normal);
         const ProjectionResult projected_b = project(b, normal);
         const ProjectionResult projected_c = project(c, normal);
         if (!projected_a.valid || !projected_b.valid || !projected_c.valid) {
             ++invalid_projections;
+            invalid_vertices += size_t(!projected_a.valid) + size_t(!projected_b.valid) + size_t(!projected_c.valid);
+            invalid_source_area += source_area;
             return;
         }
         if (projected_a.face >= 0 && projected_a.face == projected_b.face && projected_a.face == projected_c.face &&
             size_t(projected_a.face) < target.indices.size()) {
-            append_projected(projected_a, projected_b, projected_c);
+            append_projected(projected_a, projected_b, projected_c, a, b, c);
             return;
         }
         // The refinement cap keeps target-edge handling bounded. Dropping the
@@ -2945,6 +3013,7 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         // intact instead of assigning it to a wrong facet.
         if (depth >= 6) {
             ++depth_limited;
+            depth_limited_source_area += source_area;
             return;
         }
         ++cross_facet_splits;
@@ -2957,29 +3026,120 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         project_triangle(ab, bc, ca, depth + 1);
     };
 
-    for (const stl_triangle_vertex_indices& face : front_fragment.surface.indices) {
+    for (size_t face_index = 0; face_index < front_fragment.surface.indices.size(); ++face_index) {
+        const stl_triangle_vertex_indices& face = front_fragment.surface.indices[face_index];
         if (face[0] < 0 || face[1] < 0 || face[2] < 0 ||
             size_t(face[0]) >= front_fragment.surface.vertices.size() ||
             size_t(face[1]) >= front_fragment.surface.vertices.size() ||
             size_t(face[2]) >= front_fragment.surface.vertices.size())
             continue;
-        project_triangle(front_fragment.surface.vertices[size_t(face[0])],
-                         front_fragment.surface.vertices[size_t(face[1])],
-                         front_fragment.surface.vertices[size_t(face[2])], 0);
+        const Vec3f& a = front_fragment.surface.vertices[size_t(face[0])];
+        const Vec3f& b = front_fragment.surface.vertices[size_t(face[1])];
+        const Vec3f& c = front_fragment.surface.vertices[size_t(face[2])];
+        const int source_facet_id = face_index < front_fragment.source_facet_ids.size() ?
+            front_fragment.source_facet_ids[face_index] : -1;
+        if (source_facet_id < 0 || size_t(source_facet_id) >= target.indices.size()) {
+            ++source_normal_unavailable_faces;
+        } else {
+            const stl_triangle_vertex_indices& source_face = target.indices[size_t(source_facet_id)];
+            if (source_face[0] < 0 || source_face[1] < 0 || source_face[2] < 0 ||
+                size_t(source_face[0]) >= target.vertices.size() || size_t(source_face[1]) >= target.vertices.size() ||
+                size_t(source_face[2]) >= target.vertices.size()) {
+                ++source_normal_unavailable_faces;
+            } else {
+                const Vec3f source_normal = (target.vertices[size_t(source_face[1])] - target.vertices[size_t(source_face[0])]).cross(
+                    target.vertices[size_t(source_face[2])] - target.vertices[size_t(source_face[0])]);
+                const Vec3f generated_normal = (b - a).cross(c - a);
+                if (source_normal.squaredNorm() <= 1e-12f || generated_normal.squaredNorm() <= 1e-12f)
+                    ++source_normal_unavailable_faces;
+                else if (source_normal.dot(generated_normal) > 0.0f)
+                    ++source_normal_aligned_faces;
+                else
+                    ++source_normal_reversed_faces;
+            }
+        }
+        input_area += triangle_area(a, b, c);
+        project_triangle(a, b, c, 0);
     }
     if (m_display_diagnostics_active) {
+        const int source_facet_id = diagnostic_source_facet_id;
         const std::filesystem::path path = m_display_diagnostics_dir / "tracery_back_projection.tsv";
         const bool new_file = !std::filesystem::exists(path);
         std::ofstream output(path, std::ios::app | std::ios::binary);
         if (output) {
             if (new_file)
-                output << "volume\tfragment\tinput_faces\toutput_faces\tinvalid_projection\tcross_facet_splits\tdepth_limited\ttarget_facets\n";
+                output << "volume\tfragment\tsource_facet\tinput_faces\toutput_faces\tinput_area\temitted_source_area\temitted_target_area\tinvalid_projection\tinvalid_vertices\tinvalid_source_area\tray_no_hit\tray_near_hit\tray_entry_facing_hit\tsource_normal_aligned_faces\tsource_normal_reversed_faces\tsource_normal_unavailable_faces\tcross_facet_splits\tdepth_limited\tdepth_limited_source_area\tdegenerate_input\tdegenerate_source_area\tdegenerate_projected\tdegenerate_projected_source_area\ttarget_facets\trejected_facets\n";
             std::ostringstream targets;
             for (const auto& [facet, count] : target_face_counts)
                 targets << facet << ':' << count << ';';
-            output << volume_index << '\t' << front_fragment.fragment_id << '\t' << input_faces << '\t'
-                   << projected_faces << '\t' << invalid_projections << '\t' << cross_facet_splits << '\t'
-                   << depth_limited << '\t' << targets.str() << '\n';
+            std::ostringstream rejected;
+            for (const auto& [facet, count] : rejected_face_counts)
+                rejected << facet << ':' << count << ';';
+            output << volume_index << '\t' << front_fragment.fragment_id << '\t' << source_facet_id << '\t' << input_faces << '\t'
+                   << projected_faces << '\t' << std::setprecision(12) << input_area << '\t'
+                   << emitted_source_area << '\t' << emitted_target_area << '\t' << invalid_projections << '\t'
+                   << invalid_vertices << '\t' << invalid_source_area << '\t' << ray_no_hit << '\t'
+                   << ray_near_hit << '\t' << ray_entry_facing_hit << '\t' << source_normal_aligned_faces << '\t'
+                   << source_normal_reversed_faces << '\t' << source_normal_unavailable_faces << '\t'
+                   << cross_facet_splits << '\t'
+                   << depth_limited << '\t' << depth_limited_source_area << '\t' << degenerate_input << '\t'
+                   << degenerate_source_area << '\t' << degenerate_projected << '\t'
+                   << degenerate_projected_source_area << '\t' << targets.str() << '\t' << rejected.str() << '\n';
+        }
+
+        if (source_facet_id >= 0 && size_t(source_facet_id) < target.indices.size()) {
+            const stl_triangle_vertex_indices& source_face = target.indices[size_t(source_facet_id)];
+            const auto face_is_valid = [&target](const stl_triangle_vertex_indices& face) {
+                return face[0] >= 0 && face[1] >= 0 && face[2] >= 0 &&
+                    size_t(face[0]) < target.vertices.size() && size_t(face[1]) < target.vertices.size() &&
+                    size_t(face[2]) < target.vertices.size();
+            };
+            if (face_is_valid(source_face)) {
+                const Vec3f source_a = target.vertices[size_t(source_face[0])];
+                const Vec3f source_b = target.vertices[size_t(source_face[1])];
+                const Vec3f source_c = target.vertices[size_t(source_face[2])];
+                Vec3f source_normal = (source_b - source_a).cross(source_c - source_a);
+                if (source_normal.squaredNorm() > 1e-12f) {
+                    source_normal.normalize();
+                    const std::filesystem::path geometry_path = m_display_diagnostics_dir / "tracery_through_facet_geometry.tsv";
+                    const bool new_geometry_file = !std::filesystem::exists(geometry_path);
+                    std::ofstream geometry(geometry_path, std::ios::app | std::ios::binary);
+                    if (geometry) {
+                        if (new_geometry_file)
+                            geometry << "volume\tfragment\tsource_facet\ttarget_facet\tnormal_dot\tdistance_a\tdistance_b\tdistance_c\tsource_vertices\ttarget_vertices\n";
+                        const auto write_triangle = [](std::ostringstream& stream, const Vec3f& a, const Vec3f& b, const Vec3f& c) {
+                            stream << a.x() << ',' << a.y() << ',' << a.z() << ';'
+                                   << b.x() << ',' << b.y() << ',' << b.z() << ';'
+                                   << c.x() << ',' << c.y() << ',' << c.z();
+                        };
+                        for (const auto& [target_facet_id, unused_count] : target_face_counts) {
+                            (void)unused_count;
+                            if (target_facet_id < 0 || size_t(target_facet_id) >= target.indices.size())
+                                continue;
+                            const stl_triangle_vertex_indices& target_face = target.indices[size_t(target_facet_id)];
+                            if (!face_is_valid(target_face))
+                                continue;
+                            const Vec3f target_a = target.vertices[size_t(target_face[0])];
+                            const Vec3f target_b = target.vertices[size_t(target_face[1])];
+                            const Vec3f target_c = target.vertices[size_t(target_face[2])];
+                            Vec3f target_normal = (target_b - target_a).cross(target_c - target_a);
+                            if (target_normal.squaredNorm() <= 1e-12f)
+                                continue;
+                            target_normal.normalize();
+                            std::ostringstream source_vertices;
+                            std::ostringstream target_vertices;
+                            write_triangle(source_vertices, source_a, source_b, source_c);
+                            write_triangle(target_vertices, target_a, target_b, target_c);
+                            geometry << volume_index << '\t' << front_fragment.fragment_id << '\t' << source_facet_id << '\t'
+                                     << target_facet_id << '\t' << std::setprecision(12) << source_normal.dot(target_normal) << '\t'
+                                     << (source_a - target_a).dot(target_normal) << '\t'
+                                     << (source_b - target_a).dot(target_normal) << '\t'
+                                     << (source_c - target_a).dot(target_normal) << '\t'
+                                     << source_vertices.str() << '\t' << target_vertices.str() << '\n';
+                        }
+                    }
+                }
+            }
         }
     }
     return back_fragment;
@@ -3178,10 +3338,117 @@ void GLGizmoTracery::generate_through_voronoi_regions()
             continue;
         if (volume_index >= m_generated_voronoi_regions.size())
             break;
+        const TriangleMesh& volume_mesh = volume->mesh();
+        const indexed_triangle_set& mesh = volume_mesh.its;
+        AABBMesh target_surface(volume_mesh);
+        Vec3f minimum = mesh.vertices.empty() ? Vec3f::Zero() : mesh.vertices.front();
+        Vec3f maximum = minimum;
+        for (const Vec3f& vertex : mesh.vertices) {
+            minimum = minimum.cwiseMin(vertex);
+            maximum = maximum.cwiseMax(vertex);
+        }
+        const float ray_epsilon = std::max(1e-5f, (maximum - minimum).norm() * 1e-6f);
+        const float clip_epsilon = ray_epsilon * 8.0f;
+        const auto valid_face = [&mesh](int face_id) {
+            if (face_id < 0 || size_t(face_id) >= mesh.indices.size())
+                return false;
+            const stl_triangle_vertex_indices& face = mesh.indices[size_t(face_id)];
+            return face[0] >= 0 && face[1] >= 0 && face[2] >= 0 &&
+                size_t(face[0]) < mesh.vertices.size() && size_t(face[1]) < mesh.vertices.size() &&
+                size_t(face[2]) < mesh.vertices.size();
+        };
+        const auto project_parallel_region = [&](const GeneratedVoronoiRegion& front,
+                                                 std::vector<GeneratedVoronoiRegion>& output) {
+            if (!valid_face(front.source_facet_id) || front.local_polygon.size() < 3)
+                return false;
+            const stl_triangle_vertex_indices& source_face = mesh.indices[size_t(front.source_facet_id)];
+            const Vec3f source_a = mesh.vertices[size_t(source_face[0])];
+            const Vec3f source_b = mesh.vertices[size_t(source_face[1])];
+            const Vec3f source_c = mesh.vertices[size_t(source_face[2])];
+            Vec3f source_normal = (source_b - source_a).cross(source_c - source_a);
+            if (source_normal.squaredNorm() <= 1e-12f)
+                return false;
+            source_normal.normalize();
+            Vec3f centroid = Vec3f::Zero();
+            for (const Vec3f& vertex : front.local_polygon)
+                centroid += vertex;
+            centroid /= float(front.local_polygon.size());
+            const Vec3d direction = -source_normal.cast<double>();
+            const Vec3d origin = centroid.cast<double>() + direction * double(ray_epsilon);
+            const AABBMesh::hit_result hit = target_surface.query_ray_hit(origin, direction);
+            if (!hit.is_hit() || hit.distance() <= double(ray_epsilon) || !hit.is_inside() || !valid_face(hit.face()))
+                return false;
+            const stl_triangle_vertex_indices& target_face = mesh.indices[size_t(hit.face())];
+            const Vec3f target_a = mesh.vertices[size_t(target_face[0])];
+            const Vec3f target_b = mesh.vertices[size_t(target_face[1])];
+            const Vec3f target_c = mesh.vertices[size_t(target_face[2])];
+            Vec3f target_normal = (target_b - target_a).cross(target_c - target_a);
+            if (target_normal.squaredNorm() <= 1e-12f)
+                return false;
+            target_normal.normalize();
+            // The analytic path is intentionally limited to parallel, opposing
+            // faces. Other geometry retains the adaptive raycast fallback.
+            if (source_normal.dot(target_normal) > -0.999f)
+                return false;
+            const double denominator = direction.dot(target_normal.cast<double>());
+            if (denominator <= 1e-8)
+                return false;
+            std::vector<Vec3f> polygon;
+            polygon.reserve(front.local_polygon.size());
+            for (const Vec3f& vertex : front.local_polygon) {
+                const double distance = (target_a.cast<double>() - vertex.cast<double>()).dot(target_normal.cast<double>()) / denominator;
+                if (distance <= double(ray_epsilon))
+                    return false;
+                polygon.emplace_back((vertex.cast<double>() + direction * distance).cast<float>());
+            }
+            const std::array<Vec3f, 3> target_vertices = { target_a, target_b, target_c };
+            for (size_t edge = 0; edge < target_vertices.size() && !polygon.empty(); ++edge) {
+                const Vec3f& first = target_vertices[edge];
+                const Vec3f& second = target_vertices[(edge + 1) % target_vertices.size()];
+                std::vector<Vec3f> clipped;
+                clipped.reserve(polygon.size() + 1);
+                for (size_t index = 0; index < polygon.size(); ++index) {
+                    const Vec3f& current = polygon[index];
+                    const Vec3f& next = polygon[(index + 1) % polygon.size()];
+                    const float current_side = target_normal.dot((second - first).cross(current - first));
+                    const float next_side = target_normal.dot((second - first).cross(next - first));
+                    const bool current_inside = current_side >= -clip_epsilon;
+                    const bool next_inside = next_side >= -clip_epsilon;
+                    if (current_inside)
+                        clipped.emplace_back(current);
+                    if (current_inside != next_inside) {
+                        const float denominator_side = current_side - next_side;
+                        if (std::abs(denominator_side) > 1e-12f)
+                            clipped.emplace_back(current + (next - current) * (current_side / denominator_side));
+                    }
+                }
+                polygon = std::move(clipped);
+            }
+            if (polygon.size() < 3)
+                return false;
+            for (size_t index = 1; index + 1 < polygon.size(); ++index)
+                output.push_back({ front.fragment_id, hit.face(), { polygon[0], polygon[index], polygon[index + 1] } });
+            return true;
+        };
+        const size_t front_region_count = m_generated_voronoi_regions[volume_index].size();
+        size_t candidate_regions = 0;
+        size_t skipped_small_polygon = 0;
+        size_t skipped_missing_color = 0;
+        size_t input_triangles = 0;
+        size_t back_triangles = 0;
+        size_t analytic_regions = 0;
+        size_t fallback_regions = 0;
         std::vector<GeneratedVoronoiRegion> projected_regions;
         for (const GeneratedVoronoiRegion& front : m_generated_voronoi_regions[volume_index]) {
-            if (front.local_polygon.size() < 3 || front.fragment_id >= m_fragment_colors.size())
+            if (front.local_polygon.size() < 3) {
+                ++skipped_small_polygon;
                 continue;
+            }
+            if (front.fragment_id >= m_fragment_colors.size()) {
+                ++skipped_missing_color;
+                continue;
+            }
+            ++candidate_regions;
             GeneratedFragment temporary;
             temporary.fragment_id = front.fragment_id;
             temporary.surface.vertices = front.local_polygon;
@@ -3189,7 +3456,16 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                 temporary.surface.indices.emplace_back(stl_triangle_vertex_indices{ 0, int(index), int(index + 1) });
                 temporary.source_facet_ids.emplace_back(front.source_facet_id);
             }
-            const GeneratedFragment back = generate_back_fact_tracery_date(temporary, volume->mesh(), volume_index);
+            input_triangles += temporary.surface.indices.size();
+            const size_t analytic_begin = projected_regions.size();
+            if (project_parallel_region(front, projected_regions)) {
+                ++analytic_regions;
+                back_triangles += projected_regions.size() - analytic_begin;
+                continue;
+            }
+            ++fallback_regions;
+            const GeneratedFragment back = generate_back_fact_tracery_date(temporary, volume_mesh, volume_index);
+            back_triangles += back.surface.indices.size();
             for (size_t face_index = 0; face_index < back.surface.indices.size(); ++face_index) {
                 const auto& face = back.surface.indices[face_index];
                 if (face_index >= back.source_facet_ids.size() || face[0] < 0 || face[1] < 0 || face[2] < 0 ||
@@ -3199,6 +3475,19 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                 projected_regions.push_back({ front.fragment_id, back.source_facet_ids[face_index],
                     { back.surface.vertices[size_t(face[0])], back.surface.vertices[size_t(face[1])],
                       back.surface.vertices[size_t(face[2])] } });
+            }
+        }
+        if (m_display_diagnostics_active) {
+            const std::filesystem::path path = m_display_diagnostics_dir / "tracery_through_voronoi.tsv";
+            const bool new_file = !std::filesystem::exists(path);
+            std::ofstream output(path, std::ios::app | std::ios::binary);
+            if (output) {
+                if (new_file)
+                    output << "volume\tfront_regions\tcandidate_regions\tskipped_small_polygon\tskipped_missing_color\tinput_triangles\tanalytic_regions\tfallback_regions\tback_triangles\tappended_regions\n";
+                output << volume_index << '\t' << front_region_count << '\t' << candidate_regions << '\t'
+                       << skipped_small_polygon << '\t' << skipped_missing_color << '\t' << input_triangles << '\t'
+                       << analytic_regions << '\t' << fallback_regions << '\t'
+                       << back_triangles << '\t' << projected_regions.size() << '\n';
             }
         }
         auto& output = m_generated_voronoi_regions[volume_index++];
