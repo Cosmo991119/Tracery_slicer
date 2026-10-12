@@ -6,6 +6,9 @@
 
 #include <cfloat>
 #include <functional>
+#include <limits>
+#include <map>
+#include <string>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
 
@@ -51,6 +54,25 @@ protected:
     struct Vertex;
 
 public:
+    // CPU-only input for the stained-glass region painter. Regions are grouped
+    // by original mesh facet and already projected into that facet's local 2D
+    // coordinate system. This data is transient and is never serialized.
+    struct TraceryRegion2D {
+        std::vector<Vec2d>   polygon;
+        EnforcerBlockerType  color       = EnforcerBlockerType::NONE;
+        size_t               fragment_id = 0;
+    };
+
+    struct TraceryFacet2DData {
+        int                          source_facet_id = -1;
+        Vec3d                        origin          = Vec3d::Zero();
+        Vec3d                        axis_u          = Vec3d::UnitX();
+        Vec3d                        axis_v          = Vec3d::UnitY();
+        std::vector<TraceryRegion2D> regions;
+    };
+
+    using Tracery2DData = std::vector<TraceryFacet2DData>;
+
     enum CursorType {
         CIRCLE,
         SPHERE,
@@ -359,6 +381,11 @@ public:
                          float max_leaf_edge,
                          const std::function<EnforcerBlockerType(const Vec3f &)> &classify);
 
+    // Applies all transient stained-glass convex polygons using 2D
+    // intersections in the plane of their respective source facets.
+    void paint_all_tracery_regions(const Tracery2DData &data, float max_leaf_edge,
+                                   const std::function<void(const std::string&)> &diagnostic = {});
+
     // Clear everything and make the tree empty.
     void reset();
 
@@ -496,6 +523,38 @@ protected:
 
     // Private functions:
 private:
+    struct TraceryCoverage {
+        double area = 0.0;
+        size_t first_fragment_id = std::numeric_limits<size_t>::max();
+    };
+    struct TraceryLeafClassification {
+        std::map<int, TraceryCoverage> coverage_by_color;
+        double leaf_area = 0.0;
+    };
+    struct TraceryPaintStatistics {
+        size_t visited = 0;
+        size_t outside = 0;
+        size_t full = 0;
+        size_t partial = 0;
+        size_t split = 0;
+        size_t terminal = 0;
+    };
+
+    // Applies the regions belonging to one original model facet. Called by
+    // paint_all_tracery_regions().
+    void paint_tracery_regions(const TraceryFacet2DData &facet_data, float max_leaf_edge,
+                               const std::function<void(const std::string&)> &diagnostic);
+    static double tracery_polygon_area(const std::vector<Vec2d>& polygon);
+    static double intersect_triangle_with_convex_polygon(const std::array<Vec2d, 3>& leaf,
+                                                          const std::vector<Vec2d>& polygon);
+    TraceryLeafClassification classify_tracery_leaf(const Triangle& triangle,
+                                                     const TraceryFacet2DData& facet_data) const;
+    float tracery_longest_edge(const Triangle& triangle) const;
+    void paint_tracery_leaf_recursive(int triangle_idx, const Vec3i32& neighbors, size_t depth,
+                                      const TraceryFacet2DData& facet_data, float max_leaf_edge,
+                                      const std::function<void(const std::string&)>& diagnostic,
+                                      TraceryPaintStatistics& statistics);
+
     bool select_triangle(int facet_idx, EnforcerBlockerType type, bool triangle_splitting);
     bool select_triangle_recursive(int facet_idx, const Vec3i32 &neighbors, EnforcerBlockerType type, bool triangle_splitting);
     void undivide_triangle(int facet_idx);

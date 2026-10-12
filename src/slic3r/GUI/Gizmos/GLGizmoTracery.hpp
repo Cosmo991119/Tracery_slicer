@@ -76,11 +76,35 @@ private:
     void capture_mask_and_generate();
     void generate_paint_plan();
     struct GenerationInput;
+    struct ColorGroup;
+    struct FragmentSeed;
+    struct VoronoiColorRegion;
+    struct GeneratedVoronoiRegion;
     bool collect_generation_input(GenerationInput& input);
+    void collect_volume_generation_input(GenerationInput& input, size_t mesh_idx, size_t volume_idx,
+                                         const std::vector<ColorRGBA>& extruder_colors,
+                                         const ColorRGBA& source_color) const;
+    bool build_color_regions_from_input_faces(const GenerationInput& input,
+                                              std::vector<ColorGroup>& color_groups,
+                                              std::vector<VoronoiColorRegion>& regions) const;
+    void allocate_region_fragment_budgets(std::vector<VoronoiColorRegion>& regions,
+                                          float maximum_fragment_diameter) const;
+    std::vector<Vec3f> sample_region_seed_candidates(const GenerationInput& input,
+                                                      const VoronoiColorRegion& region) const;
+    void generate_region_seeds(const GenerationInput& input, const std::vector<VoronoiColorRegion>& regions,
+                               std::vector<FragmentSeed>& seeds) const;
+    void generate_voronoi_regions(const GenerationInput& input, const std::vector<VoronoiColorRegion>& regions,
+                                  const std::vector<FragmentSeed>& seeds,
+                                  std::vector<std::vector<GeneratedVoronoiRegion>>& output) const;
+    void build_fragment_topology(const std::vector<std::vector<GeneratedVoronoiRegion>>& regions,
+                                 size_t fragment_count, std::vector<std::set<size_t>>& neighbours) const;
+    void assign_voronoi_fragment_colors(const std::vector<ColorGroup>& color_groups,
+                                        const std::vector<FragmentSeed>& seeds,
+                                        const std::vector<std::set<size_t>>& neighbours);
+    void publish_generated_regions(std::vector<std::vector<GeneratedVoronoiRegion>>&& regions);
     struct WorkTriangle;
     void build_work_surface(const GenerationInput& input, float boundary_sample_edge,
                             std::vector<WorkTriangle>& work_triangles) const;
-    struct ColorGroup;
     struct ColorRegionIntegrity;
     struct EdgeKey {
         size_t mesh_idx;
@@ -102,7 +126,6 @@ private:
                                                const std::vector<ColorGroup>& color_groups,
                                                const std::vector<std::vector<size_t>>& group_triangles,
                                                const std::vector<double>& group_areas) const;
-    struct FragmentSeed;
     struct CpuGeometry;
     struct FragmentGenerationIntegrity;
     bool generate_fragments(const std::vector<WorkTriangle>& work_triangles,
@@ -164,8 +187,14 @@ private:
     };
     std::optional<StainedGlassApplyPlan> prepare_stained_glass_apply();
     void                                 generate_through_fragments();
+    void                                 generate_through_voronoi_regions();
     void                                 commit_stained_glass_apply(StainedGlassApplyPlan&& plan);
     void bake_fragments_to_mmu_painting();
+    TriangleSelector::Tracery2DData build_voronoi_2d_data(size_t volume_index) const;
+    TriangleSelector::Tracery2DData build_tracery_2d_data(size_t volume_index) const;
+    ModelObject* find_masked_model_object(Model& model) const;
+    bool bake_volume_voronoi_regions(ModelVolume& volume, size_t volume_index);
+    void notify_mmu_paint_changed(const ModelObject& object) const;
     void start_display_diagnostics();
     void stop_display_diagnostics();
     void record_display_diagnostic_state(const char* event, const std::string& detail = {});
@@ -179,6 +208,21 @@ private:
         // from which each generated triangle was derived.
         std::vector<int>         source_facet_ids;
     };
+
+    // The direct Voronoi path preserves a clipped convex polygon until it is
+    // intersected with the selector leaves during the final MMU bake.
+    struct GeneratedVoronoiRegion {
+        size_t              fragment_id = 0;
+        int                 source_facet_id = -1;
+        std::vector<Vec3f>  local_polygon;
+    };
+
+    // Prepares one projected back-side fragment. Its implementation will
+    // retain front_fragment.fragment_id and fill source_facet_ids with the
+    // facets hit on the target back surface.
+    GeneratedFragment generate_back_fact_tracery_date(const GeneratedFragment& front_fragment,
+                                                       const TriangleMesh& target_mesh,
+                                                       size_t volume_index) const;
 
     enum class PaintMode { SURFACE, THROUGH };
     PaintMode m_paint_mode = PaintMode::SURFACE;
@@ -211,6 +255,7 @@ private:
     // leaf states generated by an earlier regeneration.
     std::vector<TriangleSelector::TriangleSplittingData> m_stained_glass_base_paint_data;
     std::vector<std::vector<GeneratedFragment>> m_generated_fragments;
+    std::vector<std::vector<GeneratedVoronoiRegion>> m_generated_voronoi_regions;
     // Target colours are converted to normal virtual-filament paint states.
     std::vector<ColorRGBA> m_fragment_colors;
     std::vector<unsigned int> m_fragment_mixed_filament_ids;
