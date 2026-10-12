@@ -7,6 +7,7 @@
 #include <iomanip>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <tbb/parallel_for.h>
 
@@ -1045,12 +1046,90 @@ void TriangleSelector::paint_all_tracery_regions(const Tracery2DData &data, floa
     if (diagnostic)
         diagnostic("paint_all_begin\tfacets=" + std::to_string(data.size()) +
                    "\tmax_leaf_edge=" + std::to_string(max_leaf_edge));
+
+    std::map<int, std::set<int>> allowed_states_by_source;
     for (const TraceryFacet2DData& facet_data : data)
+        for (const TraceryRegion2D& region : facet_data.regions)
+            if (region.color != EnforcerBlockerType::NONE)
+                allowed_states_by_source[facet_data.source_facet_id].insert(int(region.color));
+
+    const auto audit_processed_sources = [this, &allowed_states_by_source, &diagnostic](const char* stage,
+                                                                                           int completed_facet,
+                                                                                           const std::set<int>& sources) {
+        if (!diagnostic)
+            return;
+        struct StateCoverage {
+            size_t leaves = 0;
+            double area = 0.0;
+        };
+        const auto leaf_area = [this](const Triangle& triangle) {
+            const Vec3d a = m_vertices[triangle.verts_idxs[0]].v.cast<double>();
+            const Vec3d b = m_vertices[triangle.verts_idxs[1]].v.cast<double>();
+            const Vec3d c = m_vertices[triangle.verts_idxs[2]].v.cast<double>();
+            return 0.5 * (b - a).cross(c - a).norm();
+        };
+        for (int source_facet_id : sources) {
+            if (source_facet_id < 0 || source_facet_id >= m_orig_size_indices)
+                continue;
+            std::map<int, StateCoverage> coverage_by_state;
+            std::function<void(int)> visit = [&](int triangle_idx) {
+                const Triangle& triangle = m_triangles[triangle_idx];
+                if (!triangle.valid())
+                    return;
+                if (triangle.is_split()) {
+                    for (int child_idx = 0; child_idx <= triangle.number_of_split_sides(); ++child_idx)
+                        visit(triangle.children[child_idx]);
+                    return;
+                }
+                StateCoverage& coverage = coverage_by_state[int(triangle.get_state())];
+                ++coverage.leaves;
+                coverage.area += leaf_area(triangle);
+            };
+            visit(source_facet_id);
+
+            const std::set<int>& allowed_states = allowed_states_by_source[source_facet_id];
+            double total_area = 0.0;
+            double unexpected_area = 0.0;
+            for (const auto& [state, coverage] : coverage_by_state) {
+                total_area += coverage.area;
+                if (!allowed_states.count(state)) {
+                    unexpected_area += coverage.area;
+                    std::ostringstream detail;
+                    detail << std::setprecision(12)
+                           << "paint_coverage_unexpected_state\tstage=" << stage
+                           << "\tcompleted_facet=" << completed_facet
+                           << "\tsource_facet=" << source_facet_id
+                           << "\tstate=" << state
+                           << "\tleaves=" << coverage.leaves
+                           << "\tarea=" << coverage.area;
+                    diagnostic(detail.str());
+                }
+            }
+            std::ostringstream summary;
+            summary << std::setprecision(12)
+                    << "paint_coverage_summary\tstage=" << stage
+                    << "\tcompleted_facet=" << completed_facet
+                    << "\tsource_facet=" << source_facet_id
+                    << "\ttotal_area=" << total_area
+                    << "\tunexpected_area=" << unexpected_area
+                    << "\tallowed_states=";
+            for (int state : allowed_states)
+                summary << state << ',';
+            diagnostic(summary.str());
+        }
+    };
+
+    std::set<int> processed_sources;
+    for (const TraceryFacet2DData& facet_data : data) {
         paint_tracery_regions(facet_data, max_leaf_edge, diagnostic);
+        processed_sources.insert(facet_data.source_facet_id);
+        audit_processed_sources("after_facet", facet_data.source_facet_id, processed_sources);
+    }
 
     for (int facet_idx = 0; facet_idx < m_orig_size_indices; ++facet_idx)
         remove_useless_children(facet_idx);
     garbage_collect();
+    audit_processed_sources("after_cleanup", -1, processed_sources);
     if (diagnostic)
         diagnostic("paint_all_end\tselector_triangles=" + std::to_string(m_triangles.size()));
 }
@@ -1382,6 +1461,23 @@ void TriangleSelector::paint_tracery_leaf_recursive(
     const TraceryLeafClassification classification = classify_tracery_leaf(triangle, facet_data);
     if (classification.coverage_by_color.empty() || classification.leaf_area <= 1e-15) {
         ++statistics.outside;
+        if (diagnostic && statistics.outside <= 8) {
+            std::ostringstream detail;
+            detail << std::setprecision(12)
+                   << "leaf_outside\tfacet=" << facet_data.source_facet_id
+                   << "\ttriangle=" << triangle_idx
+                   << "\tdepth=" << depth
+                   << "\tleaf_area=" << classification.leaf_area
+                   << "\treason=" << (classification.leaf_area <= 1e-15 ? "degenerate_leaf" : "no_region_overlap")
+                   << "\tleaf2d=";
+            for (size_t corner = 0; corner < 3; ++corner) {
+                const Vec3d delta = m_vertices[triangle.verts_idxs[corner]].v.cast<double>() - facet_data.origin;
+                if (corner != 0)
+                    detail << ';';
+                detail << delta.dot(facet_data.axis_u) << ',' << delta.dot(facet_data.axis_v);
+            }
+            diagnostic(detail.str());
+        }
         return;
     }
     auto best = classification.coverage_by_color.begin();
@@ -1408,19 +1504,34 @@ void TriangleSelector::paint_tracery_leaf_recursive(
         return;
     }
     ++statistics.split;
+    // Recursing into a child may split it, which can reallocate m_triangles.
+    // Snapshot every child and its neighbour data before that happens: parent
+    // is a reference into m_triangles and must not be read after recursion.
     const Triangle& parent = m_triangles[triangle_idx];
+    std::vector<std::pair<int, Vec3i32>> children;
+    children.reserve(size_t(parent.number_of_split_sides() + 1));
     for (int child_idx = 0; child_idx <= parent.number_of_split_sides(); ++child_idx)
-        paint_tracery_leaf_recursive(parent.children[child_idx], child_neighbors(parent, neighbors, child_idx), depth + 1,
+        children.emplace_back(parent.children[child_idx], child_neighbors(parent, neighbors, child_idx));
+    for (const auto& [child, child_neighbors_] : children)
+        paint_tracery_leaf_recursive(child, child_neighbors_, depth + 1,
                                      facet_data, max_leaf_edge, diagnostic, statistics);
 }
 
 void TriangleSelector::paint_tracery_regions(const TraceryFacet2DData& facet_data, float max_leaf_edge,
                                               const std::function<void(const std::string&)>& diagnostic)
 {
-    if (facet_data.source_facet_id < 0 || facet_data.source_facet_id >= m_orig_size_indices || facet_data.regions.empty())
+    if (facet_data.source_facet_id < 0 || facet_data.source_facet_id >= m_orig_size_indices || facet_data.regions.empty()) {
+        if (diagnostic)
+            diagnostic("paint_facet_skipped\tfacet=" + std::to_string(facet_data.source_facet_id) +
+                       "\treason=invalid_source_facet_or_no_regions");
         return;
-    if (facet_data.axis_u.norm() <= 1e-12 || facet_data.axis_v.norm() <= 1e-12)
+    }
+    if (facet_data.axis_u.norm() <= 1e-12 || facet_data.axis_v.norm() <= 1e-12) {
+        if (diagnostic)
+            diagnostic("paint_facet_skipped\tfacet=" + std::to_string(facet_data.source_facet_id) +
+                       "\treason=degenerate_projection_axes");
         return;
+    }
     TraceryPaintStatistics statistics;
     paint_tracery_leaf_recursive(facet_data.source_facet_id, m_neighbors[facet_data.source_facet_id], 0,
                                  facet_data, max_leaf_edge, diagnostic, statistics);

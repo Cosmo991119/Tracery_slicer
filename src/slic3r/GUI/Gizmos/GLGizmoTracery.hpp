@@ -9,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -190,7 +191,8 @@ private:
     void                                 generate_through_voronoi_regions();
     void                                 commit_stained_glass_apply(StainedGlassApplyPlan&& plan);
     void bake_fragments_to_mmu_painting();
-    TriangleSelector::Tracery2DData build_voronoi_2d_data(size_t volume_index) const;
+    TriangleSelector::Tracery2DData build_voronoi_2d_data(
+        size_t volume_index, const std::function<void(const std::string&)>& diagnostic) const;
     TriangleSelector::Tracery2DData build_tracery_2d_data(size_t volume_index) const;
     ModelObject* find_masked_model_object(Model& model) const;
     bool bake_volume_voronoi_regions(ModelVolume& volume, size_t volume_index);

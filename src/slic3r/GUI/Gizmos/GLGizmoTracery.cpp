@@ -476,7 +476,8 @@ void GLGizmoTracery::start_display_diagnostics()
         std::ofstream readme(m_display_diagnostics_dir / "README.txt", std::ios::binary);
         readme << "Focused stained-glass diagnostics. Normal rendering is not changed.\n"
                << "events.tsv contains a bounded warp probe plus commit/bake records.\n"
-               << "No framebuffer capture, per-triangle logging, or duplicate integrity pass is enabled.\n"
+               << "tracery_voronoi_bake_volume_*.tsv follows generated Voronoi regions through 2D projection, selector overlap and persisted MMU paint.\n"
+               << "No framebuffer capture or duplicate integrity pass is enabled; Voronoi bake logs at most eight uncovered selector leaves per source facet.\n"
                << "warp_probe_parameters records raw density and derived warp parameters.\n"
                << "warp_probe_seed_compute records scalar phases, sine values, offsets, and float bits.\n"
                << "warp_probe_seed_storage and warp_probe_seed_post_kd distinguish calculation errors from later memory corruption.\n";
@@ -3259,20 +3260,138 @@ ModelObject* GLGizmoTracery::find_masked_model_object(Model& model) const
 
 bool GLGizmoTracery::bake_volume_voronoi_regions(ModelVolume& volume, size_t volume_index)
 {
-    const TriangleSelector::Tracery2DData data = build_voronoi_2d_data(volume_index);
+    std::shared_ptr<std::ofstream> diagnostic;
+    std::function<void(const std::string&)> trace;
+    if (m_display_diagnostics_active) {
+        const std::filesystem::path path = m_display_diagnostics_dir /
+            ("tracery_voronoi_bake_volume_" + std::to_string(volume_index) + ".tsv");
+        const bool new_file = !std::filesystem::exists(path);
+        diagnostic = std::make_shared<std::ofstream>(path, std::ios::app | std::ios::binary);
+        if (*diagnostic && new_file)
+            *diagnostic << "record\tdetail\n";
+        trace = [diagnostic](const std::string& detail) {
+            if (*diagnostic)
+                *diagnostic << detail << '\n';
+        };
+    }
+    const size_t generated_region_count = volume_index < m_generated_voronoi_regions.size() ?
+        m_generated_voronoi_regions[volume_index].size() : 0;
+    if (trace)
+        trace("bake_begin\tvolume=" + std::to_string(volume_index) +
+              "\tgenerated_regions=" + std::to_string(generated_region_count) +
+              "\tmixed_ids=" + std::to_string(m_fragment_mixed_filament_ids.size()));
+
+    const TriangleSelector::Tracery2DData data = build_voronoi_2d_data(volume_index, trace);
     const bool has_base_paint = volume_index < m_stained_glass_base_paint_data.size();
-    if (!has_base_paint && data.empty())
+    size_t projected_region_count = 0;
+    for (const TriangleSelector::TraceryFacet2DData& facet : data)
+        projected_region_count += facet.regions.size();
+    if (trace)
+        trace("projection_complete\tvolume=" + std::to_string(volume_index) +
+              "\tfacets=" + std::to_string(data.size()) +
+              "\tregions=" + std::to_string(projected_region_count) +
+              "\thas_base_paint=" + std::to_string(has_base_paint));
+    if (!has_base_paint && data.empty()) {
+        if (trace)
+            trace("bake_skipped\tvolume=" + std::to_string(volume_index) + "\treason=no_base_paint_and_no_2d_regions");
         return false;
+    }
     TriangleSelector selector(volume.mesh());
     if (has_base_paint)
         selector.deserialize(m_stained_glass_base_paint_data[volume_index], false);
     else
         selector.deserialize(volume.mmu_segmentation_facets.get_data(), false);
+
+    const auto selector_state_summary = [](const TriangleSelector& value) {
+        std::vector<indexed_triangle_set> facets_by_state;
+        value.get_facets(facets_by_state);
+        std::ostringstream summary;
+        for (size_t state = 0; state < facets_by_state.size(); ++state)
+            if (!facets_by_state[state].indices.empty())
+                summary << state << ':' << facets_by_state[state].indices.size() << ';';
+        return summary.str();
+    };
+    const auto audit_persisted_coverage = [&data, &trace](const TriangleSelector& value, const char* stage) {
+        if (!trace)
+            return;
+        std::map<int, std::set<int>> allowed_states_by_source;
+        for (const TriangleSelector::TraceryFacet2DData& facet : data)
+            for (const TriangleSelector::TraceryRegion2D& region : facet.regions)
+                if (region.color != EnforcerBlockerType::NONE)
+                    allowed_states_by_source[facet.source_facet_id].insert(int(region.color));
+
+        struct StateCoverage {
+            size_t triangles = 0;
+            double area = 0.0;
+        };
+        std::map<int, std::map<int, StateCoverage>> coverage_by_source;
+        for (unsigned int state = 0; state <= unsigned(EnforcerBlockerType::ExtruderMax); ++state) {
+            const auto facets = value.get_facets_strict_with_sources(EnforcerBlockerType(state));
+            for (size_t index = 0; index < facets.facets.indices.size() && index < facets.source_facet_ids.size(); ++index) {
+                const int source_facet_id = facets.source_facet_ids[index];
+                if (!allowed_states_by_source.count(source_facet_id))
+                    continue;
+                const stl_triangle_vertex_indices& triangle = facets.facets.indices[index];
+                const Vec3d a = facets.facets.vertices[size_t(triangle[0])].cast<double>();
+                const Vec3d b = facets.facets.vertices[size_t(triangle[1])].cast<double>();
+                const Vec3d c = facets.facets.vertices[size_t(triangle[2])].cast<double>();
+                StateCoverage& coverage = coverage_by_source[source_facet_id][int(state)];
+                ++coverage.triangles;
+                coverage.area += 0.5 * (b - a).cross(c - a).norm();
+            }
+        }
+        for (const auto& [source_facet_id, allowed_states] : allowed_states_by_source) {
+            double total_area = 0.0;
+            double unexpected_area = 0.0;
+            for (const auto& [state, coverage] : coverage_by_source[source_facet_id]) {
+                total_area += coverage.area;
+                if (!allowed_states.count(state)) {
+                    unexpected_area += coverage.area;
+                    std::ostringstream detail;
+                    detail << std::setprecision(12)
+                           << "persisted_coverage_unexpected_state\tstage=" << stage
+                           << "\tsource_facet=" << source_facet_id
+                           << "\tstate=" << state
+                           << "\ttriangles=" << coverage.triangles
+                           << "\tarea=" << coverage.area;
+                    trace(detail.str());
+                }
+            }
+            std::ostringstream summary;
+            summary << std::setprecision(12)
+                    << "persisted_coverage_summary\tstage=" << stage
+                    << "\tsource_facet=" << source_facet_id
+                    << "\ttotal_area=" << total_area
+                    << "\tunexpected_area=" << unexpected_area
+                    << "\tallowed_states=";
+            for (int state : allowed_states)
+                summary << state << ',';
+            trace(summary.str());
+        }
+    };
+    if (trace)
+        trace("selector_before_paint\tvolume=" + std::to_string(volume_index) +
+              "\tstates=" + selector_state_summary(selector));
     if (!data.empty()) {
         const float max_leaf_edge = std::clamp((6.5f - 4.0f * m_fragment_density) * 0.08f, 0.18f, 0.55f);
-        selector.paint_all_tracery_regions(data, max_leaf_edge);
+        selector.paint_all_tracery_regions(data, max_leaf_edge, trace);
+    } else if (trace) {
+        trace("selector_skipped\tvolume=" + std::to_string(volume_index) + "\treason=no_2d_regions");
     }
-    return volume.mmu_segmentation_facets.set(selector);
+    if (trace)
+        trace("selector_after_paint\tvolume=" + std::to_string(volume_index) +
+              "\tstates=" + selector_state_summary(selector));
+    audit_persisted_coverage(selector, "after_paint");
+    const bool volume_changed = volume.mmu_segmentation_facets.set(selector);
+    if (trace) {
+        TriangleSelector persisted_selector(volume.mesh());
+        persisted_selector.deserialize(volume.mmu_segmentation_facets.get_data(), false);
+        trace("bake_persisted\tvolume=" + std::to_string(volume_index) +
+              "\tset_changed=" + std::to_string(volume_changed) +
+              "\tstates=" + selector_state_summary(persisted_selector));
+        audit_persisted_coverage(persisted_selector, "after_persist");
+    }
+    return volume_changed;
 }
 
 void GLGizmoTracery::notify_mmu_paint_changed(const ModelObject& object) const
@@ -3540,15 +3659,22 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting()
 #endif
 }
 
-TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t volume_index) const
+TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(
+    size_t volume_index, const std::function<void(const std::string&)>& diagnostic) const
 {
     TriangleSelector::Tracery2DData data;
-    if (volume_index >= m_generated_voronoi_regions.size())
+    if (volume_index >= m_generated_voronoi_regions.size()) {
+        if (diagnostic)
+            diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) + "\treason=no_generated_volume");
         return data;
+    }
     Model& model = wxGetApp().plater()->model();
     const ModelObject* object = find_masked_model_object(model);
-    if (object == nullptr)
+    if (object == nullptr) {
+        if (diagnostic)
+            diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) + "\treason=masked_object_not_found");
         return data;
+    }
     const ModelVolume* volume = nullptr;
     size_t current_index = 0;
     for (const ModelVolume* candidate : object->volumes)
@@ -3556,20 +3682,86 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t vol
             volume = candidate;
             break;
         }
-    if (volume == nullptr)
+    if (volume == nullptr) {
+        if (diagnostic)
+            diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) + "\treason=model_volume_not_found");
         return data;
+    }
     const indexed_triangle_set& mesh = volume->mesh().its;
+    struct ProjectionStatistics {
+        size_t input = 0;
+        size_t output = 0;
+        size_t skipped_fragment_id = 0;
+        size_t skipped_polygon = 0;
+        size_t skipped_filament = 0;
+        size_t skipped_plane = 0;
+        size_t non_finite = 0;
+        size_t degenerate = 0;
+        double output_area_2d = 0.0;
+    };
+    std::map<int, ProjectionStatistics> statistics_by_facet;
+    const auto polygon_area_3d = [](const std::vector<Vec3f>& polygon) {
+        if (polygon.size() < 3)
+            return 0.0;
+        const Vec3d origin = polygon.front().cast<double>();
+        double area = 0.0;
+        for (size_t index = 1; index + 1 < polygon.size(); ++index)
+            area += 0.5 * (polygon[index].cast<double>() - origin).cross(
+                polygon[index + 1].cast<double>() - origin).norm();
+        return area;
+    };
+    const auto polygon_area_2d = [](const std::vector<Vec2d>& polygon) {
+        if (polygon.size() < 3)
+            return 0.0;
+        double twice_area = 0.0;
+        for (size_t index = 0; index < polygon.size(); ++index)
+            twice_area += polygon[index].x() * polygon[(index + 1) % polygon.size()].y() -
+                          polygon[index].y() * polygon[(index + 1) % polygon.size()].x();
+        return std::abs(twice_area) * 0.5;
+    };
     std::map<int, size_t> facet_entries;
     for (const GeneratedVoronoiRegion& generated : m_generated_voronoi_regions[volume_index]) {
-        if (generated.fragment_id >= m_fragment_mixed_filament_ids.size() || generated.local_polygon.size() < 3)
+        ProjectionStatistics& statistics = statistics_by_facet[generated.source_facet_id];
+        ++statistics.input;
+        const double area_3d = polygon_area_3d(generated.local_polygon);
+        if (generated.fragment_id >= m_fragment_mixed_filament_ids.size()) {
+            ++statistics.skipped_fragment_id;
+            if (diagnostic)
+                diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
+                           "\tfragment=" + std::to_string(generated.fragment_id) +
+                           "\tfacet=" + std::to_string(generated.source_facet_id) +
+                           "\treason=fragment_id_out_of_range");
             continue;
+        }
+        if (generated.local_polygon.size() < 3) {
+            ++statistics.skipped_polygon;
+            if (diagnostic)
+                diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
+                           "\tfragment=" + std::to_string(generated.fragment_id) +
+                           "\tfacet=" + std::to_string(generated.source_facet_id) +
+                           "\treason=polygon_has_fewer_than_3_vertices");
+            continue;
+        }
         const unsigned int filament = m_fragment_mixed_filament_ids[generated.fragment_id];
-        if (filament == 0 || filament > unsigned(EnforcerBlockerType::ExtruderMax))
+        if (filament == 0 || filament > unsigned(EnforcerBlockerType::ExtruderMax)) {
+            ++statistics.skipped_filament;
+            if (diagnostic)
+                diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
+                           "\tfragment=" + std::to_string(generated.fragment_id) +
+                           "\tfacet=" + std::to_string(generated.source_facet_id) +
+                           "\tfilament=" + std::to_string(filament) + "\treason=invalid_filament");
             continue;
+        }
         auto [entry, inserted] = facet_entries.emplace(generated.source_facet_id, data.size());
         if (inserted) {
             auto plane = make_tracery_facet_plane(mesh, generated.source_facet_id);
             if (!plane) {
+                ++statistics.skipped_plane;
+                if (diagnostic)
+                    diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
+                               "\tfragment=" + std::to_string(generated.fragment_id) +
+                               "\tfacet=" + std::to_string(generated.source_facet_id) +
+                               "\tfilament=" + std::to_string(filament) + "\treason=invalid_source_facet_plane");
                 facet_entries.erase(entry);
                 continue;
             }
@@ -3584,9 +3776,49 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t vol
                 const Vec3d delta = vertex.cast<double>() - facet.origin;
                 region.polygon.emplace_back(delta.dot(facet.axis_u), delta.dot(facet.axis_v));
             }
+            const double area_2d = polygon_area_2d(region.polygon);
+            bool finite = true;
+            for (const Vec2d& vertex : region.polygon)
+                finite = finite && std::isfinite(vertex.x()) && std::isfinite(vertex.y());
+            if (!finite)
+                ++statistics.non_finite;
+            if (area_3d <= 1e-12 || area_2d <= 1e-12)
+                ++statistics.degenerate;
+            ++statistics.output;
+            statistics.output_area_2d += area_2d;
+            if (diagnostic) {
+                std::ostringstream detail;
+                detail << std::setprecision(12)
+                       << "projection_output\tvolume=" << volume_index
+                       << "\tfragment=" << generated.fragment_id
+                       << "\tfacet=" << generated.source_facet_id
+                       << "\tfilament=" << filament
+                       << "\tvertices=" << region.polygon.size()
+                       << "\tarea_3d=" << area_3d
+                       << "\tarea_2d=" << area_2d
+                       << "\tfinite=" << finite;
+                diagnostic(detail.str());
+            }
             facet.regions.emplace_back(std::move(region));
         }
     }
+    if (diagnostic)
+        for (const auto& [source_facet_id, statistics] : statistics_by_facet) {
+            std::ostringstream detail;
+            detail << std::setprecision(12)
+                   << "projection_facet_summary\tvolume=" << volume_index
+                   << "\tfacet=" << source_facet_id
+                   << "\tinput=" << statistics.input
+                   << "\toutput=" << statistics.output
+                   << "\tskipped_fragment_id=" << statistics.skipped_fragment_id
+                   << "\tskipped_polygon=" << statistics.skipped_polygon
+                   << "\tskipped_filament=" << statistics.skipped_filament
+                   << "\tskipped_plane=" << statistics.skipped_plane
+                   << "\tnon_finite=" << statistics.non_finite
+                   << "\tdegenerate=" << statistics.degenerate
+                   << "\toutput_area_2d=" << statistics.output_area_2d;
+            diagnostic(detail.str());
+        }
     data.erase(std::remove_if(data.begin(), data.end(), [](const auto& facet) { return facet.regions.empty(); }), data.end());
     return data;
 }
