@@ -3349,6 +3349,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
         }
         const float ray_epsilon = std::max(1e-5f, (maximum - minimum).norm() * 1e-6f);
         const float clip_epsilon = ray_epsilon * 8.0f;
+        const std::vector<Vec3i32> face_neighbors = its_face_neighbors(mesh);
         const auto valid_face = [&mesh](int face_id) {
             if (face_id < 0 || size_t(face_id) >= mesh.indices.size())
                 return false;
@@ -3357,6 +3358,9 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                 size_t(face[0]) < mesh.vertices.size() && size_t(face[1]) < mesh.vertices.size() &&
                 size_t(face[2]) < mesh.vertices.size();
         };
+        size_t analytic_multi_face_regions = 0;
+        size_t analytic_target_faces = 0;
+        size_t analytic_coverage_fallbacks = 0;
         const auto project_parallel_region = [&](const GeneratedVoronoiRegion& front,
                                                  std::vector<GeneratedVoronoiRegion>& output) {
             if (!valid_face(front.source_facet_id) || front.local_polygon.size() < 3)
@@ -3401,33 +3405,132 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                     return false;
                 polygon.emplace_back((vertex.cast<double>() + direction * distance).cast<float>());
             }
-            const std::array<Vec3f, 3> target_vertices = { target_a, target_b, target_c };
-            for (size_t edge = 0; edge < target_vertices.size() && !polygon.empty(); ++edge) {
-                const Vec3f& first = target_vertices[edge];
-                const Vec3f& second = target_vertices[(edge + 1) % target_vertices.size()];
-                std::vector<Vec3f> clipped;
-                clipped.reserve(polygon.size() + 1);
-                for (size_t index = 0; index < polygon.size(); ++index) {
-                    const Vec3f& current = polygon[index];
-                    const Vec3f& next = polygon[(index + 1) % polygon.size()];
-                    const float current_side = target_normal.dot((second - first).cross(current - first));
-                    const float next_side = target_normal.dot((second - first).cross(next - first));
-                    const bool current_inside = current_side >= -clip_epsilon;
-                    const bool next_inside = next_side >= -clip_epsilon;
-                    if (current_inside)
-                        clipped.emplace_back(current);
-                    if (current_inside != next_inside) {
-                        const float denominator_side = current_side - next_side;
-                        if (std::abs(denominator_side) > 1e-12f)
-                            clipped.emplace_back(current + (next - current) * (current_side / denominator_side));
+            const auto polygon_area = [&target_normal](const std::vector<Vec3f>& vertices) {
+                if (vertices.size() < 3)
+                    return 0.0;
+                double area_twice = 0.0;
+                for (size_t index = 0; index < vertices.size(); ++index)
+                    area_twice += double(target_normal.dot(vertices[index].cross(vertices[(index + 1) % vertices.size()])));
+                return std::abs(area_twice) * 0.5;
+            };
+            const auto clip_to_face = [&mesh, &valid_face, &target_normal, clip_epsilon](
+                                          const std::vector<Vec3f>& input, int face_id) {
+                std::vector<Vec3f> clipped = input;
+                if (!valid_face(face_id))
+                    return std::vector<Vec3f>{};
+                const stl_triangle_vertex_indices& face = mesh.indices[size_t(face_id)];
+                const std::array<Vec3f, 3> vertices = {
+                    mesh.vertices[size_t(face[0])], mesh.vertices[size_t(face[1])], mesh.vertices[size_t(face[2])] };
+                for (size_t edge = 0; edge < vertices.size() && !clipped.empty(); ++edge) {
+                    const Vec3f& first = vertices[edge];
+                    const Vec3f& second = vertices[(edge + 1) % vertices.size()];
+                    std::vector<Vec3f> result;
+                    result.reserve(clipped.size() + 1);
+                    for (size_t index = 0; index < clipped.size(); ++index) {
+                        const Vec3f& current = clipped[index];
+                        const Vec3f& next = clipped[(index + 1) % clipped.size()];
+                        const float current_side = target_normal.dot((second - first).cross(current - first));
+                        const float next_side = target_normal.dot((second - first).cross(next - first));
+                        const bool current_inside = current_side >= -clip_epsilon;
+                        const bool next_inside = next_side >= -clip_epsilon;
+                        if (current_inside)
+                            result.emplace_back(current);
+                        if (current_inside != next_inside) {
+                            const float side_delta = current_side - next_side;
+                            if (std::abs(side_delta) > 1e-12f)
+                                result.emplace_back(current + (next - current) * (current_side / side_delta));
+                        }
+                    }
+                    clipped = std::move(result);
+                }
+                return clipped;
+            };
+
+            // A back surface may be tessellated into several coplanar triangles.
+            // Walk only the connected coplanar component containing the ray hit;
+            // this prevents an unrelated, parallel surface from receiving paint.
+            std::vector<int> target_faces;
+            std::vector<bool> visited(mesh.indices.size(), false);
+            std::queue<int> pending_faces;
+            pending_faces.push(hit.face());
+            visited[size_t(hit.face())] = true;
+            while (!pending_faces.empty()) {
+                const int face_id = pending_faces.front();
+                pending_faces.pop();
+                if (!valid_face(face_id))
+                    continue;
+                const stl_triangle_vertex_indices& face = mesh.indices[size_t(face_id)];
+                const Vec3f face_a = mesh.vertices[size_t(face[0])];
+                const Vec3f face_b = mesh.vertices[size_t(face[1])];
+                const Vec3f face_c = mesh.vertices[size_t(face[2])];
+                Vec3f face_normal = (face_b - face_a).cross(face_c - face_a);
+                if (face_normal.squaredNorm() <= 1e-12f)
+                    continue;
+                face_normal.normalize();
+                if (face_normal.dot(target_normal) < 0.999f ||
+                    std::abs((face_a - target_a).dot(target_normal)) > clip_epsilon)
+                    continue;
+                target_faces.emplace_back(face_id);
+                if (size_t(face_id) >= face_neighbors.size())
+                    continue;
+                for (int edge = 0; edge < 3; ++edge) {
+                    const int neighbor = face_neighbors[size_t(face_id)][edge];
+                    if (neighbor >= 0 && size_t(neighbor) < visited.size() && !visited[size_t(neighbor)]) {
+                        visited[size_t(neighbor)] = true;
+                        pending_faces.push(neighbor);
                     }
                 }
-                polygon = std::move(clipped);
             }
-            if (polygon.size() < 3)
+            if (target_faces.empty())
                 return false;
-            for (size_t index = 1; index + 1 < polygon.size(); ++index)
-                output.push_back({ front.fragment_id, hit.face(), { polygon[0], polygon[index], polygon[index + 1] } });
+
+            const double projected_area = polygon_area(polygon);
+            if (projected_area <= 1e-10)
+                return false;
+            std::vector<GeneratedVoronoiRegion> candidate_regions;
+            double covered_area = 0.0;
+            for (const int face_id : target_faces) {
+                const std::vector<Vec3f> clipped = clip_to_face(polygon, face_id);
+                const double clipped_area = polygon_area(clipped);
+                if (clipped.size() < 3 || clipped_area <= 1e-10)
+                    continue;
+                covered_area += clipped_area;
+                for (size_t index = 1; index + 1 < clipped.size(); ++index)
+                    candidate_regions.push_back({ front.fragment_id, face_id,
+                        { clipped[0], clipped[index], clipped[index + 1] } });
+            }
+
+            // Do not leave a partial analytic result behind. The tolerance only
+            // accepts floating-point clipping noise; a real uncovered portion
+            // falls back to the existing adaptive ray projection.
+            const double coverage_tolerance = std::max(1e-7, projected_area * 1e-4);
+            const bool complete_coverage = !candidate_regions.empty() &&
+                std::abs(covered_area - projected_area) <= coverage_tolerance;
+            if (m_display_diagnostics_active) {
+                const std::filesystem::path path = m_display_diagnostics_dir / "tracery_through_analytic_projection.tsv";
+                const bool new_file = !std::filesystem::exists(path);
+                std::ofstream diagnostic(path, std::ios::app | std::ios::binary);
+                if (diagnostic) {
+                    if (new_file)
+                        diagnostic << "volume\tfragment\tsource_facet\tseed_target_facet\ttarget_facets\tprojected_area\tcovered_area\ttolerance\tstatus\n";
+                    std::ostringstream faces;
+                    for (const int face_id : target_faces)
+                        faces << face_id << ';';
+                    diagnostic << volume_index << '\t' << front.fragment_id << '\t' << front.source_facet_id << '\t'
+                               << hit.face() << '\t' << faces.str() << '\t' << std::setprecision(12)
+                               << projected_area << '\t' << covered_area << '\t' << coverage_tolerance << '\t'
+                               << (complete_coverage ? "accepted" : "fallback_incomplete_coverage") << '\n';
+                }
+            }
+            if (!complete_coverage) {
+                ++analytic_coverage_fallbacks;
+                return false;
+            }
+            if (target_faces.size() > 1)
+                ++analytic_multi_face_regions;
+            analytic_target_faces += target_faces.size();
+            output.insert(output.end(), std::make_move_iterator(candidate_regions.begin()),
+                          std::make_move_iterator(candidate_regions.end()));
             return true;
         };
         const size_t front_region_count = m_generated_voronoi_regions[volume_index].size();
@@ -3483,10 +3586,12 @@ void GLGizmoTracery::generate_through_voronoi_regions()
             std::ofstream output(path, std::ios::app | std::ios::binary);
             if (output) {
                 if (new_file)
-                    output << "volume\tfront_regions\tcandidate_regions\tskipped_small_polygon\tskipped_missing_color\tinput_triangles\tanalytic_regions\tfallback_regions\tback_triangles\tappended_regions\n";
+                    output << "volume\tfront_regions\tcandidate_regions\tskipped_small_polygon\tskipped_missing_color\tinput_triangles\tanalytic_regions\tanalytic_multi_face_regions\tanalytic_target_faces\tanalytic_coverage_fallbacks\tfallback_regions\tback_triangles\tappended_regions\n";
                 output << volume_index << '\t' << front_region_count << '\t' << candidate_regions << '\t'
                        << skipped_small_polygon << '\t' << skipped_missing_color << '\t' << input_triangles << '\t'
-                       << analytic_regions << '\t' << fallback_regions << '\t'
+                       << analytic_regions << '\t' << analytic_multi_face_regions << '\t'
+                       << analytic_target_faces << '\t' << analytic_coverage_fallbacks << '\t'
+                       << fallback_regions << '\t'
                        << back_triangles << '\t' << projected_regions.size() << '\n';
             }
         }
