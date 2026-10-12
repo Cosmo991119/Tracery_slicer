@@ -211,12 +211,23 @@ private:
         std::vector<int>         source_facet_ids;
     };
 
+    enum class PaintMode { SURFACE, THROUGH };
+
     // The direct Voronoi path preserves a clipped convex polygon until it is
     // intersected with the selector leaves during the final MMU bake.
     struct GeneratedVoronoiRegion {
         size_t              fragment_id = 0;
         int                 source_facet_id = -1;
         std::vector<Vec3f>  local_polygon;
+    };
+
+    // A completed stroke owns its mode, generated front/back geometry and the
+    // CMYW slots it received. Geometry is retained for later transition work;
+    // ordinary incremental baking deliberately leaves previous strokes intact.
+    struct TracerySelection {
+        PaintMode                                     mode = PaintMode::SURFACE;
+        std::vector<std::vector<GeneratedVoronoiRegion>> regions;
+        std::vector<unsigned int>                     mixed_filament_ids;
     };
 
     // Prepares one projected back-side fragment. Its implementation will
@@ -226,8 +237,8 @@ private:
                                                        const TriangleMesh& target_mesh,
                                                        size_t volume_index) const;
 
-    enum class PaintMode { SURFACE, THROUGH };
     PaintMode m_paint_mode = PaintMode::SURFACE;
+    PaintMode m_pending_selection_mode = PaintMode::SURFACE;
     wchar_t m_current_tool = 0;
     bool    m_eraser_mode = false;
     bool    m_selection_modified = false;
@@ -251,6 +262,9 @@ private:
     // compact representation lets reopening restore the same painted area.
     ObjectID m_mask_object_id;
     std::vector<TriangleSelector::TriangleSplittingData> m_mask_data;
+    // Selector data before the current completed stroke. It identifies the
+    // added leaves, so a later stroke does not regenerate earlier selections.
+    std::vector<TriangleSelector::TriangleSplittingData> m_previous_mask_data;
     // The ordinary multi-material paint as it existed before the first
     // stained-glass stroke. Every commit starts from this snapshot, then
     // applies the complete current stained-glass mask. This avoids retaining
@@ -258,6 +272,8 @@ private:
     std::vector<TriangleSelector::TriangleSplittingData> m_stained_glass_base_paint_data;
     std::vector<std::vector<GeneratedFragment>> m_generated_fragments;
     std::vector<std::vector<GeneratedVoronoiRegion>> m_generated_voronoi_regions;
+    std::vector<TracerySelection> m_tracery_selections;
+    bool m_incremental_generation = false;
     // Target colours are converted to normal virtual-filament paint states.
     std::vector<ColorRGBA> m_fragment_colors;
     std::vector<unsigned int> m_fragment_mixed_filament_ids;
