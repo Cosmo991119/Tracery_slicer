@@ -2644,6 +2644,8 @@ void GLGizmoTracery::generate_paint_plan()
     m_generated_voronoi_regions.clear();
     m_fragment_colors.clear();
     m_fragment_mixed_filament_ids.clear();
+    m_pending_selection_fragment_count = 0;
+    m_transition_recipe_targets.clear();
     m_generation_integrity_valid = true;
     const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
         m_c->selection_info()->model_object() : nullptr;
@@ -2679,6 +2681,7 @@ void GLGizmoTracery::generate_paint_plan()
     std::vector<std::set<size_t>> fragment_neighbours;
     build_fragment_topology(generated, seeds.size(), fragment_neighbours);
     assign_voronoi_fragment_colors(color_groups, seeds, fragment_neighbours);
+    m_pending_selection_fragment_count = m_fragment_colors.size();
     publish_generated_regions(std::move(generated));
 }
 
@@ -2692,14 +2695,199 @@ void GLGizmoTracery::apply_stained_glass_colors()
     if (m_incremental_generation && m_fragment_colors.empty())
         return;
 
+    if (m_pending_selection_mode == PaintMode::THROUGH)
+        generate_through_voronoi_regions();
+
+    apply_incremental_boundary_transitions();
+
     auto plan = prepare_stained_glass_apply();
     if (!plan)
         return;
 
-    if (m_pending_selection_mode == PaintMode::THROUGH)
-        generate_through_voronoi_regions();
-
     commit_stained_glass_apply(std::move(*plan));
+}
+
+void GLGizmoTracery::apply_incremental_boundary_transitions()
+{
+    if (!m_incremental_generation || m_tracery_selections.empty() ||
+        m_pending_selection_fragment_count == 0 || m_fragment_colors.empty())
+        return;
+
+    const float transition_width = std::clamp((6.5f - 4.0f * m_fragment_density) * 0.18f, 0.20f, 0.85f);
+    const float transition_width_sq = transition_width * transition_width;
+    Model& model = wxGetApp().plater()->model();
+    const ModelObject* object = find_masked_model_object(model);
+    if (object == nullptr)
+        return;
+    std::vector<const indexed_triangle_set*> volume_meshes;
+    for (const ModelVolume* volume : object->volumes)
+        if (volume->is_model_part())
+            volume_meshes.emplace_back(&volume->mesh().its);
+    std::vector<std::vector<Vec3i32>> volume_face_neighbours(volume_meshes.size());
+    for (size_t volume = 0; volume < volume_meshes.size(); ++volume)
+        volume_face_neighbours[volume] = its_face_neighbors(*volume_meshes[volume]);
+    size_t compatible_facet_pairs = 0;
+    size_t cross_facet_pairs = 0;
+    const auto facets_share_transition_boundary = [&volume_meshes, &volume_face_neighbours,
+                                                     &compatible_facet_pairs, &cross_facet_pairs](
+                                                        size_t volume, int first_id, int second_id) {
+        if (volume >= volume_meshes.size() || first_id < 0 || second_id < 0)
+            return false;
+        const indexed_triangle_set& mesh = *volume_meshes[volume];
+        if (size_t(first_id) >= mesh.indices.size() || size_t(second_id) >= mesh.indices.size())
+            return false;
+        if (first_id == second_id) {
+            ++compatible_facet_pairs;
+            return true;
+        }
+        if (size_t(first_id) >= volume_face_neighbours[volume].size())
+            return false;
+        const Vec3i32 neighbours = volume_face_neighbours[volume][size_t(first_id)];
+        if (neighbours[0] != second_id && neighbours[1] != second_id && neighbours[2] != second_id)
+            return false;
+        const stl_triangle_vertex_indices& first = mesh.indices[size_t(first_id)];
+        const stl_triangle_vertex_indices& second = mesh.indices[size_t(second_id)];
+        const auto valid = [&mesh](const stl_triangle_vertex_indices& face) {
+            return face[0] >= 0 && face[1] >= 0 && face[2] >= 0 &&
+                size_t(face[0]) < mesh.vertices.size() && size_t(face[1]) < mesh.vertices.size() &&
+                size_t(face[2]) < mesh.vertices.size();
+        };
+        if (!valid(first) || !valid(second))
+            return false;
+        const Vec3f first_a = mesh.vertices[size_t(first[0])];
+        const Vec3f first_b = mesh.vertices[size_t(first[1])];
+        const Vec3f first_c = mesh.vertices[size_t(first[2])];
+        const Vec3f second_a = mesh.vertices[size_t(second[0])];
+        const Vec3f second_b = mesh.vertices[size_t(second[1])];
+        const Vec3f second_c = mesh.vertices[size_t(second[2])];
+        Vec3f first_normal = (first_b - first_a).cross(first_c - first_a);
+        Vec3f second_normal = (second_b - second_a).cross(second_c - second_a);
+        if (first_normal.squaredNorm() <= 1e-12f || second_normal.squaredNorm() <= 1e-12f)
+            return false;
+        first_normal.normalize();
+        second_normal.normalize();
+        if (first_normal.dot(second_normal) < 0.999f || std::abs((second_a - first_a).dot(first_normal)) > 1e-4f)
+            return false;
+        ++compatible_facet_pairs;
+        ++cross_facet_pairs;
+        return true;
+    };
+    const auto point_segment_distance_sq = [](const Vec3f& point, const Vec3f& first, const Vec3f& second) {
+        const Vec3f edge = second - first;
+        const float length_sq = edge.squaredNorm();
+        if (length_sq <= 1e-12f)
+            return (point - first).squaredNorm();
+        const float factor = std::clamp((point - first).dot(edge) / length_sq, 0.0f, 1.0f);
+        return (point - (first + edge * factor)).squaredNorm();
+    };
+    const auto regions_touch = [&point_segment_distance_sq, transition_width_sq, &facets_share_transition_boundary](
+                                   size_t volume, const GeneratedVoronoiRegion& first, const GeneratedVoronoiRegion& second) {
+        if (!facets_share_transition_boundary(volume, first.source_facet_id, second.source_facet_id) ||
+            first.local_polygon.size() < 2 || second.local_polygon.size() < 2)
+            return false;
+        for (size_t first_index = 0; first_index < first.local_polygon.size(); ++first_index) {
+            const Vec3f& first_a = first.local_polygon[first_index];
+            const Vec3f& first_b = first.local_polygon[(first_index + 1) % first.local_polygon.size()];
+            for (size_t second_index = 0; second_index < second.local_polygon.size(); ++second_index) {
+                const Vec3f& second_a = second.local_polygon[second_index];
+                const Vec3f& second_b = second.local_polygon[(second_index + 1) % second.local_polygon.size()];
+                if (point_segment_distance_sq(first_a, second_a, second_b) <= transition_width_sq ||
+                    point_segment_distance_sq(first_b, second_a, second_b) <= transition_width_sq ||
+                    point_segment_distance_sq(second_a, first_a, first_b) <= transition_width_sq ||
+                    point_segment_distance_sq(second_b, first_a, first_b) <= transition_width_sq)
+                    return true;
+            }
+        }
+        return false;
+    };
+    const auto blend_toward_neighbours = [](const ColorRGBA& base, const std::vector<ColorRGBA>& neighbours,
+                                             float neighbour_weight) {
+        Vec4f sum = Vec4f::Zero();
+        for (const ColorRGBA& colour : neighbours)
+            sum += Vec4f(colour.r(), colour.g(), colour.b(), colour.a());
+        sum /= float(neighbours.size());
+        const float base_weight = 1.0f - neighbour_weight;
+        return ColorRGBA(base.r() * base_weight + sum.x() * neighbour_weight,
+                          base.g() * base_weight + sum.y() * neighbour_weight,
+                          base.b() * base_weight + sum.z() * neighbour_weight,
+                          base.a() * base_weight + sum.w() * neighbour_weight);
+    };
+
+    std::map<size_t, std::vector<ColorRGBA>> new_neighbours;
+    std::map<std::pair<size_t, size_t>, std::vector<ColorRGBA>> old_neighbours;
+    for (size_t volume = 0; volume < m_generated_voronoi_regions.size(); ++volume) {
+        for (const GeneratedVoronoiRegion& current : m_generated_voronoi_regions[volume]) {
+            if (current.is_back_projection || current.fragment_id >= m_pending_selection_fragment_count ||
+                current.fragment_id >= m_fragment_colors.size())
+                continue;
+            for (size_t selection_index = 0; selection_index < m_tracery_selections.size(); ++selection_index) {
+                const TracerySelection& selection = m_tracery_selections[selection_index];
+                if (volume >= selection.regions.size())
+                    continue;
+                for (const GeneratedVoronoiRegion& previous : selection.regions[volume]) {
+                    if (previous.is_back_projection || previous.fragment_id >= selection.fragment_colors.size() ||
+                        !regions_touch(volume, current, previous))
+                        continue;
+                    new_neighbours[current.fragment_id].push_back(selection.fragment_colors[previous.fragment_id]);
+                    old_neighbours[{ selection_index, previous.fragment_id }].push_back(m_fragment_colors[current.fragment_id]);
+                }
+            }
+        }
+    }
+    // A Voronoi fragment is discrete, not a texel. Give the first boundary
+    // ring on each side a directional bias rather than painting both sides
+    // with one 50:50 colour: old -> old-biased transition -> new-biased
+    // transition -> new.
+    constexpr float opposite_side_weight = 0.28f;
+    const auto write_diagnostic = [this, transition_width, compatible_facet_pairs, cross_facet_pairs, opposite_side_weight,
+                                   &new_neighbours, &old_neighbours]() {
+        if (!m_display_diagnostics_active)
+            return;
+        const std::filesystem::path path = m_display_diagnostics_dir / "tracery_incremental_transitions.tsv";
+        const bool new_file = !std::filesystem::exists(path);
+        std::ofstream output(path, std::ios::app | std::ios::binary);
+        if (!output)
+            return;
+        if (new_file)
+            output << "new_boundary_fragments\told_boundary_fragments\ttransition_recipes\twidth\topposite_side_weight\tcompatible_facet_pairs\tcross_facet_pairs\n";
+        output << new_neighbours.size() << '\t' << old_neighbours.size() << '\t'
+               << old_neighbours.size() << '\t' << transition_width << '\t' << opposite_side_weight << '\t'
+               << compatible_facet_pairs << '\t' << cross_facet_pairs << '\n';
+    };
+    if (new_neighbours.empty() || old_neighbours.empty()) {
+        write_diagnostic();
+        return;
+    }
+
+    for (const auto& [fragment, neighbours] : new_neighbours)
+        if (fragment < m_fragment_colors.size())
+            m_fragment_colors[fragment] = blend_toward_neighbours(m_fragment_colors[fragment], neighbours,
+                                                                    opposite_side_weight);
+
+    for (const auto& [target, neighbours] : old_neighbours) {
+        const size_t selection_index = target.first;
+        const size_t fragment = target.second;
+        if (selection_index >= m_tracery_selections.size())
+            continue;
+        TracerySelection& selection = m_tracery_selections[selection_index];
+        if (fragment >= selection.fragment_colors.size())
+            continue;
+        const ColorRGBA transition_colour = blend_toward_neighbours(selection.fragment_colors[fragment], neighbours,
+                                                                       opposite_side_weight);
+        m_fragment_colors.emplace_back(transition_colour);
+        m_transition_recipe_targets.emplace_back(selection_index, fragment);
+        const size_t transient_fragment = m_fragment_colors.size() - 1;
+        for (size_t volume = 0; volume < selection.regions.size(); ++volume)
+            for (const GeneratedVoronoiRegion& previous : selection.regions[volume])
+                if (previous.fragment_id == fragment) {
+                    GeneratedVoronoiRegion dirty = previous;
+                    dirty.fragment_id = transient_fragment;
+                    dirty.mixed_filament_id = 0;
+                    m_generated_voronoi_regions.resize(std::max(m_generated_voronoi_regions.size(), volume + 1));
+                    m_generated_voronoi_regions[volume].emplace_back(std::move(dirty));
+                }
+    }
+    write_diagnostic();
 }
 
 std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_stained_glass_apply()
@@ -3563,7 +3751,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                 covered_area += clipped_area;
                 for (size_t index = 1; index + 1 < clipped.size(); ++index)
                     candidate_regions.push_back({ front.fragment_id, face_id,
-                        { clipped[0], clipped[index], clipped[index + 1] } });
+                        { clipped[0], clipped[index], clipped[index + 1] }, 0, true });
             }
 
             // Do not leave a partial analytic result behind. The tolerance only
@@ -3643,7 +3831,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                     continue;
                 projected_regions.push_back({ front.fragment_id, back.source_facet_ids[face_index],
                     { back.surface.vertices[size_t(face[0])], back.surface.vertices[size_t(face[1])],
-                      back.surface.vertices[size_t(face[2])] } });
+                      back.surface.vertices[size_t(face[2])] }, 0, true });
             }
         }
         if (m_display_diagnostics_active) {
@@ -3689,6 +3877,28 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
     }
     if (plan.mode == StainedGlassApplyPlan::Mode::BakeFragments) {
         m_fragment_mixed_filament_ids = std::move(plan.fragment_mixed_filament_ids);
+        for (size_t index = 0; index < m_transition_recipe_targets.size(); ++index) {
+            const size_t transient_fragment = m_pending_selection_fragment_count + index;
+            if (transient_fragment >= m_fragment_mixed_filament_ids.size())
+                continue;
+            const auto [selection_index, fragment] = m_transition_recipe_targets[index];
+            if (selection_index >= m_tracery_selections.size())
+                continue;
+            TracerySelection& selection = m_tracery_selections[selection_index];
+            if (fragment >= selection.mixed_filament_ids.size())
+                continue;
+            if (fragment < selection.fragment_colors.size())
+                selection.fragment_colors[fragment] = m_fragment_colors[transient_fragment];
+            selection.mixed_filament_ids[fragment] = m_fragment_mixed_filament_ids[transient_fragment];
+            for (auto& per_volume : selection.regions)
+                for (GeneratedVoronoiRegion& region : per_volume)
+                    if (region.fragment_id == fragment)
+                        region.mixed_filament_id = selection.mixed_filament_ids[fragment];
+        }
+        for (auto& per_volume : m_generated_voronoi_regions)
+            for (GeneratedVoronoiRegion& region : per_volume)
+                if (region.fragment_id < m_fragment_mixed_filament_ids.size())
+                    region.mixed_filament_id = m_fragment_mixed_filament_ids[region.fragment_id];
         if (PresetBundle* bundle = wxGetApp().preset_bundle) {
             if (auto* definitions = bundle->project_config.option<ConfigOptionString>("mixed_filament_definitions"))
                 definitions->value = std::move(plan.mixed_filament_definitions);
@@ -3967,14 +4177,22 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting()
     bool has_generated_regions = false;
     for (const auto& regions : m_generated_voronoi_regions)
         has_generated_regions = has_generated_regions || !regions.empty();
-    if (has_generated_regions) {
+    if (has_generated_regions && m_pending_selection_fragment_count > 0) {
         TracerySelection selection;
         selection.mode = m_pending_selection_mode;
-        selection.regions = std::move(m_generated_voronoi_regions);
-        selection.mixed_filament_ids = m_fragment_mixed_filament_ids;
+        selection.regions.resize(m_generated_voronoi_regions.size());
+        for (size_t volume = 0; volume < m_generated_voronoi_regions.size(); ++volume)
+            for (const GeneratedVoronoiRegion& region : m_generated_voronoi_regions[volume])
+                if (region.fragment_id < m_pending_selection_fragment_count)
+                    selection.regions[volume].emplace_back(region);
+        selection.fragment_colors.assign(m_fragment_colors.begin(),
+            m_fragment_colors.begin() + std::min(m_pending_selection_fragment_count, m_fragment_colors.size()));
+        selection.mixed_filament_ids.assign(m_fragment_mixed_filament_ids.begin(),
+            m_fragment_mixed_filament_ids.begin() + std::min(m_pending_selection_fragment_count, m_fragment_mixed_filament_ids.size()));
         m_tracery_selections.emplace_back(std::move(selection));
     }
     m_generated_voronoi_regions.clear();
+    m_transition_recipe_targets.clear();
     m_generated_fragments.clear();
     return;
 
@@ -4196,7 +4414,7 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(
         ProjectionStatistics& statistics = statistics_by_facet[generated.source_facet_id];
         ++statistics.input;
         const double area_3d = polygon_area_3d(generated.local_polygon);
-        if (generated.fragment_id >= m_fragment_mixed_filament_ids.size()) {
+        if (generated.mixed_filament_id == 0 && generated.fragment_id >= m_fragment_mixed_filament_ids.size()) {
             ++statistics.skipped_fragment_id;
             if (diagnostic)
                 diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
@@ -4214,7 +4432,8 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(
                            "\treason=polygon_has_fewer_than_3_vertices");
             continue;
         }
-        const unsigned int filament = m_fragment_mixed_filament_ids[generated.fragment_id];
+        const unsigned int filament = generated.mixed_filament_id != 0 ? generated.mixed_filament_id :
+            m_fragment_mixed_filament_ids[generated.fragment_id];
         if (filament == 0 || filament > unsigned(EnforcerBlockerType::ExtruderMax)) {
             ++statistics.skipped_filament;
             if (diagnostic)

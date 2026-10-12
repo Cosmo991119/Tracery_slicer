@@ -189,6 +189,7 @@ private:
     std::optional<StainedGlassApplyPlan> prepare_stained_glass_apply();
     void                                 generate_through_fragments();
     void                                 generate_through_voronoi_regions();
+    void                                 apply_incremental_boundary_transitions();
     void                                 commit_stained_glass_apply(StainedGlassApplyPlan&& plan);
     void bake_fragments_to_mmu_painting();
     TriangleSelector::Tracery2DData build_voronoi_2d_data(
@@ -219,6 +220,10 @@ private:
         size_t              fragment_id = 0;
         int                 source_facet_id = -1;
         std::vector<Vec3f>  local_polygon;
+        // Set once a CMYW recipe has been resolved. It lets a dirty region
+        // from an older selection be baked without remapping its local ID.
+        unsigned int        mixed_filament_id = 0;
+        bool                is_back_projection = false;
     };
 
     // A completed stroke owns its mode, generated front/back geometry and the
@@ -227,6 +232,7 @@ private:
     struct TracerySelection {
         PaintMode                                     mode = PaintMode::SURFACE;
         std::vector<std::vector<GeneratedVoronoiRegion>> regions;
+        std::vector<ColorRGBA>                         fragment_colors;
         std::vector<unsigned int>                     mixed_filament_ids;
     };
 
@@ -274,6 +280,10 @@ private:
     std::vector<std::vector<GeneratedVoronoiRegion>> m_generated_voronoi_regions;
     std::vector<TracerySelection> m_tracery_selections;
     bool m_incremental_generation = false;
+    size_t m_pending_selection_fragment_count = 0;
+    // Maps transient palette entries added for old boundary fragments back to
+    // their persistent selection-local recipe slots.
+    std::vector<std::pair<size_t, size_t>> m_transition_recipe_targets;
     // Target colours are converted to normal virtual-filament paint states.
     std::vector<ColorRGBA> m_fragment_colors;
     std::vector<unsigned int> m_fragment_mixed_filament_ids;
