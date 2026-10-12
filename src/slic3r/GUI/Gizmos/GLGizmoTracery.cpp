@@ -1035,11 +1035,15 @@ bool GLGizmoTracery::build_color_regions_from_input_faces(
 void GLGizmoTracery::allocate_region_fragment_budgets(
     std::vector<VoronoiColorRegion>& regions, float maximum_fragment_diameter) const
 {
-    const size_t minimum_fragments = std::clamp<size_t>(size_t(std::lround(8.0f + 16.0f * m_fragment_density)), 8, 24);
+    // Direct Voronoi generation allocates from surface area. Density limits
+    // the maximum number of seeds for one connected colour region; it does
+    // not force small regions to be split into a minimum number of shards.
+    const size_t maximum_fragments_per_region =
+        std::clamp<size_t>(size_t(std::lround(8.0f + 16.0f * m_fragment_density)), 8, 24);
     const double maximum_piece_area = std::max(0.0001, 0.70 * double(maximum_fragment_diameter) * maximum_fragment_diameter);
     for (VoronoiColorRegion& region : regions) {
         const size_t area_count = std::max<size_t>(1, size_t(std::ceil(region.world_area / maximum_piece_area)));
-        region.fragment_budget = std::max<size_t>(1, std::min(minimum_fragments, area_count));
+        region.fragment_budget = std::max<size_t>(1, std::min(maximum_fragments_per_region, area_count));
     }
     size_t total = 0;
     for (const VoronoiColorRegion& region : regions)
