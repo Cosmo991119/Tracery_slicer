@@ -60,6 +60,18 @@ A four-panel comparison of the same model: original colors, the front and back i
 
 Click an image to view the original. The sliced view is a preview; actual printed results depend on the filament, model, and print settings.
 
+
+
+### Example: Stained Glass on a Building Model
+
+A side-by-side comparison of the building model before and after adding stained-glass patterns to its windows.
+
+| Before | After · Stained Glass Windows |
+| :---: | :---: |
+| [![Building model before adding stained-glass patterns](doc/images/tracery-building-before.png)](doc/images/tracery-building-before.png) | [![Building model with colorful stained-glass patterns on its windows](doc/images/tracery-building-after.png)](doc/images/tracery-building-after.png) |
+
+Click an image to view the original.
+
 ## Basic Workflow
 
 1. Import a model and choose your printer and filament profiles.
