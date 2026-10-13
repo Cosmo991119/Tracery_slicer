@@ -40,9 +40,13 @@ Newly selected regions can use different modes. For example, paint region A in N
 
 ### Available Recipes for Automatic Color Matching
 
-![CMYW stained-glass palette: 328 valid recipes, with each active color contributing at least 15%](doc/images/tracery-cmyw-palette.svg)
+![CMYW stained-glass palette: 292 valid recipes; two-color recipes require each material to contribute at least 30%, while one- and three-color recipes retain a 15% minimum](doc/images/tracery-cmyw-palette-two-min30.svg)
 
-Stained glass uses a fixed CMYW palette: C (cyan), M (magenta), Y (yellow), and W (white). The available palette contains 328 recipes at 5% increments. A color contributes either 0% or at least 15% when included. When generating fragment colors, the system matches the target appearance against these combinations, favoring recipes that balance color error and component proportions.
+Stained glass uses a fixed CMYW palette: C (cyan), M (magenta), Y (yellow), and W (white). The available palette contains 292 recipes at 5% increments. In two-color recipes, each material contributes at least 30%; one- and three-color recipes retain a 15% minimum. A material contributes 0% when absent. When generating fragment colors, the system matches the target appearance against these combinations, favoring recipes that balance color error and component proportions.
+
+![CMYW recipe selection: among recipes visually close to the best color match, prefer the more balanced material proportions, while preserving color separation between neighboring fragments](doc/images/tracery-recipe-selection.svg)
+
+For each fragment, the system keeps recipes within ΔE 2.0 of the closest target-color match. It then prefers the recipe with the smallest spread among active material proportions; equal spreads are resolved by lower ΔE. The existing neighbor check still prefers a ΔE of at least 12 between adjacent fragments, so visually equivalent but over-similar choices are skipped.
 
 ### Example
 

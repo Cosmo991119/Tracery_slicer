@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 270" role="img" aria-labelledby="title desc">
+  <title id="title">Stained-glass CMYW recipe selection</title>
+  <desc id="desc">Target fragment color is matched against legal CMYW recipes. Recipes within Delta E 2.0 of the best match are ordered by active-material balance, then checked against neighboring fragment color separation.</desc>
+  <rect width="960" height="270" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M0,0 L10,5 L0,10 Z" fill="#6b7280"/></marker>
+  </defs>
+  <g font-family="Arial, sans-serif">
+    <text x="32" y="38" font-size="25" font-weight="600" fill="#202020">CMYW recipe selection</text>
+    <text x="32" y="64" font-size="14" fill="#5b6470">Color accuracy remains the gate; material balance decides among visually equivalent recipes.</text>
+    <g fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5">
+      <rect x="32" y="105" width="155" height="102" rx="8"/>
+      <rect x="238" y="105" width="175" height="102" rx="8"/>
+      <rect x="464" y="105" width="205" height="102" rx="8"/>
+      <rect x="720" y="105" width="205" height="102" rx="8"/>
+    </g>
+    <g stroke="#6b7280" stroke-width="2" fill="none" marker-end="url(#arrow)">
+      <path d="M188 156H230"/><path d="M414 156H456"/><path d="M670 156H712"/>
+    </g>
+    <g font-size="15" fill="#202020" text-anchor="middle">
+      <text x="110" y="140">Target fragment</text><text x="110" y="164">color</text>
+      <text x="326" y="136">Evaluate every legal</text><text x="326" y="160">CMYW recipe by ΔE</text><text x="326" y="184">Find the minimum</text>
+      <text x="566" y="132">Keep ΔE ≤ best + 2.0</text><text x="566" y="156">Prefer smaller active-</text><text x="566" y="180">material ratio spread</text>
+      <text x="823" y="132">Keep neighbor ΔE ≥ 12</text><text x="823" y="156">Otherwise try the next</text><text x="823" y="180">ranked candidate</text>
+    </g>
+  </g>
+</svg>

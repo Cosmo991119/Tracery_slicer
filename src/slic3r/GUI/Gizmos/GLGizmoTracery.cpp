@@ -237,14 +237,21 @@ bool is_legal_tracery_recipe(const std::array<int, 4>& weights)
         total += weights[index];
         if (weights[index] == 0)
             continue;
-        if (weights[index] < 15)
-            return false;
         ++active_count;
         if (index < 3)
             ++chromatic_count;
     }
     if (total != 100 || active_count < 1 || active_count > 3 || chromatic_count > 2)
         return false;
+
+    // Two-material blends need a substantial share of both ingredients to
+    // avoid unstable, near-single-colour mixing. Single-colour and three-
+    // material glass recipes retain the existing 15% lower bound.
+    const int minimum_active_weight = active_count == 2 ? 30 : 15;
+    for (const int weight : weights)
+        if (weight > 0 && weight < minimum_active_weight)
+            return false;
+
     // A three-ingredient glass recipe must be one white ingredient plus two
     // CMY ingredients. This rejects both CMY-only and four-colour mud.
     return active_count != 3 || (weights[3] > 0 && chromatic_count == 2);
@@ -275,7 +282,7 @@ std::vector<TraceryEditorRecipe> build_tracery_editor_palette()
     return palette;
 }
 
-double tracery_recipe_balance_penalty(const std::array<int, 4>& weights)
+double tracery_recipe_balance_spread(const std::array<int, 4>& weights)
 {
     int minimum = 101;
     int maximum = 0;
@@ -284,9 +291,8 @@ double tracery_recipe_balance_penalty(const std::array<int, 4>& weights)
             minimum = std::min(minimum, weight);
             maximum = std::max(maximum, weight);
         }
-    // This is deliberately a preference rather than another hard cutoff: a
-    // dominant colour is sometimes required to preserve a saturated source.
-    return minimum <= 0 ? 0.0 : 0.08 * double(maximum - minimum);
+    // Compare only active materials: an absent component is not an imbalance.
+    return minimum <= 0 ? 0.0 : double(maximum - minimum);
 }
 
 } // namespace
@@ -2494,19 +2500,36 @@ bool GLGizmoTracery::assign_fragment_colors(
         desired_colors[fragment] = glass_color(base_colors[fragment], boundary_color, boundary_mix, seeds[fragment].stable_id);
     }
 
-    struct CandidateRecipe { size_t palette_index; double score; };
+    struct CandidateRecipe {
+        size_t palette_index;
+        double delta_e;
+        double balance_spread;
+    };
     std::vector<std::vector<CandidateRecipe>> fragment_candidates(fragment_count);
+    // Keep the same just-noticeable threshold used when reusing visual recipe
+    // slots. Within this window, a more even material split is preferable to
+    // a marginally closer preview colour.
+    constexpr double balanced_recipe_delta_e_window = 2.0;
     for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
         const wxColour target = tracery_wx_color(desired_colors[fragment]);
         auto& candidates = fragment_candidates[fragment];
         candidates.reserve(editor_palette.size());
+        double minimum_delta_e = std::numeric_limits<double>::infinity();
         for (size_t recipe = 0; recipe < editor_palette.size(); ++recipe) {
-            const double score = color_delta_e00(target, editor_palette[recipe].preview) +
-                tracery_recipe_balance_penalty(editor_palette[recipe].weights);
-            candidates.push_back({ recipe, score });
+            const double delta_e = color_delta_e00(target, editor_palette[recipe].preview);
+            minimum_delta_e = std::min(minimum_delta_e, delta_e);
+            candidates.push_back({ recipe, delta_e, tracery_recipe_balance_spread(editor_palette[recipe].weights) });
         }
-        std::sort(candidates.begin(), candidates.end(), [](const CandidateRecipe& first, const CandidateRecipe& second) {
-            return first.score < second.score;
+        std::sort(candidates.begin(), candidates.end(), [minimum_delta_e, balanced_recipe_delta_e_window](const CandidateRecipe& first, const CandidateRecipe& second) {
+            const bool first_is_visually_close = first.delta_e <= minimum_delta_e + balanced_recipe_delta_e_window;
+            const bool second_is_visually_close = second.delta_e <= minimum_delta_e + balanced_recipe_delta_e_window;
+            if (first_is_visually_close != second_is_visually_close)
+                return first_is_visually_close;
+            if (first_is_visually_close && first.balance_spread != second.balance_spread)
+                return first.balance_spread < second.balance_spread;
+            if (first.delta_e != second.delta_e)
+                return first.delta_e < second.delta_e;
+            return first.palette_index < second.palette_index;
         });
         if (candidates.size() > 24)
             candidates.resize(24);
