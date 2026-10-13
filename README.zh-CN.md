@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+[![Tracery Slicer 功能效果展示：窗形模型上的彩色花窗碎片图案](doc/images/tracery-feature-preview.png)](doc/images/tracery-feature-preview.png)
+
 Tracery Slicer 是基于 [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) 开发的 FDM 切片工具，重点探索多色打印中的花窗（Stained glass）效果：通过涂选模型表面自动生成彩色碎片，并将结果应用为可参与切片的多材料着色数据。
 
 项目仍沿用部分上游程序名称、构建目标和目录名称，例如 `Snapmaker_Orca`。

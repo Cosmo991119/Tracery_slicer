@@ -2,6 +2,8 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
+[![Tracery Slicer feature preview: colorful stained-glass fragments on a window model](doc/images/tracery-feature-preview.png)](doc/images/tracery-feature-preview.png)
+
 Tracery Slicer is an FDM slicer based on [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer), focused on stained-glass effects for multicolor printing. Paint an area on a model to automatically generate colorful fragments and apply them as multi-material painting data that can be sliced.
 
 Some upstream application names, build targets, and directory names are retained, including `Snapmaker_Orca`.
