@@ -29,6 +29,7 @@ public:
 
     bool gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down) override;
     void render_painter_gizmo() override;
+#ifndef NDEBUG
     void record_display_diagnostic_canvas(int object_index, bool picking_enabled, bool stencil_available,
                                           int matching_volumes, bool editing);
     void capture_display_diagnostic_frame(const char* stage, bool stencil_buffer);
@@ -37,6 +38,7 @@ public:
     static bool global_display_diagnostics_active();
     static void record_global_display_diagnostic_canvas(const void* canvas, const std::string& detail);
     static void capture_global_display_diagnostic_frame(const void* canvas, const char* stage);
+#endif
     std::string get_tooltip() const override { return _u8L("Stained glass"); }
 
 protected:
@@ -133,7 +135,7 @@ private:
                             const std::vector<ColorGroup>& color_groups,
                             const std::vector<std::vector<size_t>>& group_triangles,
                             const std::vector<double>& group_areas,
-                            float target_edge, float maximum_fragment_diameter, bool export_diagnostics,
+                            float target_edge, float maximum_fragment_diameter,
                             std::map<EdgeKey, size_t>& work_edge_owners,
                             size_t& fragment_count, std::vector<FragmentSeed>& seeds,
                             std::vector<std::vector<CpuGeometry>>& geometry,
@@ -168,10 +170,9 @@ private:
         size_t fragment_count, float target_edge, float refraction_strength,
         const std::vector<ColorRGBA>& fragment_colors) const;
     struct PublishGeneratedFragmentsIntegrity;
-    void publish_generated_fragments(const std::vector<WorkTriangle>& work_triangles,
-                                     std::vector<std::vector<CpuGeometry>>& geometry,
+    void publish_generated_fragments(std::vector<std::vector<CpuGeometry>>& geometry,
                                      const std::vector<Transform3d>& volume_transforms,
-                                     size_t fragment_count, bool export_diagnostics,
+                                     size_t fragment_count,
                                      bool verify_integrity,
                                      PublishGeneratedFragmentsIntegrity* builder_integrity);
     PublishGeneratedFragmentsIntegrity inspect_published_fragments(size_t fragment_count) const;
@@ -198,9 +199,11 @@ private:
     ModelObject* find_masked_model_object(Model& model) const;
     bool bake_volume_voronoi_regions(ModelVolume& volume, size_t volume_index);
     void notify_mmu_paint_changed(const ModelObject& object) const;
+#ifndef NDEBUG
     void start_display_diagnostics();
     void stop_display_diagnostics();
     void record_display_diagnostic_state(const char* event, const std::string& detail = {});
+#endif
 
     // CPU-only geometry used to classify surface points while baking the
     // generated colours into normal MMU paint. It is never rendered.
@@ -250,14 +253,16 @@ private:
     bool    m_selection_modified = false;
     bool    m_regeneration_requested = false;
     bool    m_palette_update_requested = false;
-    bool    m_export_next_generation = false;
-    bool    m_diagnostic_strong_depth_bias = false;
+#ifndef NDEBUG
     bool    m_display_diagnostics_active = false;
+#endif
     bool    m_generation_integrity_valid = true;
+#ifndef NDEBUG
     std::filesystem::path m_display_diagnostics_dir;
     std::string m_display_diagnostics_phase;
     std::string m_display_diagnostics_last_canvas_state;
     std::set<std::string> m_display_diagnostics_captured;
+#endif
     float   m_fragment_density = 0.5f;
     float   m_refraction_strength = 0.5f;
     float   m_opening_fragment_density = 0.5f;

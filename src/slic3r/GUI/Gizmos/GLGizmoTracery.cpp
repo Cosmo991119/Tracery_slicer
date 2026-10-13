@@ -40,6 +40,7 @@
 
 namespace {
 
+#ifndef NDEBUG
 struct TraceryDisplayCanvasProbe {
     std::filesystem::path directory;
     std::string phase;
@@ -70,38 +71,7 @@ void write_display_canvas_probe_event(const char* event, const std::string& deta
     out << milliseconds << '\t' << display_canvas_probe.phase << '\t' << event
         << "\tdetail=" << detail << '\n';
 }
-
-// Diagnostic PLY uses one coloured vertex per triangle so neighbouring
-// fragments remain independently inspectable in a mesh viewer.
-template<class Enumerate>
-void write_tracery_diagnostic_ply(const std::filesystem::path& path, size_t faces, Enumerate enumerate)
-{
-    std::ofstream output(path, std::ios::binary);
-    if (!output)
-        throw std::runtime_error("Cannot create stained-glass diagnostic PLY");
-    output << "ply\nformat ascii 1.0\n"
-           << "element vertex " << faces * 3 << "\n"
-           << "property float x\nproperty float y\nproperty float z\n"
-           << "property uchar red\nproperty uchar green\nproperty uchar blue\n"
-           << "element face " << faces << "\n"
-           << "property list uchar int vertex_indices\nend_header\n";
-    output << std::setprecision(9);
-    size_t written_vertices = 0;
-    enumerate([&](const Slic3r::Vec3f& position, const Slic3r::ColorRGBA& color) {
-        const auto channel = [](float value) {
-            return int(std::lround(std::clamp(value, 0.0f, 1.0f) * 255.0f));
-        };
-        output << position.x() << ' ' << position.y() << ' ' << position.z() << ' '
-               << channel(color.r()) << ' ' << channel(color.g()) << ' ' << channel(color.b()) << '\n';
-        ++written_vertices;
-    });
-    if (written_vertices != faces * 3)
-        throw std::runtime_error("Stained-glass diagnostic PLY face count mismatch");
-     for (size_t face = 0; face < faces; ++face)
-        output << "3 " << face * 3 << ' ' << face * 3 + 1 << ' ' << face * 3 + 2 << '\n';
-    if (!output)
-        throw std::runtime_error("Cannot finish stained-glass diagnostic PLY");
-}
+#endif
 
 // A stable pseudo-random value makes fragments repeatable until the user
 // explicitly regenerates them. This is intentionally not tied to model data.
@@ -342,7 +312,6 @@ struct GLGizmoTracery::GenerationInput {
         std::unique_ptr<AABBMesh>   aabb;
     };
 
-    bool                                                        export_diagnostics;
     const ModelObject*                                          model_object;
     std::vector<SurfaceTriangle>&                               surface_triangles;
     std::vector<std::vector<std::unique_ptr<ColorSource>>>&    color_sources;
@@ -466,6 +435,7 @@ void GLGizmoTracery::render_painter_gizmo()
     // can depth-fight with the committed colour triangles.
 }
 
+#ifndef NDEBUG
 void GLGizmoTracery::start_display_diagnostics()
 {
     try {
@@ -664,6 +634,7 @@ void GLGizmoTracery::capture_display_diagnostic_frame(const char* stage, bool st
     record_display_diagnostic_state(image.SaveFile(wxString(path.wstring()), wxBITMAP_TYPE_PNG) ?
         "capture_saved" : "capture_failed", key);
 }
+#endif
 
 void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit)
 {
@@ -792,18 +763,14 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         m_parent.set_as_dirty();
     }
     ImGui::Separator();
-    if (m_imgui->button("Export geometry diagnostics")) {
-        m_export_next_generation = true;
-        capture_mask_and_generate();
-    }
+#ifndef NDEBUG
     if (m_imgui->button(m_display_diagnostics_active ? "Stop display diagnostics" : "Start display diagnostics")) {
         if (m_display_diagnostics_active)
             stop_display_diagnostics();
         else
             start_display_diagnostics();
     }
-    if (ImGui::Checkbox("Diagnostic: stronger depth bias", &m_diagnostic_strong_depth_bias))
-        m_parent.set_as_dirty();
+#endif
     ImGui::Separator();
     if (m_imgui->button(_L("Erase all painting"))) {
         m_selection_modified = true;
@@ -919,8 +886,6 @@ bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
     }
 
     if (input.surface_triangles.empty()) {
-        if (input.export_diagnostics)
-            wxMessageBox(_L("Paint a stained-glass area before exporting diagnostics."), _L("Stained glass"), wxOK | wxICON_INFORMATION);
         return false;
     }
     return true;
@@ -1845,7 +1810,7 @@ GLGizmoTracery::PublishGeneratedFragmentsIntegrity GLGizmoTracery::inspect_publi
 bool GLGizmoTracery::generate_fragments(
     const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
     const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas,
-    float target_edge, float maximum_fragment_diameter, bool export_diagnostics,
+    float target_edge, float maximum_fragment_diameter,
     std::map<EdgeKey, size_t>& work_edge_owners, size_t& fragment_count, std::vector<FragmentSeed>& seeds,
     std::vector<std::vector<CpuGeometry>>& geometry, std::vector<size_t>& fragment_for_triangle,
     std::vector<std::set<size_t>>& fragment_neighbours, std::vector<float>& fragment_boundary_distance,
@@ -1938,9 +1903,6 @@ bool GLGizmoTracery::generate_fragments(
 
     fragment_count = seeds.size();
     if (fragment_count == 0) {
-        if (export_diagnostics)
-            wxMessageBox(_L("No stained-glass fragments were generated for the painted area."),
-                         _L("Stained glass"), wxOK | wxICON_INFORMATION);
         return false;
     }
 
@@ -1975,6 +1937,7 @@ bool GLGizmoTracery::generate_fragments(
     };
     const auto warped_position = [&compute_warp](const Vec3f& point) { return compute_warp(point).result; };
 
+#ifndef NDEBUG
     // This is deliberately a fixed, small probe. It records the complete
     // floating-point path before any KD-tree operation while leaving the
     // generation algorithm and its inputs untouched.
@@ -2009,6 +1972,8 @@ bool GLGizmoTracery::generate_fragments(
         append_vector(stream, "result", calculation.result);
         return stream.str();
     };
+#endif
+#ifndef NDEBUG
     if (trace_warp_probe) {
         std::ostringstream parameters;
         append_float(parameters, "fragment_density", m_fragment_density); parameters << ',';
@@ -2017,13 +1982,17 @@ bool GLGizmoTracery::generate_fragments(
         append_float(parameters, "warp_amount", warp_amount);
         record_display_diagnostic_state("warp_probe_parameters", parameters.str());
     }
+#endif
 
     std::vector<Vec3f> warped_seeds;
     warped_seeds.reserve(seeds.size());
+#ifndef NDEBUG
     std::array<WarpComputation, 2> seed_probe_calculations;
     const size_t seed_probe_count = std::min<size_t>(seed_probe_calculations.size(), seeds.size());
+#endif
     for (size_t seed = 0; seed < seeds.size(); ++seed) {
         const WarpComputation calculation = compute_warp(seeds[seed].position);
+#ifndef NDEBUG
         if (seed < seed_probe_count) {
             seed_probe_calculations[seed] = calculation;
             if (trace_warp_probe) {
@@ -2036,8 +2005,10 @@ bool GLGizmoTracery::generate_fragments(
                     describe_warp(seeds[seed].position, calculation));
             }
         }
+#endif
         warped_seeds.emplace_back(calculation.result);
     }
+#ifndef NDEBUG
     if (trace_warp_probe) {
         for (size_t seed = 0; seed < seed_probe_count; ++seed) {
             std::ostringstream stored;
@@ -2050,6 +2021,7 @@ bool GLGizmoTracery::generate_fragments(
                                float_bits(seed_probe_calculations[seed].result.z()) == float_bits(warped_seeds[seed].z())) + "," + stored.str());
         }
     }
+#endif
 
     const auto seed_coordinate = [&warped_seeds](size_t index, size_t dimension) {
         return warped_seeds[index][dimension];
@@ -2065,6 +2037,7 @@ bool GLGizmoTracery::generate_fragments(
                 indices.emplace_back(index);
         group_seed_trees.emplace_back(seed_coordinate, indices);
     }
+#ifndef NDEBUG
     if (trace_warp_probe) {
         for (size_t seed = 0; seed < seed_probe_count; ++seed) {
             std::ostringstream post_tree;
@@ -2088,6 +2061,7 @@ bool GLGizmoTracery::generate_fragments(
                 describe_warp(triangle.world_a, first));
         }
     }
+#endif
 
     struct ClipVertex {
         Vec3f local;
@@ -2444,8 +2418,8 @@ bool GLGizmoTracery::assign_fragment_colors(
 }
 
 void GLGizmoTracery::publish_generated_fragments(
-    const std::vector<WorkTriangle>& work_triangles, std::vector<std::vector<CpuGeometry>>& geometry,
-    const std::vector<Transform3d>& volume_transforms, size_t fragment_count, bool export_diagnostics,
+    std::vector<std::vector<CpuGeometry>>& geometry,
+    const std::vector<Transform3d>& volume_transforms, size_t fragment_count,
     bool verify_integrity, PublishGeneratedFragmentsIntegrity* builder_integrity)
 {
     const auto mix_hash = [](size_t& hash, size_t value) {
@@ -2502,120 +2476,15 @@ void GLGizmoTracery::publish_generated_fragments(
             }
         }
     }
-    std::filesystem::path diagnostic_dir;
-    std::ofstream diagnostic_stats;
-    std::string diagnostic_error;
-    bool diagnostic_ready = false;
-    if (export_diagnostics) {
-        try {
-            diagnostic_dir = std::filesystem::path(wxStandardPaths::Get().GetDocumentsDir().ToStdWstring()) /
-                "TraceryDiagnostics" /
-                ("run-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
-            std::filesystem::create_directories(diagnostic_dir);
-
-            write_tracery_diagnostic_ply(diagnostic_dir / "01_source_colours.ply", work_triangles.size(),
-                [&](const auto& emit) {
-                    for (const WorkTriangle& triangle : work_triangles) {
-                        emit(triangle.world_a, triangle.source_color);
-                        emit(triangle.world_b, triangle.source_color);
-                        emit(triangle.world_c, triangle.source_color);
-                    }
-                });
-
-            size_t clipped_faces = 0;
-            for (const auto& per_volume : geometry)
-                for (const CpuGeometry& data : per_volume)
-                    clipped_faces += data.surface.indices.size();
-            write_tracery_diagnostic_ply(diagnostic_dir / "02_clipped_geometry.ply", clipped_faces,
-                [&](const auto& emit) {
-                    for (size_t volume = 0; volume < geometry.size(); ++volume)
-                        for (size_t fragment = 0; fragment < geometry[volume].size(); ++fragment) {
-                            const CpuGeometry& data = geometry[volume][fragment];
-                            for (const stl_triangle_vertex_indices& face : data.surface.indices)
-                                for (size_t corner = 0; corner < 3; ++corner) {
-                                    Vec3f local = Vec3f::Zero();
-                                    if (face[corner] < data.surface.vertices.size())
-                                        local = data.surface.vertices[face[corner]];
-                                    emit((volume_transforms[volume] * local.cast<double>()).cast<float>(),
-                                         m_fragment_colors[fragment]);
-                                }
-                        }
-                });
-
-            diagnostic_stats.open(diagnostic_dir / "mesh_comparison.csv", std::ios::binary);
-            if (!diagnostic_stats)
-                throw std::runtime_error("Cannot create stained-glass diagnostic report");
-            diagnostic_stats << "volume,fragment,vertices_before,faces_before,vertices_after,faces_after,invalid_indices,tiny_faces,positions_equal,indices_equal\n";
-            std::ofstream readme(diagnostic_dir / "README.txt", std::ios::binary);
-            if (!readme)
-                throw std::runtime_error("Cannot create stained-glass diagnostic README");
-            readme << "01_source_colours.ply: selected work triangles, coloured by their sampled original colour.\n"
-                   << "02_clipped_geometry.ply: coloured fragments just before conversion to indexed_triangle_set.\n"
-                   << "03_exported_surface.ply: the exact indexed surface stored for slicing after conversion.\n"
-                   << "mesh_comparison.csv: per-volume/per-fragment copy integrity and tiny-face counts.\n"
-                   << "PLY coordinates are in object space, after the model-volume transform.\n";
-            diagnostic_ready = true;
-        } catch (const std::exception& error) {
-            diagnostic_error = error.what();
-        }
-    }
-
     for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
         for (size_t volume = 0; volume < geometry.size(); ++volume) {
             CpuGeometry& data = geometry[volume][fragment];
             if (data.empty())
                 continue;
             indexed_triangle_set surface = std::move(data.surface);
-            if (diagnostic_ready) {
-                size_t tiny_faces = 0;
-                for (size_t face = 0; face < surface.indices.size(); ++face) {
-                    if (surface.indices[face][0] < surface.vertices.size() &&
-                        surface.indices[face][1] < surface.vertices.size() &&
-                        surface.indices[face][2] < surface.vertices.size()) {
-                        const Vec3f& a = surface.vertices[surface.indices[face][0]];
-                        const Vec3f& b = surface.vertices[surface.indices[face][1]];
-                        const Vec3f& c = surface.vertices[surface.indices[face][2]];
-                        if ((b - a).cross(c - a).squaredNorm() < 1e-12f)
-                            ++tiny_faces;
-                    }
-                }
-                diagnostic_stats << volume << ',' << fragment << ',' << surface.vertices.size() << ',' << surface.indices.size()
-                                 << ',' << surface.vertices.size() << ',' << surface.indices.size() << ",0," << tiny_faces << ",1,1\n";
-            }
             m_generated_fragments[volume].emplace_back(
                 GeneratedFragment{ fragment, std::move(surface), std::move(data.source_facet_ids) });
         }
-    }
-
-    if (diagnostic_ready) {
-        try {
-            size_t exported_faces = 0;
-            for (const auto& volume : m_generated_fragments)
-                for (const GeneratedFragment& fragment : volume)
-                    exported_faces += fragment.surface.indices.size();
-            write_tracery_diagnostic_ply(diagnostic_dir / "03_exported_surface.ply", exported_faces,
-                [&](const auto& emit) {
-                    for (size_t volume = 0; volume < m_generated_fragments.size(); ++volume)
-                        for (const GeneratedFragment& fragment : m_generated_fragments[volume])
-                            for (const stl_triangle_vertex_indices& face : fragment.surface.indices)
-                                for (size_t corner = 0; corner < 3; ++corner) {
-                                    Vec3f local = Vec3f::Zero();
-                                    if (face[corner] < fragment.surface.vertices.size())
-                                        local = fragment.surface.vertices[face[corner]];
-                                    emit((volume_transforms[volume] * local.cast<double>()).cast<float>(),
-                                         m_fragment_colors[fragment.fragment_id]);
-                                }
-                });
-            diagnostic_stats.close();
-            wxMessageBox(_L("Stained-glass diagnostics saved to:\n") + wxString::FromUTF8(diagnostic_dir.u8string().c_str()),
-                         _L("Stained glass"), wxOK | wxICON_INFORMATION);
-        } catch (const std::exception& error) {
-            diagnostic_error = error.what();
-        }
-    }
-    if (!diagnostic_error.empty()) {
-        wxMessageBox(_L("Could not export stained-glass diagnostics: ") + wxString::FromUTF8(diagnostic_error.c_str()),
-                     _L("Stained glass"), wxOK | wxICON_WARNING);
     }
     if (builder_integrity != nullptr) {
         if (verify_integrity) {
@@ -2636,7 +2505,6 @@ void GLGizmoTracery::publish_generated_fragments(
 
 void GLGizmoTracery::generate_paint_plan()
 {
-    const bool export_diagnostics = std::exchange(m_export_next_generation, false);
     m_regeneration_requested = false;
     if (!m_incremental_generation)
         m_tracery_selections.clear();
@@ -2650,9 +2518,6 @@ void GLGizmoTracery::generate_paint_plan()
     const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
         m_c->selection_info()->model_object() : nullptr;
     if (model_object == nullptr || model_object->id() != m_mask_object_id) {
-        if (export_diagnostics)
-            wxMessageBox(_L("Select a model and paint a stained-glass area before exporting diagnostics."),
-                         _L("Stained glass"), wxOK | wxICON_INFORMATION);
         return;
     }
 
@@ -2663,7 +2528,7 @@ void GLGizmoTracery::generate_paint_plan()
     std::vector<SurfaceTriangle> surface_triangles;
     std::vector<Transform3d> volume_transforms;
     double surface_area = 0.0;
-    GenerationInput input{ export_diagnostics, model_object, surface_triangles, color_sources, volume_transforms, surface_area };
+    GenerationInput input{ model_object, surface_triangles, color_sources, volume_transforms, surface_area };
 
     if (!collect_generation_input(input))
         return;
@@ -2839,6 +2704,7 @@ void GLGizmoTracery::apply_incremental_boundary_transitions()
     // with one 50:50 colour: old -> old-biased transition -> new-biased
     // transition -> new.
     constexpr float opposite_side_weight = 0.28f;
+#ifndef NDEBUG
     const auto write_diagnostic = [this, transition_width, compatible_facet_pairs, cross_facet_pairs, opposite_side_weight,
                                    &new_neighbours, &old_neighbours]() {
         if (!m_display_diagnostics_active)
@@ -2854,6 +2720,9 @@ void GLGizmoTracery::apply_incremental_boundary_transitions()
                << old_neighbours.size() << '\t' << transition_width << '\t' << opposite_side_weight << '\t'
                << compatible_facet_pairs << '\t' << cross_facet_pairs << '\n';
     };
+#else
+    const auto write_diagnostic = [] {};
+#endif
     if (new_neighbours.empty() || old_neighbours.empty()) {
         write_diagnostic();
         return;
@@ -3198,6 +3067,7 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
     const auto triangle_area = [](const Vec3f& a, const Vec3f& b, const Vec3f& c) {
         return 0.5 * (b - a).cross(c - a).norm();
     };
+#ifndef NDEBUG
     const int diagnostic_source_facet_id = front_fragment.source_facet_ids.empty() ? -1 : front_fragment.source_facet_ids.front();
     const auto record_ray_rejection = [this, volume_index, &front_fragment, diagnostic_source_facet_id](
                                           const char* reason, const Vec3f& point, const Vec3d& direction,
@@ -3216,6 +3086,9 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
                << direction.x() << '\t' << direction.y() << '\t' << direction.z() << '\t'
                << hit.face() << '\t' << hit.distance() << '\n';
     };
+#else
+    const auto record_ray_rejection = [](const char*, const Vec3f&, const Vec3d&, const AABBMesh::hit_result&) {};
+#endif
 
     struct ProjectionResult {
         bool  valid = false;
@@ -3362,6 +3235,7 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         input_area += triangle_area(a, b, c);
         project_triangle(a, b, c, 0);
     }
+#ifndef NDEBUG
     if (m_display_diagnostics_active) {
         const int source_facet_id = diagnostic_source_facet_id;
         const std::filesystem::path path = m_display_diagnostics_dir / "tracery_back_projection.tsv";
@@ -3443,6 +3317,7 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
             }
         }
     }
+#endif
     return back_fragment;
 }
 
@@ -3807,6 +3682,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
             const double coverage_tolerance = std::max(1e-7, projected_area * 1e-4);
             const bool complete_coverage = !candidate_regions.empty() &&
                 std::abs(covered_area - projected_area) <= coverage_tolerance;
+#ifndef NDEBUG
             if (m_display_diagnostics_active) {
                 const std::filesystem::path path = m_display_diagnostics_dir / "tracery_through_analytic_projection.tsv";
                 const bool new_file = !std::filesystem::exists(path);
@@ -3823,6 +3699,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                                << (complete_coverage ? "accepted" : "fallback_incomplete_coverage") << '\n';
                 }
             }
+#endif
             if (!complete_coverage) {
                 ++analytic_coverage_fallbacks;
                 return false;
@@ -3881,6 +3758,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                       back.surface.vertices[size_t(face[2])] }, 0, true });
             }
         }
+#ifndef NDEBUG
         if (m_display_diagnostics_active) {
             const std::filesystem::path path = m_display_diagnostics_dir / "tracery_through_voronoi.tsv";
             const bool new_file = !std::filesystem::exists(path);
@@ -3896,6 +3774,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                        << back_triangles << '\t' << projected_regions.size() << '\n';
             }
         }
+#endif
         auto& output = m_generated_voronoi_regions[volume_index++];
         output.insert(output.end(), std::make_move_iterator(projected_regions.begin()),
                       std::make_move_iterator(projected_regions.end()));
@@ -3904,6 +3783,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
 
 void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
 {
+#ifndef NDEBUG
     if (m_display_diagnostics_active) {
         size_t fragment_total = 0;
         size_t face_total = 0;
@@ -3922,6 +3802,7 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
             ",source_ids=" + std::to_string(source_id_total) +
             ",plan_mixed_ids=" + std::to_string(plan.fragment_mixed_filament_ids.size()));
     }
+#endif
     if (plan.mode == StainedGlassApplyPlan::Mode::BakeFragments) {
         m_fragment_mixed_filament_ids = std::move(plan.fragment_mixed_filament_ids);
         for (size_t index = 0; index < m_transition_recipe_targets.size(); ++index) {
@@ -3952,14 +3833,18 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
         }
     }
 
+#ifndef NDEBUG
     if (m_display_diagnostics_active)
         record_display_diagnostic_state("commit_apply_before_bake",
             "mixed_ids=" + std::to_string(m_fragment_mixed_filament_ids.size()));
+#endif
     bake_fragments_to_mmu_painting();
+#ifndef NDEBUG
     if (m_display_diagnostics_active)
         record_display_diagnostic_state("commit_apply_after_bake",
             "remaining_generated_volumes=" + std::to_string(m_generated_fragments.size()) +
             ",mixed_ids=" + std::to_string(m_fragment_mixed_filament_ids.size()));
+#endif
     wxGetApp().sidebar().update_color_mix_panel();
     wxGetApp().plater()->post_slice_state_change_update();
     m_parent.set_as_dirty();
@@ -3977,8 +3862,9 @@ ModelObject* GLGizmoTracery::find_masked_model_object(Model& model) const
 
 bool GLGizmoTracery::bake_volume_voronoi_regions(ModelVolume& volume, size_t volume_index)
 {
-    std::shared_ptr<std::ofstream> diagnostic;
     std::function<void(const std::string&)> trace;
+#ifndef NDEBUG
+    std::shared_ptr<std::ofstream> diagnostic;
     if (m_display_diagnostics_active) {
         const std::filesystem::path path = m_display_diagnostics_dir /
             ("tracery_voronoi_bake_volume_" + std::to_string(volume_index) + ".tsv");
@@ -3991,6 +3877,7 @@ bool GLGizmoTracery::bake_volume_voronoi_regions(ModelVolume& volume, size_t vol
                 *diagnostic << detail << '\n';
         };
     }
+#endif
     const size_t generated_region_count = volume_index < m_generated_voronoi_regions.size() ?
         m_generated_voronoi_regions[volume_index].size() : 0;
     if (trace)
@@ -4565,6 +4452,7 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_tracery_2d_data(size_t vol
 {
     TriangleSelector::Tracery2DData result;
     std::ofstream diagnostic;
+#ifndef NDEBUG
     if (m_display_diagnostics_active) {
         const std::filesystem::path path = m_display_diagnostics_dir /
             ("tracery_2d_volume_" + std::to_string(volume_index) + ".tsv");
@@ -4573,6 +4461,7 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_tracery_2d_data(size_t vol
         if (diagnostic && new_file)
             diagnostic << "record\tvolume\tfragment\tsource_facet\tcolor\tdetail\n";
     }
+#endif
     const auto trace = [&diagnostic, volume_index](const std::string& record, size_t fragment, int source_facet,
                                                     int color, const std::string& detail) {
         if (diagnostic)

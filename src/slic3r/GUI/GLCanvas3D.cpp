@@ -8534,6 +8534,7 @@ void GLCanvas3D::_render_plane() const
 //BBS: add outline drawing logic
 void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with_outline)
 {
+#ifndef NDEBUG
     if (GLGizmoTracery::global_display_diagnostics_active() &&
         type == GLVolumeCollection::ERenderType::Opaque) {
         const GLGizmosManager& gizmos = get_gizmos_manager();
@@ -8554,6 +8555,7 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
             ",layers_editing=" + std::to_string(m_layers_editing.is_enabled()) +
             ",volumes_empty=" + std::to_string(m_volumes.empty()));
     }
+#endif
     if (m_volumes.empty())
         return;
 
@@ -8675,7 +8677,9 @@ void GLCanvas3D::_render_objects(GLVolumeCollection::ERenderType type, bool with
                 }
             }
 
+#ifndef NDEBUG
             GLGizmoTracery::capture_global_display_diagnostic_frame(this, "opaque_final");
+#endif
 
             break;
         }
