@@ -3018,6 +3018,16 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
     std::vector<size_t> target_row_indices(target_colours.size(), no_new_row);
     std::map<std::string, size_t> recipe_rows;
     std::map<std::string, unsigned int> existing_recipe_ids;
+    struct VisualRecipeSlot {
+        wxColour colour;
+        unsigned int filament_id = 0;
+    };
+    // A formula may differ by a few CMYW percentage points while its printed
+    // preview is indistinguishable. Reuse at most a just-noticeable colour
+    // difference so this saves slots without visibly flattening the glass.
+    constexpr double visual_reuse_delta_e = 2.0;
+    std::vector<VisualRecipeSlot> existing_visual_slots;
+    std::vector<wxColour> pending_row_colours;
     // This is a live paint brush, not an export operation: later strokes must
     // refer to an equivalent existing virtual filament instead of consuming a
     // new slot for the same CMYW recipe.
@@ -3029,6 +3039,9 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         const std::string fingerprint = std::to_string(row.component_a) + ":" + std::to_string(row.component_b) + ":" +
             std::to_string(row.mix_b_percent) + ":" + row.gradient_component_ids + ":" + row.gradient_component_weights;
         existing_recipe_ids.emplace(fingerprint, virtual_id);
+        const wxColour display_colour(row.display_color);
+        if (display_colour.IsOk())
+            existing_visual_slots.push_back({ display_colour, virtual_id });
     }
     for (size_t index = 0; index < target_colours.size(); ++index) {
         MixedColorMatchRecipeResult recipe = build_tracery_cmyw_recipe(cmyw_colours, target_colours[index], true);
@@ -3059,6 +3072,39 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
             target_row_indices[index] = existing->second;
             continue;
         }
+
+        // Exact recipe re-use above preserves the old fast path. For recipes
+        // that differ only in their percentages, compare the actual display
+        // colours: existing slots are what the model already renders, and
+        // pending rows are what this operation will add after the batch commit.
+        size_t nearest_existing = existing_visual_slots.size();
+        double nearest_distance = visual_reuse_delta_e;
+        for (size_t slot = 0; slot < existing_visual_slots.size(); ++slot) {
+            const double distance = color_delta_e00(recipe.preview_color, existing_visual_slots[slot].colour);
+            if (distance <= nearest_distance) {
+                nearest_existing = slot;
+                nearest_distance = distance;
+            }
+        }
+        if (nearest_existing != existing_visual_slots.size()) {
+            palette_filament_ids[index] = existing_visual_slots[nearest_existing].filament_id;
+            continue;
+        }
+
+        size_t nearest_pending = pending_row_colours.size();
+        nearest_distance = visual_reuse_delta_e;
+        for (size_t row = 0; row < pending_row_colours.size(); ++row) {
+            const double distance = color_delta_e00(recipe.preview_color, pending_row_colours[row]);
+            if (distance <= nearest_distance) {
+                nearest_pending = row;
+                nearest_distance = distance;
+            }
+        }
+        if (nearest_pending != pending_row_colours.size()) {
+            target_row_indices[index] = nearest_pending;
+            continue;
+        }
+
         MixedFilamentBatchEntry entry;
         entry.component_a = recipe.component_a;
         entry.component_b = recipe.component_b;
@@ -3070,6 +3116,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         entry.display_color = tracery_hex(recipe.preview_color);
         target_row_indices[index] = new_rows.size();
         recipe_rows.emplace(fingerprint, new_rows.size());
+        pending_row_colours.emplace_back(recipe.preview_color);
         new_rows.emplace_back(std::move(entry));
     }
 
