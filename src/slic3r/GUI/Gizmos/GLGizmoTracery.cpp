@@ -97,6 +97,21 @@ std::string tracery_hex(const wxColour& color)
     return color.GetAsString(wxC2S_HTML_SYNTAX).ToStdString();
 }
 
+void update_tracery_region_bounds(Slic3r::TriangleSelector::TraceryRegion2D& region)
+{
+    if (region.polygon.empty()) {
+        region.has_bounds = false;
+        return;
+    }
+    region.bounds_min = region.polygon.front();
+    region.bounds_max = region.bounds_min;
+    for (const Slic3r::Vec2d& point : region.polygon) {
+        region.bounds_min = region.bounds_min.cwiseMin(point);
+        region.bounds_max = region.bounds_max.cwiseMax(point);
+    }
+    region.has_bounds = true;
+}
+
 float hue_channel(float first, float second, float hue)
 {
     if (hue < 0.0f) hue += 1.0f;
@@ -4597,6 +4612,7 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(
                 const Vec3d delta = vertex.cast<double>() - facet.origin;
                 region.polygon.emplace_back(delta.dot(facet.axis_u), delta.dot(facet.axis_v));
             }
+            update_tracery_region_bounds(region);
             const double area_2d = polygon_area_2d(region.polygon);
             bool finite = true;
             for (const Vec2d& vertex : region.polygon)
@@ -4808,6 +4824,7 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_tracery_2d_data(size_t vol
                 const Vec3d delta = vertices_3d[corner] - facet->origin;
                 region.polygon.emplace_back(delta.dot(facet->axis_u), delta.dot(facet->axis_v));
             }
+            update_tracery_region_bounds(region);
             const Vec2d first_edge = region.polygon[1] - region.polygon[0];
             const Vec2d second_edge = region.polygon[2] - region.polygon[0];
             const double twice_area_2d = first_edge.x() * second_edge.y() - first_edge.y() * second_edge.x();

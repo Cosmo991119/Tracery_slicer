@@ -59,6 +59,9 @@ public:
     // coordinate system. This data is transient and is never serialized.
     struct TraceryRegion2D {
         std::vector<Vec2d>   polygon;
+        Vec2d                bounds_min  = Vec2d::Zero();
+        Vec2d                bounds_max  = Vec2d::Zero();
+        bool                 has_bounds   = false;
         EnforcerBlockerType  color       = EnforcerBlockerType::NONE;
         size_t               fragment_id = 0;
     };
@@ -552,6 +555,9 @@ private:
         size_t partial = 0;
         size_t split = 0;
         size_t terminal = 0;
+        size_t bbox_rejected = 0;
+        size_t bbox_candidates = 0;
+        size_t exact_intersections = 0;
     };
 
     // Applies the regions belonging to one original model facet. Called by
@@ -561,11 +567,18 @@ private:
     static double tracery_polygon_area(const std::vector<Vec2d>& polygon);
     static double intersect_triangle_with_convex_polygon(const std::array<Vec2d, 3>& leaf,
                                                           const std::vector<Vec2d>& polygon);
+    std::vector<const TraceryRegion2D*> collect_tracery_leaf_candidates(
+        const Triangle& triangle, const TraceryFacet2DData& facet_data,
+        const std::vector<const TraceryRegion2D*>& parent_candidates,
+        TraceryPaintStatistics& statistics) const;
     TraceryLeafClassification classify_tracery_leaf(const Triangle& triangle,
-                                                     const TraceryFacet2DData& facet_data) const;
+                                                     const TraceryFacet2DData& facet_data,
+                                                     const std::vector<const TraceryRegion2D*>& candidates,
+                                                     TraceryPaintStatistics& statistics) const;
     float tracery_longest_edge(const Triangle& triangle) const;
     void paint_tracery_leaf_recursive(int triangle_idx, const Vec3i32& neighbors, size_t depth,
                                       const TraceryFacet2DData& facet_data, float max_leaf_edge,
+                                      const std::vector<const TraceryRegion2D*>& parent_candidates,
                                       const std::function<void(const std::string&)>& diagnostic,
                                       TraceryPaintStatistics& statistics);
 

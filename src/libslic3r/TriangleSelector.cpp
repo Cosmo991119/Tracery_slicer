@@ -1464,8 +1464,52 @@ double TriangleSelector::intersect_triangle_with_convex_polygon(
     return tracery_polygon_area(clipped);
 }
 
+std::vector<const TriangleSelector::TraceryRegion2D*> TriangleSelector::collect_tracery_leaf_candidates(
+    const Triangle& triangle, const TraceryFacet2DData& facet_data,
+    const std::vector<const TraceryRegion2D*>& parent_candidates,
+    TraceryPaintStatistics& statistics) const
+{
+    const auto project = [&facet_data](const Vec3f& point) {
+        const Vec3d delta = point.cast<double>() - facet_data.origin;
+        return Vec2d(delta.dot(facet_data.axis_u), delta.dot(facet_data.axis_v));
+    };
+    Vec2d minimum = project(m_vertices[triangle.verts_idxs[0]].v);
+    Vec2d maximum = minimum;
+    for (size_t corner = 1; corner < 3; ++corner) {
+        const Vec2d point = project(m_vertices[triangle.verts_idxs[corner]].v);
+        minimum = minimum.cwiseMin(point);
+        maximum = maximum.cwiseMax(point);
+    }
+
+    std::vector<const TraceryRegion2D*> candidates;
+    candidates.reserve(parent_candidates.size());
+    for (const TraceryRegion2D* region : parent_candidates) {
+        if (region == nullptr || region->polygon.size() < 3)
+            continue;
+        Vec2d region_minimum = region->bounds_min;
+        Vec2d region_maximum = region->bounds_max;
+        if (!region->has_bounds) {
+            region_minimum = region->polygon.front();
+            region_maximum = region_minimum;
+            for (const Vec2d& point : region->polygon) {
+                region_minimum = region_minimum.cwiseMin(point);
+                region_maximum = region_maximum.cwiseMax(point);
+            }
+        }
+        if (region_maximum.x() < minimum.x() || maximum.x() < region_minimum.x() ||
+            region_maximum.y() < minimum.y() || maximum.y() < region_minimum.y()) {
+            ++statistics.bbox_rejected;
+            continue;
+        }
+        candidates.emplace_back(region);
+    }
+    statistics.bbox_candidates += candidates.size();
+    return candidates;
+}
+
 TriangleSelector::TraceryLeafClassification TriangleSelector::classify_tracery_leaf(
-    const Triangle& triangle, const TraceryFacet2DData& facet_data) const
+    const Triangle& triangle, const TraceryFacet2DData& facet_data,
+    const std::vector<const TraceryRegion2D*>& candidates, TraceryPaintStatistics& statistics) const
 {
     const auto project = [&facet_data](const Vec3f& point) {
         const Vec3d delta = point.cast<double>() - facet_data.origin;
@@ -1479,15 +1523,16 @@ TriangleSelector::TraceryLeafClassification TriangleSelector::classify_tracery_l
     result.leaf_area = tracery_polygon_area(leaf_polygon);
     if (result.leaf_area <= 1e-15)
         return result;
-    for (const TraceryRegion2D& region : facet_data.regions) {
-        if (region.color == EnforcerBlockerType::NONE)
+    for (const TraceryRegion2D* region : candidates) {
+        if (region == nullptr || region->color == EnforcerBlockerType::NONE)
             continue;
-        const double area = intersect_triangle_with_convex_polygon(leaf, region.polygon);
+        ++statistics.exact_intersections;
+        const double area = intersect_triangle_with_convex_polygon(leaf, region->polygon);
         if (area <= 1e-15)
             continue;
-        TraceryCoverage& coverage = result.coverage_by_color[int(region.color)];
+        TraceryCoverage& coverage = result.coverage_by_color[int(region->color)];
         coverage.area += area;
-        coverage.first_fragment_id = std::min(coverage.first_fragment_id, region.fragment_id);
+        coverage.first_fragment_id = std::min(coverage.first_fragment_id, region->fragment_id);
     }
     return result;
 }
@@ -1502,14 +1547,18 @@ float TriangleSelector::tracery_longest_edge(const Triangle& triangle) const
 
 void TriangleSelector::paint_tracery_leaf_recursive(
     int triangle_idx, const Vec3i32& neighbors, size_t depth, const TraceryFacet2DData& facet_data,
-    float max_leaf_edge, const std::function<void(const std::string&)>& diagnostic,
+    float max_leaf_edge, const std::vector<const TraceryRegion2D*>& parent_candidates,
+    const std::function<void(const std::string&)>& diagnostic,
     TraceryPaintStatistics& statistics)
 {
     Triangle& triangle = m_triangles[triangle_idx];
     if (!triangle.valid())
         return;
     ++statistics.visited;
-    const TraceryLeafClassification classification = classify_tracery_leaf(triangle, facet_data);
+    const std::vector<const TraceryRegion2D*> candidates =
+        collect_tracery_leaf_candidates(triangle, facet_data, parent_candidates, statistics);
+    const TraceryLeafClassification classification =
+        classify_tracery_leaf(triangle, facet_data, candidates, statistics);
     if (classification.coverage_by_color.empty() || classification.leaf_area <= 1e-15) {
         ++statistics.outside;
         if (diagnostic && statistics.outside <= 8) {
@@ -1565,7 +1614,7 @@ void TriangleSelector::paint_tracery_leaf_recursive(
         children.emplace_back(parent.children[child_idx], child_neighbors(parent, neighbors, child_idx));
     for (const auto& [child, child_neighbors_] : children)
         paint_tracery_leaf_recursive(child, child_neighbors_, depth + 1,
-                                     facet_data, max_leaf_edge, diagnostic, statistics);
+                                     facet_data, max_leaf_edge, candidates, diagnostic, statistics);
 }
 
 void TriangleSelector::paint_tracery_regions(const TraceryFacet2DData& facet_data, float max_leaf_edge,
@@ -1584,8 +1633,12 @@ void TriangleSelector::paint_tracery_regions(const TraceryFacet2DData& facet_dat
         return;
     }
     TraceryPaintStatistics statistics;
+    std::vector<const TraceryRegion2D*> candidates;
+    candidates.reserve(facet_data.regions.size());
+    for (const TraceryRegion2D& region : facet_data.regions)
+        candidates.emplace_back(&region);
     paint_tracery_leaf_recursive(facet_data.source_facet_id, m_neighbors[facet_data.source_facet_id], 0,
-                                 facet_data, max_leaf_edge, diagnostic, statistics);
+                                 facet_data, max_leaf_edge, candidates, diagnostic, statistics);
     if (diagnostic)
         diagnostic("paint_facet_end\tfacet=" + std::to_string(facet_data.source_facet_id) +
                    "\tvisited=" + std::to_string(statistics.visited) +
@@ -1593,7 +1646,10 @@ void TriangleSelector::paint_tracery_regions(const TraceryFacet2DData& facet_dat
                    "\tfull=" + std::to_string(statistics.full) +
                    "\tpartial=" + std::to_string(statistics.partial) +
                    "\tsplit=" + std::to_string(statistics.split) +
-                   "\tterminal=" + std::to_string(statistics.terminal));
+                   "\tterminal=" + std::to_string(statistics.terminal) +
+                   "\tbbox_rejected=" + std::to_string(statistics.bbox_rejected) +
+                   "\tbbox_candidates=" + std::to_string(statistics.bbox_candidates) +
+                   "\texact_intersections=" + std::to_string(statistics.exact_intersections));
 }
 
 // called by select_patch()->select_triangle()...select_triangle()
