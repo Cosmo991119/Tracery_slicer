@@ -885,20 +885,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
 #endif
     ImGui::Separator();
     if (m_imgui->button(_L("Erase all painting"))) {
-        m_selection_modified = true;
-        m_mask_data.clear();
-        m_previous_mask_data.clear();
-        m_tracery_selections.clear();
-        m_incremental_generation = false;
-        for (const auto& selector : m_triangle_selectors) {
-            // Preserve the material selector's subdivision tree so the next
-            // face or bucket operation remains aligned to its paint boundary.
-            selector->set_leaf_states({});
-            selector->request_update_render_data(true);
-        }
-        capture_mask_and_generate();
-        apply_stained_glass_colors();
-        m_parent.set_as_dirty();
+        erase_all_stained_glass();
     }
     ImGui::SameLine();
     m_imgui->text_colored(ImGuiWrapper::COL_WINDOW_BG,
@@ -906,6 +893,39 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
 
     GizmoImguiEnd();
     ImGuiWrapper::pop_toolbar_style();
+}
+
+void GLGizmoTracery::erase_all_stained_glass()
+{
+    // Keep the base snapshot until the regular MMU paint has been restored.
+    m_selection_modified = true;
+    m_mask_data.clear();
+    m_previous_mask_data.clear();
+    m_tracery_selections.clear();
+    m_generated_fragments.clear();
+    m_generated_voronoi_regions.clear();
+    m_fragment_colors.clear();
+    m_fragment_mixed_filament_ids.clear();
+    m_transition_recipe_targets.clear();
+    m_pending_selection_fragment_count = 0;
+    m_incremental_generation = false;
+    m_regeneration_requested = false;
+    m_generation_integrity_valid = true;
+    for (const auto& selector : m_triangle_selectors) {
+        selector->reset();
+        selector->request_update_render_data(true);
+    }
+
+    apply_stained_glass_colors();
+
+    for (size_t i = 0; i < m_fill_reference_selectors.size() && i < m_stained_glass_base_paint_data.size(); ++i) {
+        auto& selector = *m_fill_reference_selectors[i];
+        selector.deserialize(m_stained_glass_base_paint_data[i], false);
+        selector.seed_fill_unselect_all_triangles();
+        selector.request_update_render_data(true);
+    }
+    m_stained_glass_base_paint_data.clear();
+    m_parent.set_as_dirty();
 }
 
 void GLGizmoTracery::update_model_object()

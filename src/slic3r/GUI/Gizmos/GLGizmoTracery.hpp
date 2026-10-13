@@ -80,6 +80,7 @@ private:
     PainterGizmoType get_painter_type() const override;
 
     void capture_mask_and_generate();
+    void erase_all_stained_glass();
     void generate_paint_plan();
     struct GenerationInput;
     struct ColorGroup;
