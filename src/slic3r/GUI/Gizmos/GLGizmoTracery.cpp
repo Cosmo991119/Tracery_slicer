@@ -4190,7 +4190,10 @@ bool GLGizmoTracery::bake_volume_voronoi_regions(ModelVolume& volume, size_t vol
         trace("selector_before_paint\tvolume=" + std::to_string(volume_index) +
               "\tstates=" + selector_state_summary(selector));
     if (!data.empty()) {
-        const float max_leaf_edge = std::clamp((6.5f - 4.0f * m_fragment_density) * 0.08f, 0.18f, 0.55f);
+        // Match the ordinary MMU brush's finest boundary resolution. The
+        // per-leaf AABB candidate filter keeps this high-quality setting
+        // from evaluating every stained-glass polygon at every leaf.
+        constexpr float max_leaf_edge = 0.05f;
         selector.paint_all_tracery_regions(data, max_leaf_edge, trace);
     } else if (trace) {
         trace("selector_skipped\tvolume=" + std::to_string(volume_index) + "\treason=no_2d_regions");
