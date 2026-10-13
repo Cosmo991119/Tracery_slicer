@@ -250,6 +250,7 @@ private:
     PaintMode m_pending_selection_mode = PaintMode::SURFACE;
     wchar_t m_current_tool = 0;
     bool    m_eraser_mode = false;
+    bool    m_active_stroke_erases = false;
     bool    m_selection_modified = false;
     bool    m_regeneration_requested = false;
     bool    m_palette_update_requested = false;

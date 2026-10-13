@@ -419,7 +419,20 @@ bool GLGizmoTracery::on_init()
 
 bool GLGizmoTracery::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down)
 {
-    return GLGizmoPainterBase::gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+    if (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown) {
+        // Holding Shift has the same effect as clearing the selection in the
+        // painter base. Remember the operation for the commit that runs on
+        // mouse-up, when the base class has already applied the stroke.
+        m_active_stroke_erases = shift_down ||
+            (action == SLAGizmoEventType::LeftDown ? m_eraser_mode : !m_eraser_mode);
+    }
+
+    const bool handled = GLGizmoPainterBase::gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+
+    if (action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::RightUp)
+        m_active_stroke_erases = false;
+
+    return handled;
 }
 
 std::string GLGizmoTracery::on_get_name() const
@@ -677,18 +690,45 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
             m_imgui->tooltip(mode_tips[i], ImGui::GetFontSize() * 20.0f);
     }
     ImGui::Separator();
+    m_imgui->text(_L("Operation"));
+    const std::array<wchar_t, 2> operation_icons = m_is_dark_mode ? std::array<wchar_t, 2>{
+        ImGui::PaintOperationDarkIcon, ImGui::EraseOperationDarkIcon
+    } : std::array<wchar_t, 2>{
+        ImGui::PaintOperationIcon, ImGui::EraseOperationIcon
+    };
+    const std::array<wxString, 2> operation_labels = { _L("Paint"), _L("Erase") };
+    const std::array<wxString, 2> operation_tips = {
+        _L("Paint stained-glass areas"), _L("Erase stained-glass areas")
+    };
+    for (size_t i = 0; i < operation_icons.size(); ++i) {
+        if (i != 0)
+            ImGui::SameLine(0.0f, m_imgui->scaled(1.5f));
+        const std::string label = into_u8(std::wstring(1, operation_icons[i])) + "##tracery_operation_" + std::to_string(i);
+        const bool selected = m_eraser_mode == (i == 1);
+        ImGui::PushStyleColor(ImGuiCol_Button, selected ? ImVec4(0.f, 0.59f, 0.53f, 0.25f) : ImVec4(0.f, 0.f, 0.f, 0.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.59f, 0.53f, 0.18f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.f, 0.59f, 0.53f, 0.30f));
+        if (ImGui::Button(label.c_str()))
+            m_eraser_mode = i == 1;
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(operation_tips[i], ImGui::GetFontSize() * 20.0f);
+        ImGui::SameLine();
+        m_imgui->text(operation_labels[i]);
+    }
+    ImGui::Separator();
     m_imgui->text(_L("Tool type"));
 
-    const std::array<wchar_t, 5> tool_ids = {
-        ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon
+    const std::array<wchar_t, 4> tool_ids = {
+        ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::FillButtonIcon
     };
-    const std::array<wchar_t, 5> display_icons = m_is_dark_mode ? std::array<wchar_t, 5>{
-        ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon
-    } : std::array<wchar_t, 5>{
-        ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon
+    const std::array<wchar_t, 4> display_icons = m_is_dark_mode ? std::array<wchar_t, 4>{
+        ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::FillButtonDarkIcon
+    } : std::array<wchar_t, 4>{
+        ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::FillButtonIcon
     };
-    const std::array<wxString, 5> tool_tips = {
-        _L("Surface brush"), _L("Volume brush"), _L("Face paint"), _L("Fill connected area"), _L("Eraser")
+    const std::array<wxString, 4> tool_tips = {
+        _L("Surface brush"), _L("Volume brush"), _L("Face paint"), _L("Fill connected area")
     };
     for (size_t i = 0; i < tool_ids.size(); ++i) {
         if (i != 0)
@@ -698,16 +738,14 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         ImGui::PushStyleColor(ImGuiCol_Button, selected ? ImVec4(0.f, 0.59f, 0.53f, 0.25f) : ImVec4(0.f, 0.f, 0.f, 0.f));
         ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.59f, 0.53f, 0.18f));
         ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.f, 0.59f, 0.53f, 0.30f));
-        if (ImGui::Button(into_u8(label).c_str())) {
+        if (ImGui::Button(into_u8(label).c_str()))
             m_current_tool = tool_ids[i];
-            m_eraser_mode = tool_ids[i] == ImGui::GapFillIcon;
-        }
         ImGui::PopStyleColor(3);
         if (ImGui::IsItemHovered())
             m_imgui->tooltip(tool_tips[i], ImGui::GetFontSize() * 20.0f);
     }
 
-    if (m_eraser_mode || m_current_tool == ImGui::CircleButtonIcon) {
+    if (m_current_tool == ImGui::CircleButtonIcon) {
         m_cursor_type = TriangleSelector::CursorType::CIRCLE;
         m_tool_type = ToolType::BRUSH;
     } else if (m_current_tool == ImGui::SphereButtonIcon) {
@@ -838,9 +876,10 @@ void GLGizmoTracery::capture_mask_and_generate()
     for (const std::unique_ptr<TriangleSelectorGUI>& selector : m_triangle_selectors)
         m_mask_data.emplace_back(selector->serialize());
     // A user-requested regeneration intentionally rebuilds the currently
-    // selected mask. Ordinary strokes only generate leaves added since the
-    // last committed mask.
-    m_incremental_generation = !m_previous_mask_data.empty() && !m_regeneration_requested;
+    // selected mask. Ordinary paint strokes only generate leaves added since
+    // the last committed mask. An erase stroke must instead rebuild from the
+    // current mask so removed fragments are restored to their base colour.
+    m_incremental_generation = !m_previous_mask_data.empty() && !m_regeneration_requested && !m_active_stroke_erases;
     m_pending_selection_mode = m_paint_mode;
     generate_paint_plan();
 }
