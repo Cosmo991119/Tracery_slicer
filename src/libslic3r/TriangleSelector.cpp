@@ -552,6 +552,57 @@ void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_
     }
 }
 
+EnforcerBlockerType TriangleSelector::state_at(const Vec3f& point, int facet_start) const
+{
+    if (facet_start < 0 || facet_start >= m_orig_size_indices)
+        return EnforcerBlockerType::NONE;
+    const int leaf = select_unsplit_triangle(point, facet_start);
+    return leaf >= 0 ? m_triangles[leaf].get_state() : EnforcerBlockerType::NONE;
+}
+
+void TriangleSelector::set_leaf_states(const std::function<EnforcerBlockerType(const Vec3f&, int source_facet)>& state_for)
+{
+    for (Triangle& triangle : m_triangles) {
+        if (triangle.is_split() || !triangle.valid())
+            continue;
+
+        const Vec3f& a = m_vertices[triangle.verts_idxs[0]].v;
+        const Vec3f& b = m_vertices[triangle.verts_idxs[1]].v;
+        const Vec3f& c = m_vertices[triangle.verts_idxs[2]].v;
+        triangle.set_state(state_for ? state_for((a + b + c) / 3.f, triangle.source_triangle) : EnforcerBlockerType::NONE);
+        triangle.unselect_by_seed_fill();
+    }
+}
+
+void TriangleSelector::apply_seed_fill_to(TriangleSelector& target, EnforcerBlockerType new_state) const
+{
+    if (m_orig_size_indices != target.m_orig_size_indices)
+        return;
+
+    const auto copy_recursive = [this, &target, new_state](auto&& self, int source_idx, int target_idx) -> bool {
+        const Triangle& source = m_triangles[source_idx];
+        Triangle& target_triangle = target.m_triangles[target_idx];
+        if (source.is_split() != target_triangle.is_split())
+            return false;
+        if (source.is_split()) {
+            const int child_count = source.number_of_split_sides() + 1;
+            if (child_count != target_triangle.number_of_split_sides() + 1)
+                return false;
+            for (int child = 0; child < child_count; ++child)
+                if (!self(self, source.children[child], target_triangle.children[child]))
+                    return false;
+            return true;
+        }
+        if (source.is_selected_by_seed_fill())
+            target_triangle.set_state(new_state);
+        return true;
+    };
+
+    for (int root = 0; root < m_orig_size_indices; ++root)
+        if (!copy_recursive(copy_recursive, root, root))
+            return;
+}
+
 // Selects either the whole triangle (discarding any children it had), or divides
 // the triangle recursively, selecting just subtriangles truly inside the circle.
 // This is done by an actual recursive call. Returns false if the triangle is

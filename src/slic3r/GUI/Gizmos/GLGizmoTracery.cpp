@@ -442,10 +442,56 @@ std::string GLGizmoTracery::on_get_name() const
 
 void GLGizmoTracery::render_painter_gizmo()
 {
-    // The complete result is regular MMU paint. Do not draw a selection mask,
-    // cursor, clip cap or instance hider over that same surface: any of these
-    // coplanar editing aids can be mistaken for a stained-glass fragment and
-    // can depth-fight with the committed colour triangles.
+    // This is an editing overlay only. The final stained-glass colours still
+    // come exclusively from ordinary MMU paint; no generated fragment is
+    // rendered here.
+    const Selection& selection = m_parent.get_selection();
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glEnable(GL_DEPTH_TEST));
+    render_triangles(selection);
+    m_c->object_clipper()->render_cut();
+    m_c->instances_hider()->render_cut();
+    render_cursor();
+    glsafe(::glDisable(GL_BLEND));
+}
+
+EnforcerBlockerType GLGizmoTracery::get_paint_state(bool, bool) const
+{
+    // A private marker lets the common material selector report the exact
+    // leaves touched by any tool without changing its material partition.
+    return EnforcerBlockerType::ExtruderMax;
+}
+
+TriangleSelectorGUI* GLGizmoTracery::get_edit_selector(size_t mesh_idx)
+{
+    if (mesh_idx < m_fill_reference_selectors.size())
+        return m_fill_reference_selectors[mesh_idx].get();
+    return GLGizmoPainterBase::get_edit_selector(mesh_idx);
+}
+
+const TriangleSelectorGUI* GLGizmoTracery::get_edit_selector(size_t mesh_idx) const
+{
+    if (mesh_idx < m_fill_reference_selectors.size())
+        return m_fill_reference_selectors[mesh_idx].get();
+    return GLGizmoPainterBase::get_edit_selector(mesh_idx);
+}
+
+size_t GLGizmoTracery::get_edit_selector_count() const
+{
+    return m_fill_reference_selectors.size();
+}
+
+void GLGizmoTracery::apply_seed_fill_to_edit_selector(size_t mesh_idx, EnforcerBlockerType new_state)
+{
+    if (mesh_idx < m_fill_reference_selectors.size() && mesh_idx < m_triangle_selectors.size()) {
+        // Preserve the material selector verbatim. Only its transient seed
+        // selection is copied into the companion stained-glass flag layer.
+        m_fill_reference_selectors[mesh_idx]->apply_seed_fill_to(*m_triangle_selectors[mesh_idx],
+            m_active_stroke_erases ? EnforcerBlockerType::NONE : EnforcerBlockerType::ENFORCER);
+        m_triangle_selectors[mesh_idx]->request_update_render_data(true);
+        return;
+    }
+    GLGizmoPainterBase::apply_seed_fill_to_edit_selector(mesh_idx, new_state);
 }
 
 #ifndef NDEBUG
@@ -756,7 +802,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         m_tool_type = ToolType::BRUSH;
     } else {
         m_cursor_type = TriangleSelector::CursorType::POINTER;
-        m_tool_type = ToolType::SMART_FILL;
+        m_tool_type = ToolType::BUCKET_FILL;
     }
 
     if (m_tool_type == ToolType::BRUSH && m_cursor_type != TriangleSelector::CursorType::POINTER) {
@@ -765,6 +811,34 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         ImGui::SameLine();
         ImGui::PushItemWidth(m_imgui->scaled(8.f));
         m_imgui->bbl_slider_float_style("##tracery_brush_size", &m_cursor_radius, CursorRadiusMin, CursorRadiusMax, "%.2f", 1.0f, true);
+    }
+
+    if (m_tool_type == ToolType::BUCKET_FILL) {
+        const bool edge_detection_changed = m_imgui->bbl_checkbox(_L("Edge detection"), m_detect_geometry_edge);
+        if (m_detect_geometry_edge) {
+            if (edge_detection_changed && m_smart_fill_angle < SmartFillAngleMin)
+                m_smart_fill_angle = 30.f;
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(_L("Smart fill angle"));
+            ImGui::SameLine();
+            ImGui::PushItemWidth(m_imgui->scaled(8.f));
+            const bool angle_changed = m_imgui->bbl_slider_float_style("##tracery_smart_fill_angle", &m_smart_fill_angle,
+                SmartFillAngleMin, SmartFillAngleMax, "%.0f", 1.0f, true);
+            if (edge_detection_changed || angle_changed) {
+                for (const auto& selector : m_fill_reference_selectors) {
+                    selector->seed_fill_unselect_all_triangles();
+                    selector->request_update_render_data();
+                }
+            }
+        } else {
+            m_smart_fill_angle = -1.f;
+            if (edge_detection_changed) {
+                for (const auto& selector : m_fill_reference_selectors) {
+                    selector->seed_fill_unselect_all_triangles();
+                    selector->request_update_render_data();
+                }
+            }
+        }
     }
 
     ImGui::Separator();
@@ -817,7 +891,9 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         m_tracery_selections.clear();
         m_incremental_generation = false;
         for (const auto& selector : m_triangle_selectors) {
-            selector->reset();
+            // Preserve the material selector's subdivision tree so the next
+            // face or bucket operation remains aligned to its paint boundary.
+            selector->set_leaf_states({});
             selector->request_update_render_data(true);
         }
         capture_mask_and_generate();
@@ -834,6 +910,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
 
 void GLGizmoTracery::update_model_object()
 {
+    commit_material_selection();
     m_selection_modified = true;
     capture_mask_and_generate();
     // This gizmo is a destructive, generated paint brush. Commit on every
@@ -841,6 +918,43 @@ void GLGizmoTracery::update_model_object()
     // visible result even while this editor remains open.
     apply_stained_glass_colors();
     m_parent.set_as_dirty();
+}
+
+void GLGizmoTracery::commit_material_selection()
+{
+    constexpr auto marker = EnforcerBlockerType::ExtruderMax;
+    const ModelObject* object = m_c->selection_info()->model_object();
+    if (object == nullptr)
+        return;
+    size_t mesh_idx = 0;
+    for (const ModelVolume* volume : object->volumes) {
+        if (!volume->is_model_part())
+            continue;
+        TriangleSelectorPatch& material = *m_fill_reference_selectors[mesh_idx];
+        TriangleSelectorGUI& mask = *m_triangle_selectors[mesh_idx];
+        if (!material.has_facets(marker)) {
+            ++mesh_idx;
+            continue;
+        }
+        TriangleSelector previous_mask(volume->mesh());
+        previous_mask.deserialize(mask.serialize(), false);
+        mask.deserialize(material.serialize(), false);
+        mask.set_leaf_states([&](const Vec3f& point, int facet) {
+            return material.state_at(point, facet) == marker ?
+                (m_active_stroke_erases ? EnforcerBlockerType::NONE : EnforcerBlockerType::ENFORCER) :
+                previous_mask.state_at(point, facet);
+        });
+        TriangleSelector base_paint(volume->mesh());
+        const auto& base = mesh_idx < m_stained_glass_base_paint_data.size() ?
+            m_stained_glass_base_paint_data[mesh_idx] : volume->mmu_segmentation_facets.get_data();
+        base_paint.deserialize(base, false);
+        material.set_leaf_states([&](const Vec3f& point, int facet) {
+            return material.state_at(point, facet) == marker ? base_paint.state_at(point, facet) :
+                                                               material.state_at(point, facet);
+        });
+        material.request_update_render_data(true);
+        ++mesh_idx;
+    }
 }
 
 void GLGizmoTracery::capture_mask_and_generate()
@@ -4754,18 +4868,44 @@ void GLGizmoTracery::update_from_model_object(bool)
         m_mask_object_index = -1;
     }
     m_triangle_selectors.clear();
-    const std::vector<ColorRGBA> colors = {
-        GLVolume::NEUTRAL_COLOR,
-        { 0.0f, 0.59f, 0.53f, 0.55f },
-        { 0.0f, 0.59f, 0.53f, 0.0f }
-    };
+    m_fill_reference_selectors.clear();
+    std::vector<ColorRGBA> extruder_colors = ::get_extruders_colors();
+    if (extruder_colors.empty())
+        extruder_colors.push_back(GLVolume::NEUTRAL_COLOR);
     for (const ModelVolume* volume : model_object->volumes) {
         if (!volume->is_model_part())
             continue;
-        m_triangle_selectors.emplace_back(std::make_unique<TriangleSelectorPatch>(volume->mesh(), colors));
-        const size_t selector_idx = m_triangle_selectors.size() - 1;
-        if (restore_mask && selector_idx < m_mask_data.size())
-            m_triangle_selectors.back()->deserialize(m_mask_data[selector_idx], false);
+        const size_t selector_idx = m_triangle_selectors.size();
+        const int color_idx = std::clamp(volume->extruder_id() - 1, 0, int(extruder_colors.size()) - 1);
+        std::vector<ColorRGBA> ebt_colors { extruder_colors[color_idx] };
+        ebt_colors.insert(ebt_colors.end(), extruder_colors.begin(), extruder_colors.end());
+        auto fill_reference = std::make_unique<TriangleSelectorPatch>(volume->mesh(), ebt_colors, 0.2f);
+        const auto max_ebt = EnforcerBlockerType(std::min(extruder_colors.size(), size_t(EnforcerBlockerType::ExtruderMax)));
+        if (selector_idx < m_stained_glass_base_paint_data.size())
+            fill_reference->deserialize(m_stained_glass_base_paint_data[selector_idx], false, max_ebt);
+        else
+            fill_reference->deserialize(volume->mmu_segmentation_facets.get_data(), false, max_ebt);
+        // Keep the normal material selector and its white seed-fill contour,
+        // but hide only its coloured paint patches while editing stained glass.
+        fill_reference->set_paint_fill_visible(false);
+        fill_reference->request_update_render_data();
+        m_fill_reference_selectors.emplace_back(std::move(fill_reference));
+
+        // Keep the effect layer on exactly the material selector's leaf tree.
+        // Existing documents may contain an older, independently refined
+        // mask; sample it once while migrating to the shared topology.
+        m_triangle_selectors.emplace_back(std::make_unique<TriangleSelectorGUI>(volume->mesh(), 0.2f));
+        TriangleSelectorGUI& effect = *m_triangle_selectors.back();
+        effect.deserialize(m_fill_reference_selectors.back()->serialize(), false);
+        if (restore_mask && selector_idx < m_mask_data.size()) {
+            TriangleSelector previous_effect(volume->mesh());
+            previous_effect.deserialize(m_mask_data[selector_idx], false);
+            effect.set_leaf_states([&previous_effect](const Vec3f& point, int source_facet) {
+                return previous_effect.state_at(point, source_facet);
+            });
+        } else {
+            effect.set_leaf_states({});
+        }
         m_triangle_selectors.back()->request_update_render_data();
     }
     // The finished effect is ordinary MMU paint. Reopening restores only the

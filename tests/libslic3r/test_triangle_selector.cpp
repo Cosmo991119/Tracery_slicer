@@ -37,3 +37,30 @@ TEST_CASE("Triangle selector round-trips painted states above sixteen", "[Triang
     restored.deserialize(data, true, static_cast<EnforcerBlockerType>(painted_state));
     CHECK(restored.has_facets(static_cast<EnforcerBlockerType>(painted_state)));
 }
+
+TEST_CASE("Triangle selector copies a material bucket selection to an effect layer", "[TriangleSelector][MMUPaint]")
+{
+    indexed_triangle_set its;
+    its.vertices = {
+        Vec3f(0.f, 0.f, 0.f),
+        Vec3f(1.f, 0.f, 0.f),
+        Vec3f(0.f, 1.f, 0.f),
+        Vec3f(1.f, 1.f, 0.f),
+    };
+    its.indices = {
+        stl_triangle_vertex_indices(0, 1, 2),
+        stl_triangle_vertex_indices(1, 3, 2),
+    };
+
+    TriangleMesh mesh(its);
+    TriangleSelector material(mesh);
+    material.set_facet(0, EnforcerBlockerType::Extruder1);
+    material.set_facet(1, EnforcerBlockerType::Extruder2);
+    TriangleSelector effect(mesh);
+
+    material.bucket_fill_select_triangles(Vec3f(0.2f, 0.2f, 0.f), 0, {}, -1.f, true, true);
+    material.apply_seed_fill_to(effect, EnforcerBlockerType::ENFORCER);
+
+    const indexed_triangle_set selected = effect.get_facets(EnforcerBlockerType::ENFORCER);
+    CHECK(selected.indices.size() == 1);
+}

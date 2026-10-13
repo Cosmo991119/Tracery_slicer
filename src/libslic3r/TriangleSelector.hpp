@@ -349,6 +349,20 @@ public:
                                       bool                 propagate,                  // if bucket fill is propagated to neighbor faces or if it fills the only facet of the modified mesh that the hit point belongs to.
                                       bool                 force_reselection = false); // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
 
+    // Return the leaf state of this selector at a point on a known original
+    // facet.
+    EnforcerBlockerType state_at(const Vec3f& point, int facet_start) const;
+
+    // Keep the subdivision tree, but replace the state stored on every leaf.
+    // This is useful for effects which share another selector's exact topology
+    // while keeping an independent, per-leaf flag.
+    void set_leaf_states(const std::function<EnforcerBlockerType(const Vec3f&, int source_facet)>& state_for);
+
+    // Copy the transient seed-fill selection into a selector with the same
+    // subdivision tree. Unlike seed_fill_apply_on_triangles(), this does not
+    // modify this selector's material states.
+    void apply_seed_fill_to(TriangleSelector& target, EnforcerBlockerType new_state) const;
+
     bool                 has_facets(EnforcerBlockerType state) const;
     static bool          has_facets(const TriangleSplittingData &data, EnforcerBlockerType test_state);
     int                  num_facets(EnforcerBlockerType state) const;

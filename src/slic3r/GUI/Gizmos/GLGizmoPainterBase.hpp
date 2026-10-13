@@ -115,6 +115,7 @@ public:
 
     void set_ebt_colors(const std::vector<ColorRGBA> ebt_colors) { m_ebt_colors = ebt_colors; }
     void set_filter_state(bool is_filter_state);
+    void set_paint_fill_visible(bool visible) { m_paint_fill_visible = visible; }
 
     constexpr static float GapAreaMin = 0.f;
     constexpr static float GapAreaMax = 5.f;
@@ -170,6 +171,7 @@ protected:
     std::vector<ColorRGBA> m_ebt_colors;
 
     bool                        m_filter_state = false;
+    bool                        m_paint_fill_visible = true;
 
 private:
     void update_render_data();
@@ -235,6 +237,15 @@ protected:
 
     virtual EnforcerBlockerType get_left_button_state_type() const { return EnforcerBlockerType::ENFORCER; }
     virtual EnforcerBlockerType get_right_button_state_type() const { return EnforcerBlockerType::BLOCKER; }
+    virtual EnforcerBlockerType get_paint_state(bool left_button, bool erase) const
+    { return erase ? EnforcerBlockerType::NONE : (left_button ? get_left_button_state_type() : get_right_button_state_type()); }
+    // A derived gizmo may select against a material selector while
+    // persisting its result into a separate effect-state selector.
+    virtual TriangleSelectorGUI* get_edit_selector(size_t mesh_idx) { return m_triangle_selectors[mesh_idx].get(); }
+    virtual const TriangleSelectorGUI* get_edit_selector(size_t mesh_idx) const { return m_triangle_selectors[mesh_idx].get(); }
+    virtual size_t get_edit_selector_count() const { return m_triangle_selectors.size(); }
+    virtual void apply_seed_fill_to_edit_selector(size_t mesh_idx, EnforcerBlockerType new_state)
+    { get_edit_selector(mesh_idx)->seed_fill_apply_on_triangles(new_state); }
 
     float m_cursor_radius = 1.f;
     // BBS
