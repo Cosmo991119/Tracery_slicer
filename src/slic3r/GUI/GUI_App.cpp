@@ -469,7 +469,7 @@ public:
         int logoSize = scaleX(140);
         int logoX    = scaleX(170);
         int logoY    = scaleY(80);
-        wxBitmap* logoBmp = bmpCache.load_svg("splash_app_icon", logoSize, logoSize);
+        wxBitmap* logoBmp = bmpCache.load_png("tracery-app", logoSize, logoSize);
         if (logoBmp != nullptr)
             memDc.DrawBitmap(*logoBmp, logoX, logoY, true);
 
