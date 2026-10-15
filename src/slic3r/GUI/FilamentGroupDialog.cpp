@@ -320,7 +320,7 @@ FilamentGroupDialog::FilamentGroupDialog(wxWindow *parent)
     m_confirm_button = dlg_btns->GetCONFIRM();
     // Keep the same Tracery accent states in this dialog's dark-mode override.
     if (is_dark) {
-        const wxColour teal("#B69AE8");
+        const wxColour teal("#A78BDA");
         const wxColour teal_hover("#C8B2EF");
         const wxColour teal_pressed("#A083D4");
         m_confirm_button->SetBackgroundColor(StateColor(

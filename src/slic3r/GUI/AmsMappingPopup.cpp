@@ -1303,7 +1303,7 @@ void AmsReplaceMaterialDialog::create()
 
     auto label_title = new Label(this, _L("Auto Refill"));
     label_title->SetFont(Label::Head_14);
-    label_title->SetForegroundColour(0xB69AE8);
+    label_title->SetForegroundColour(0xA78BDA);
     label_txt = new Label(this, _L("When the current material run out, the printer will continue to print in the following order."));
     label_txt->SetFont(Label::Body_13);
     label_txt->SetForegroundColour(StateColor::darkModeColorFor(wxColour("#323A3C")));
@@ -1338,7 +1338,7 @@ void AmsReplaceMaterialDialog::create()
         std::pair<wxColour, int>(wxColour(38, 46, 48), StateColor::Enabled));
 
 
-    StateColor btn_bg_green(std::pair<wxColour, int>(wxColour(160, 131, 212), StateColor::Pressed), std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Normal));
+    StateColor btn_bg_green(std::pair<wxColour, int>(wxColour(160, 131, 212), StateColor::Pressed), std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Normal));
     m_button_sizer->Add( 0, 0, 1, wxEXPAND, 0 );
 
     m_main_sizer->Add(0,0,0, wxTOP, FromDIP(12));

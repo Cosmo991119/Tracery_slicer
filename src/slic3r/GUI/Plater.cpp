@@ -1032,7 +1032,7 @@ protected:
 
             if (isSelected) {
                 // Lilac background for the selected nozzle tab.
-                const wxColour selColor("#B69AE8");
+                const wxColour selColor("#A78BDA");
                 dc.SetPen(wxPen(selColor, 1));
                 dc.SetBrush(wxBrush(selColor));
                 // Round only the outer top corner(s) that meet the parent card's
@@ -3413,7 +3413,7 @@ Sidebar::Sidebar(Plater *parent)
             e.Skip();
             return;
         }
-        p->m_search_bar->SetBorderColor(wxColour("#B69AE8"));
+        p->m_search_bar->SetBorderColor(wxColour("#A78BDA"));
         wxPoint pos = this->p->m_search_bar->ClientToScreen(wxPoint(0, 0));
 #ifndef __WXGTK__
         pos.y += this->p->m_search_bar->GetRect().height;

@@ -872,9 +872,9 @@ EditDevNameDialog::EditDevNameDialog(Plater *plater /*= nullptr*/)
 
 
     m_button_confirm = new Button(this, _L("Confirm"));
-    StateColor btn_bg_green(std::pair<wxColour, int>(wxColour(160, 131, 212), StateColor::Pressed), std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Normal));
+    StateColor btn_bg_green(std::pair<wxColour, int>(wxColour(160, 131, 212), StateColor::Pressed), std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Normal));
     m_button_confirm->SetBackgroundColor(btn_bg_green);
-    m_button_confirm->SetBorderColor(wxColour(182, 154, 232));
+    m_button_confirm->SetBorderColor(wxColour(167, 139, 218));
     m_button_confirm->SetTextColor(wxColour(255, 255, 255));
     m_button_confirm->SetSize(wxSize(FromDIP(72), FromDIP(24)));
     m_button_confirm->SetMinSize(wxSize(FromDIP(72), FromDIP(24)));

@@ -11,7 +11,7 @@
 namespace Slic3r {
 namespace GUI {
 
-static const wxColour TEXT_NORMAL_CLR = wxColour(182, 154, 232);
+static const wxColour TEXT_NORMAL_CLR = wxColour(167, 139, 218);
 static const wxColour TEXT_FAILED_CLR = wxColour(255, 111, 0);
 
 static const std::unordered_map<wxString, wxString> ACCESSORY_DISPLAY_STR = {
@@ -224,9 +224,9 @@ MachineInfoPanel::MachineInfoPanel(wxWindow* parent, wxWindowID id, const wxPoin
 
     m_button_upgrade_firmware = new Button(this, _L("Update firmware"));
     StateColor btn_bg(std::pair<wxColour, int>(wxColour(255, 255, 255), StateColor::Disabled), std::pair<wxColour, int>(wxColour(160, 131, 212), StateColor::Pressed),
-                      std::pair<wxColour, int>(wxColour(200, 178, 239), StateColor::Hovered), std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Enabled),
-                      std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Normal));
-    StateColor btn_bd(std::pair<wxColour, int>(wxColour(144, 144, 144), StateColor::Disabled), std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Enabled));
+                      std::pair<wxColour, int>(wxColour(200, 178, 239), StateColor::Hovered), std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Enabled),
+                      std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Normal));
+    StateColor btn_bd(std::pair<wxColour, int>(wxColour(144, 144, 144), StateColor::Disabled), std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Enabled));
     StateColor btn_text(std::pair<wxColour, int>(wxColour(144, 144, 144), StateColor::Disabled), std::pair<wxColour, int>(wxColour(255, 255, 255), StateColor::Enabled));
     m_button_upgrade_firmware->SetBackgroundColor(btn_bg);
     m_button_upgrade_firmware->SetBorderColor(btn_bd);

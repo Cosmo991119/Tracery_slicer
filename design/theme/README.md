@@ -1,6 +1,6 @@
 # Tracery slicer lilac theme
 
-The approved accent is `#B69AE8`. Hover uses `#C8B2EF`, pressed uses
+The approved accent is `#A78BDA`. Hover uses `#C8B2EF`, pressed uses
 `#A083D4`, and text on these fills uses `#30213F`. Small SVG marks and web
 links on light surfaces use deeper lilac `#7856AD` for legibility.
 

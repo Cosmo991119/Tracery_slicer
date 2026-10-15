@@ -2176,7 +2176,7 @@ void MainFrame::update_side_button_style()
     StateColor m_btn_bg_enable = StateColor(
         std::pair<wxColour, int>(wxColour(160, 131, 212), StateColor::Pressed),
         std::pair<wxColour, int>(wxColour(200, 178, 239), StateColor::Hovered),
-        std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Normal)
+        std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Normal)
     );
 
     // m_publish_btn->SetMinSize(wxSize(FromDIP(125), FromDIP(24)));

@@ -6,7 +6,7 @@ static bool gDarkMode = false;
 static bool operator<(wxColour const &l, wxColour const &r) { return l.GetRGBA() < r.GetRGBA(); }
 
 static std::map<wxColour, wxColour> gDarkColors{
-    {"#B69AE8", "#B69AE8"}, // Tracery lilac: preserve accent across light/dark mode
+    {"#A78BDA", "#A78BDA"}, // Tracery lilac: preserve accent across light/dark mode
     {"#C8B2EF", "#C8B2EF"}, // Hover
     {"#A083D4", "#A083D4"}, // Pressed
     {"#30213F", "#30213F"}, // Text on lilac fills

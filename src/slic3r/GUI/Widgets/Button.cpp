@@ -29,7 +29,7 @@ Button::Button()
     background_color = StateColor(
         std::make_pair(0xF0F0F1, (int) StateColor::Disabled),
         std::make_pair(0xC8B2EF, (int) StateColor::Hovered | StateColor::Checked),
-        std::make_pair(0xB69AE8, (int) StateColor::Checked),
+        std::make_pair(0xA78BDA, (int) StateColor::Checked),
         std::make_pair(*wxLIGHT_GREY, (int) StateColor::Hovered), 
         std::make_pair(*wxWHITE, (int) StateColor::Normal));
     text_color       = StateColor(
@@ -154,9 +154,9 @@ void Button::SetCenter(bool isCenter)
 
 //                           Background                                             Foreground                       Border on focus
 // Button Colors             0-Disabled 1-Pressed  2-Hover    3-Normal   4-Enabled  5-Disabled 6-Normal   7-Hover    8-Dark     9-Light
-wxString btn_regular[10]  = {"#DFDFDF", "#DFDFDF", "#D4D4D4", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#262E30", "#262E30", "#B69AE8", "#B69AE8"};
-wxString btn_confirm[10]  = {"#DFDFDF", "#A083D4", "#C8B2EF", "#B69AE8", "#B69AE8", "#6B6A6A", "#30213F", "#30213F", "#B69AE8", "#B69AE8"};
-wxString btn_alert[10]    = {"#DFDFDF", "#DFDFDF", "#E14747", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#262E30", "#FFFFFD", "#B69AE8", "#B69AE8"};
+wxString btn_regular[10]  = {"#DFDFDF", "#DFDFDF", "#D4D4D4", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#262E30", "#262E30", "#A78BDA", "#A78BDA"};
+wxString btn_confirm[10]  = {"#DFDFDF", "#A083D4", "#C8B2EF", "#A78BDA", "#A78BDA", "#6B6A6A", "#30213F", "#30213F", "#A78BDA", "#A78BDA"};
+wxString btn_alert[10]    = {"#DFDFDF", "#DFDFDF", "#E14747", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#262E30", "#FFFFFD", "#A78BDA", "#A78BDA"};
 wxString btn_disabled[10] = {"#DFDFDF", "#DFDFDF", "#DFDFDF", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#6B6A6A", "#262E30", "#DFDFDF", "#DFDFDF"};
 
 void Button::SetStyle(const ButtonStyle style, const ButtonType type)

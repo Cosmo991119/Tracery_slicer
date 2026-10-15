@@ -55,10 +55,10 @@ ConnectPrinterDialog::ConnectPrinterDialog(wxWindow *parent, wxWindowID id, cons
     StateColor btn_bg(
         std::pair<wxColour, int>(wxColour(160, 131, 212), StateColor::Pressed),
         std::pair<wxColour, int>(wxColour(200, 178, 239), StateColor::Hovered),
-        std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Normal)
+        std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Normal)
     );
 
-    StateColor btn_bd(std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Normal));
+    StateColor btn_bd(std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Normal));
 
     StateColor btn_text(std::pair<wxColour, int>(wxColour(255, 255, 255), StateColor::Normal));
 

@@ -28,7 +28,7 @@ html,body
 	padding: 1.5mm 6mm;
 	font-size: 14px;
 	text-align: center;
-	background-color: #B69AE8;
+	background-color: #A78BDA;
 	border-radius: 6px;
 	color: #30213F;
 	cursor: pointer;
@@ -94,7 +94,7 @@ html,body
 	float: left;
 	height:20px;
 	width: 0%;
-	background-color:#B69AE8;
+	background-color:#A78BDA;
 	border-radius: 20px;		
 }
 

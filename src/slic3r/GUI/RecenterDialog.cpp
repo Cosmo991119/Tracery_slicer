@@ -35,9 +35,9 @@ RecenterDialog::RecenterDialog(wxWindow* parent, wxWindowID id, const wxString& 
     m_button_confirm->SetMinSize(wxSize(-1, FromDIP(24)));
     m_button_confirm->SetCornerRadius(FromDIP(12));
     StateColor confirm_btn_bg(std::pair<wxColour, int>(wxColour(200, 178, 239), StateColor::Hovered),
-        std::pair<wxColour, int>(wxColour(182, 154, 232), StateColor::Normal));
+        std::pair<wxColour, int>(wxColour(167, 139, 218), StateColor::Normal));
     m_button_confirm->SetBackgroundColor(confirm_btn_bg);
-    m_button_confirm->SetBorderColor(wxColour(182, 154, 232));
+    m_button_confirm->SetBorderColor(wxColour(167, 139, 218));
     m_button_confirm->SetTextColor(*wxWHITE);
 
     m_button_close = new Button(this, _L("Close"));

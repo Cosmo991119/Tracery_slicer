@@ -734,6 +734,19 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
     ImGuiWrapper::push_toolbar_style(m_parent.get_scale());
     GizmoImguiBegin(get_name(), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
 
+    const auto push_tool_style = [](bool selected) {
+        const ImVec4 accent = ImGuiWrapper::COL_ORCA;
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(accent.x, accent.y, accent.z, selected ? 0.40f : 0.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(accent.x, accent.y, accent.z, 0.40f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(accent.x, accent.y, accent.z, 0.50f));
+        ImGui::PushStyleColor(ImGuiCol_Border, selected ? accent : ImGui::GetStyleColorVec4(ImGuiCol_Border));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, selected ? 1.f : ImGui::GetStyle().FrameBorderSize);
+    };
+    const auto pop_tool_style = [] {
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(4);
+    };
+
     m_imgui->text(_L("Stained glass"));
     m_imgui->text_colored(ImGuiWrapper::COL_WINDOW_BG, _L("Paint the model surface to define the stained-glass area."));
     ImGui::Separator();
@@ -750,12 +763,10 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         if (i != 0)
             ImGui::SameLine();
         const bool selected = m_paint_mode == (i == 0 ? PaintMode::SURFACE : PaintMode::THROUGH);
-        ImGui::PushStyleColor(ImGuiCol_Button, selected ? ImVec4(0.f, 0.59f, 0.53f, 0.25f) : ImVec4(0.f, 0.f, 0.f, 0.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.59f, 0.53f, 0.18f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.f, 0.59f, 0.53f, 0.30f));
+        push_tool_style(selected);
         if (ImGui::Button(into_u8(std::wstring(1, mode_icons[i])).c_str()))
             m_paint_mode = i == 0 ? PaintMode::SURFACE : PaintMode::THROUGH;
-        ImGui::PopStyleColor(3);
+        pop_tool_style();
         if (ImGui::IsItemHovered())
             m_imgui->tooltip(mode_tips[i], ImGui::GetFontSize() * 20.0f);
     }
@@ -775,12 +786,10 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
             ImGui::SameLine(0.0f, m_imgui->scaled(1.5f));
         const std::string label = into_u8(std::wstring(1, operation_icons[i])) + "##tracery_operation_" + std::to_string(i);
         const bool selected = m_eraser_mode == (i == 1);
-        ImGui::PushStyleColor(ImGuiCol_Button, selected ? ImVec4(0.f, 0.59f, 0.53f, 0.25f) : ImVec4(0.f, 0.f, 0.f, 0.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.59f, 0.53f, 0.18f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.f, 0.59f, 0.53f, 0.30f));
+        push_tool_style(selected);
         if (ImGui::Button(label.c_str()))
             m_eraser_mode = i == 1;
-        ImGui::PopStyleColor(3);
+        pop_tool_style();
         if (ImGui::IsItemHovered())
             m_imgui->tooltip(operation_tips[i], ImGui::GetFontSize() * 20.0f);
         ImGui::SameLine();
@@ -805,12 +814,10 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
             ImGui::SameLine();
         const std::wstring label(1, display_icons[i]);
         const bool selected = m_current_tool == tool_ids[i];
-        ImGui::PushStyleColor(ImGuiCol_Button, selected ? ImVec4(0.f, 0.59f, 0.53f, 0.25f) : ImVec4(0.f, 0.f, 0.f, 0.f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.f, 0.59f, 0.53f, 0.18f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.f, 0.59f, 0.53f, 0.30f));
+        push_tool_style(selected);
         if (ImGui::Button(into_u8(label).c_str()))
             m_current_tool = tool_ids[i];
-        ImGui::PopStyleColor(3);
+        pop_tool_style();
         if (ImGui::IsItemHovered())
             m_imgui->tooltip(tool_tips[i], ImGui::GetFontSize() * 20.0f);
     }

@@ -16,7 +16,7 @@ static double luminance(unsigned rgb)
 int main()
 {
     using namespace Slic3r::GUI::TraceryTheme;
-    assert(ACCENT == 0xB69AE8);
+    assert(ACCENT == 0xA78BDA);
     for (unsigned background : {ACCENT, HOVER, PRESSED}) {
         assert(button_text(background, 0xFFFFFF) == ON_ACCENT);
         double contrast = (luminance(background) + 0.05) / (luminance(ON_ACCENT) + 0.05);

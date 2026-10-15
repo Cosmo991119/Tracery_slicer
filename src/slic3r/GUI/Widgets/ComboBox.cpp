@@ -52,7 +52,7 @@ ComboBox::ComboBox(wxWindow *parent,
         GetTextCtrl()->Hide();
         TextInput::SetFont(Label::Body_14);
         TextInput::SetBorderColor(StateColor(std::make_pair(0xDBDBDB, (int) StateColor::Disabled),
-            std::make_pair(0xB69AE8, (int) StateColor::Hovered),
+            std::make_pair(0xA78BDA, (int) StateColor::Hovered),
             std::make_pair(0xDBDBDB, (int) StateColor::Normal)));
         TextInput::SetBackgroundColor(StateColor(std::make_pair(0xF0F0F1, (int) StateColor::Disabled),
             std::make_pair(0xE5F0EE, (int) StateColor::Focused), // ORCA updated background color for focused item

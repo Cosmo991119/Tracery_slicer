@@ -43,7 +43,7 @@ static NSVGimage* parse_ui_svg(const std::string& filename)
         return nsvgParseFromFile(filename.c_str(), "px", 96.0f);
 
     const std::map<std::string, std::string> accents{
-        {"#009688", "#B69AE8"}, {"#00AE42", "#B69AE8"}, {"#00ae42", "#B69AE8"},
+        {"#009688", "#A78BDA"}, {"#00AE42", "#A78BDA"}, {"#00ae42", "#A78BDA"},
         {"#00675b", "#7856AD"}, {"#00675B", "#7856AD"}, {"#52c7b8", "#C8B2EF"}};
     return BitmapCache::nsvgParseFromFileWithReplace(filename.c_str(), "px", 96.0f, accents);
 }

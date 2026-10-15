@@ -22,14 +22,14 @@ constexpr int g_buttonMarginV    = 0;   // DIP — vertical button margin (conta
 constexpr int g_outerMargin      = 6;   // DIP — (block 40 - container 28) / 2
 
 // Unselected: transparent bg (container's #F8F7F7 shows through), #4A4A4A text
-// Selected:   #B69AE8 bg, #FEFEFE text
+// Selected:   #A78BDA bg, #FEFEFE text
 constexpr const char* g_containerBg    = "#F8F7F7";
 constexpr const char* g_unselectedFg   = "#4A4A4A";
-constexpr const char* g_selectedBg     = "#B69AE8";
+constexpr const char* g_selectedBg     = "#A78BDA";
 constexpr const char* g_selectedFg     = "#FEFEFE";
 
 // Plain style: no container / no fill; text-only, colored to indicate selection.
-constexpr const char* g_plainSelectedFg   = "#B69AE8"; // teal
+constexpr const char* g_plainSelectedFg   = "#A78BDA"; // teal
 constexpr const char* g_plainUnselectedFg = "#6B6B6B"; // grey
 constexpr int g_plainButtonGap = 8; // DIP — gap between text options
 
