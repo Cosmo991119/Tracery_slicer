@@ -473,7 +473,7 @@ public:
         if (logoBmp != nullptr)
             memDc.DrawBitmap(*logoBmp, logoX, logoY, true);
 
-        // Brand name: "Snapmaker Orca"
+        // Application display name.
         memDc.SetFont(m_constant_text.titleFont);
         memDc.SetTextForeground(wxColour(23, 23, 23));
         wxSize brandExt = memDc.GetTextExtent(m_constant_text.title);
@@ -583,7 +583,7 @@ private:
 
         void init()
         {
-            title    = "Snapmaker Orca";
+            title    = SLIC3R_APP_FULL_NAME;
             version  = wxString::Format("V%s %s", Snapmaker_VERSION, _L("Release"));
 
             titleFont   = Label::sysFont(20, false);
@@ -2665,7 +2665,7 @@ bool GUI_App::on_init_inner()
             RichMessageDialog
                 dlg(nullptr,
                     wxString::Format(_L("%s\nDo you want to continue?"), msg),
-                    "Snapmaker Orca", wxICON_QUESTION | wxYES_NO);
+                    SLIC3R_APP_FULL_NAME, wxICON_QUESTION | wxYES_NO);
             dlg.ShowCheckBox(_L("Remember my choice"));
             if (dlg.ShowModal() != wxID_YES) return false;
 
@@ -5472,7 +5472,7 @@ std::string GUI_App::format_display_version()
 {
     if (!version_display.empty()) return version_display;
 
-    version_display = std::string("Snapmaker Orca ") + Snapmaker_VERSION;
+    version_display = std::string(SLIC3R_APP_FULL_NAME) + " " + Snapmaker_VERSION;
     return version_display;
 }
 

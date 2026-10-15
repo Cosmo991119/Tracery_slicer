@@ -3,12 +3,12 @@
 !include "FileFunc.nsh"
 !include "LogicLib.nsh"
 
-!define PRODUCT_NAME "Snapmaker Orca"
+!define PRODUCT_NAME "Tracery slicer"
 !define PRODUCT_PUBLISHER "Snapmaker"
 !define PRODUCT_WEB_SITE "https://github.com/Snapmaker/OrcaSlicer"
-!define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
+!define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\Snapmaker Orca"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
-!define PRODUCT_INSTALL_KEY "Software\${PRODUCT_PUBLISHER}\${PRODUCT_NAME}"
+!define PRODUCT_INSTALL_KEY "Software\${PRODUCT_PUBLISHER}\Snapmaker Orca"
 
 !ifndef VERSION
     !define VERSION "2.4.0"
@@ -39,7 +39,7 @@ SetCompressor lzma
 
 VIProductVersion "${VERSION}.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
-VIAddVersionKey "Comments" "Snapmaker Orca is an open source slicer for FDM printers"
+VIAddVersionKey "Comments" "Tracery slicer is an open source slicer for FDM printers"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
 VIAddVersionKey "LegalCopyright" "Copyright (C) ${PRODUCT_PUBLISHER}"
 VIAddVersionKey "FileDescription" "${PRODUCT_NAME} ${VERSION} Installer"
@@ -128,10 +128,10 @@ Section "Main program" SecMain
     ; URL protocols (same as macOS CFBundleURLSchemes): snapmaker-orca:// and Snapmaker_Orca://
     DetailPrint "Registering URL protocols (snapmaker-orca, Snapmaker_Orca)..."
     SetRegView 64
-    WriteRegStr HKLM "Software\Classes\snapmaker-orca" "" "URL:Snapmaker Orca"
+    WriteRegStr HKLM "Software\Classes\snapmaker-orca" "" "URL:Tracery slicer"
     WriteRegStr HKLM "Software\Classes\snapmaker-orca" "URL Protocol" ""
     WriteRegStr HKLM "Software\Classes\snapmaker-orca\shell\open\command" "" '"$INSTDIR\snapmaker-orca.exe" "%1"'
-    WriteRegStr HKLM "Software\Classes\Snapmaker_Orca" "" "URL:Snapmaker Orca"
+    WriteRegStr HKLM "Software\Classes\Snapmaker_Orca" "" "URL:Tracery slicer"
     WriteRegStr HKLM "Software\Classes\Snapmaker_Orca" "URL Protocol" ""
     WriteRegStr HKLM "Software\Classes\Snapmaker_Orca\shell\open\command" "" '"$INSTDIR\snapmaker-orca.exe" "%1"'
     SetRegView 32
@@ -149,14 +149,14 @@ SectionEnd
 Section "Desktop shortcut" SecDesktop
     DetailPrint "Creating desktop shortcut..."
     SetShellVarContext current
-    CreateShortcut "$DESKTOP\Snapmaker Orca.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
+    CreateShortcut "$DESKTOP\Tracery slicer.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
     SetShellVarContext all
 SectionEnd
 
 Section "Start menu shortcut" SecStartMenu
     DetailPrint "Creating start menu shortcut..."
     CreateDirectory "$SMPROGRAMS\${PRODUCT_NAME}"
-    CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Snapmaker Orca.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
+    CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Tracery slicer.lnk" "$INSTDIR\snapmaker-orca.exe" "" "$INSTDIR\snapmaker-orca.exe" 0
     CreateShortcut "$SMPROGRAMS\${PRODUCT_NAME}\Uninstall.lnk" "$INSTDIR\Uninstall.exe" "" "$INSTDIR\Uninstall.exe" 0
 SectionEnd
 
@@ -175,7 +175,7 @@ Section "Uninstall"
     Sleep 500
     
     DetailPrint "Removing desktop shortcut..."
-    Delete "$DESKTOP\Snapmaker Orca.lnk"
+    Delete "$DESKTOP\Tracery slicer.lnk"
     Delete "$DESKTOP\${PRODUCT_NAME}.lnk"
     
     DetailPrint "Removing start menu shortcut..."
@@ -216,7 +216,7 @@ Function EnsureSnapmakerNotRunning
         SetErrorLevel 7
         Quit
     snapmaker_prompt:
-        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Snapmaker Orca is still running (snapmaker-orca.exe).$\r$\nClose the program, then click Retry, or Cancel to exit the installer." IDRETRY snapmaker_check_loop
+        MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "Tracery slicer is still running (snapmaker-orca.exe).$\r$\nClose the program, then click Retry, or Cancel to exit the installer." IDRETRY snapmaker_check_loop
         Abort
     snapmaker_idle:
 FunctionEnd
