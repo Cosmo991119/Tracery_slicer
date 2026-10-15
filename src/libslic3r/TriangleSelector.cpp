@@ -1101,7 +1101,7 @@ void TriangleSelector::paint_all_tracery_regions(const Tracery2DData &data, floa
     std::map<int, std::set<int>> allowed_states_by_source;
     for (const TraceryFacet2DData& facet_data : data)
         for (const TraceryRegion2D& region : facet_data.regions)
-            if (region.color != EnforcerBlockerType::NONE)
+            if (region.color != EnforcerBlockerType::NONE || region.erase)
                 allowed_states_by_source[facet_data.source_facet_id].insert(int(region.color));
 
     const auto audit_processed_sources = [this, &allowed_states_by_source, &diagnostic](const char* stage,
@@ -1524,7 +1524,7 @@ TriangleSelector::TraceryLeafClassification TriangleSelector::classify_tracery_l
     if (result.leaf_area <= 1e-15)
         return result;
     for (const TraceryRegion2D* region : candidates) {
-        if (region == nullptr || region->color == EnforcerBlockerType::NONE)
+        if (region == nullptr || (region->color == EnforcerBlockerType::NONE && !region->erase))
             continue;
         ++statistics.exact_intersections;
         const double area = intersect_triangle_with_convex_polygon(leaf, region->polygon);
@@ -2162,6 +2162,19 @@ void TriangleSelector::get_facets(std::vector<indexed_triangle_set>& facets_per_
             }
         }
     }
+}
+
+std::vector<TriangleSelector::PaintedLeaf> TriangleSelector::painted_leaves(bool include_unpainted) const
+{
+    std::vector<PaintedLeaf> leaves;
+    for (const Triangle& triangle : m_triangles) {
+        if (!triangle.valid() || triangle.is_split() || (!include_unpainted && triangle.get_state() == EnforcerBlockerType::NONE))
+            continue;
+        leaves.push_back({{m_vertices[triangle.verts_idxs[0]].v, m_vertices[triangle.verts_idxs[1]].v, m_vertices[triangle.verts_idxs[2]].v},
+                          triangle.source_triangle,
+                          triangle.get_state()});
+    }
+    return leaves;
 }
 
 indexed_triangle_set TriangleSelector::get_facets_strict(EnforcerBlockerType state) const

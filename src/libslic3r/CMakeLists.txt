@@ -456,6 +456,10 @@ set(lisbslic3r_sources
     TriangleMeshSlicer.hpp
     TriangleSelector.cpp
     TriangleSelector.hpp
+    TraceryPartition.cpp
+    TraceryPartition.hpp
+    TraceryRestore.cpp
+    TraceryRestore.hpp
     TriangleSetSampling.cpp
     TriangleSetSampling.hpp
     TriangulateWall.cpp

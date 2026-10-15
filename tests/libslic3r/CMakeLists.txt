@@ -13,6 +13,7 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament.cpp
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
+	test_tracery_partition.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
@@ -53,6 +54,14 @@ if (WIN32)
     target_link_libraries(${_TEST_NAME}_tests PRIVATE bcrypt.lib crypt32.lib)
 endif()
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
+
+# Keep the geometry regression runnable independently of unrelated test suites.
+add_executable(tracery_partition_tests test_tracery_partition.cpp)
+target_link_libraries(tracery_partition_tests PRIVATE ${TEST_LINK_LIBS})
+if (WIN32)
+    target_link_libraries(tracery_partition_tests PRIVATE bcrypt.lib crypt32.lib)
+endif()
+add_test(NAME tracery_partition COMMAND tracery_partition_tests "[TraceryPartition]")
 
 if (WIN32)
 	if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")

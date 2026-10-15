@@ -10,10 +10,13 @@
 #include "slic3r/GUI/MixedColorMatchHelpers.hpp"
 #include "slic3r/GUI/MixedFilamentColorMapPanel.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "slic3r/Utils/UndoRedo.hpp"
 
 #include "libslic3r/AABBMesh.hpp"
 #include "libslic3r/KDTreeIndirect.hpp"
 #include "libslic3r/Utils.hpp"
+
+#include <cereal/types/map.hpp>
 
 #include <GL/glew.h>
 #include <wx/image.h>
@@ -918,10 +921,59 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
 
 void GLGizmoTracery::erase_all_stained_glass()
 {
-    // Keep the base snapshot until the regular MMU paint has been restored.
+    ModelObject* object = m_c->selection_info()->model_object();
+    if (object == nullptr || !restore_original_tracery_meshes(*object))
+        return;
+    clear_stained_glass_editor();
+    update_from_model_object(false);
+    invalidate_painting_raycast();
+    m_seed_fill_last_mesh_id = -1;
+    notify_mmu_paint_changed(*object);
+    const auto& objects = wxGetApp().model().objects;
+    const auto  found   = std::find(objects.begin(), objects.end(), object);
+    if (found != objects.end())
+        wxGetApp().plater()->changed_mesh(int(found - objects.begin()));
+    m_parent.set_as_dirty();
+}
+
+bool GLGizmoTracery::restore_original_tracery_meshes(ModelObject& object)
+{
+    std::vector<std::pair<ModelVolume*, TraceryPartitionResult>> restored;
+    try {
+        size_t index = 0;
+        for (ModelVolume* volume : object.volumes) {
+            if (!volume->is_model_part())
+                continue;
+            const auto snapshot    = m_mesh_restore_states.find(volume->id());
+            auto       annotations = collect_volume_annotations(*volume);
+            if (snapshot != m_mesh_restore_states.end()) {
+                restored.emplace_back(volume, restore_tracery_mesh(snapshot->second, volume->mesh(), annotations));
+            } else if (index < m_stained_glass_base_paint_data.size()) {
+                // Legacy/session paint without a mesh snapshot can only restore colour.
+                annotations[0] = m_stained_glass_base_paint_data[index];
+                restored.emplace_back(volume, TraceryPartitionResult{volume->mesh().its, std::move(annotations), {}});
+            }
+            ++index;
+        }
+    } catch (const std::exception& error) {
+        wxMessageBox(from_u8(error.what()), _L("Stained glass"), wxOK | wxICON_ERROR);
+        return false;
+    }
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Erase all stained glass", UndoRedo::SnapshotType::GizmoAction);
+    for (auto& [volume, partition] : restored) {
+        const ObjectID old_id = volume->id();
+        replace_tracery_mesh(*volume, partition);
+        m_mesh_restore_states.erase(old_id);
+    }
+    return true;
+}
+
+void GLGizmoTracery::clear_stained_glass_editor()
+{
     m_selection_modified = true;
     m_mask_data.clear();
     m_previous_mask_data.clear();
+    m_stained_glass_base_paint_data.clear();
     m_tracery_selections.clear();
     m_generated_fragments.clear();
     m_generated_voronoi_regions.clear();
@@ -929,24 +981,9 @@ void GLGizmoTracery::erase_all_stained_glass()
     m_fragment_mixed_filament_ids.clear();
     m_transition_recipe_targets.clear();
     m_pending_selection_fragment_count = 0;
-    m_incremental_generation = false;
-    m_regeneration_requested = false;
-    m_generation_integrity_valid = true;
-    for (const auto& selector : m_triangle_selectors) {
-        selector->reset();
-        selector->request_update_render_data(true);
-    }
-
-    apply_stained_glass_colors();
-
-    for (size_t i = 0; i < m_fill_reference_selectors.size() && i < m_stained_glass_base_paint_data.size(); ++i) {
-        auto& selector = *m_fill_reference_selectors[i];
-        selector.deserialize(m_stained_glass_base_paint_data[i], false);
-        selector.seed_fill_unselect_all_triangles();
-        selector.request_update_render_data(true);
-    }
-    m_stained_glass_base_paint_data.clear();
-    m_parent.set_as_dirty();
+    m_incremental_generation           = false;
+    m_regeneration_requested           = false;
+    m_generation_integrity_valid       = true;
 }
 
 void GLGizmoTracery::update_model_object()
@@ -1345,37 +1382,51 @@ struct TraceryVoronoiVertex {
     Vec3f warped;
 };
 
-Vec3f tracery_warp_position(const Vec3f& point, float target_edge)
+Vec3f tracery_warp_position(const Vec3f& point, float /* target_edge */)
 {
-    const float frequency = 1.35f / std::max(target_edge, 0.001f);
-    const float amount = target_edge * 0.24f;
-    return point + Vec3f(amount * std::sin((point.y() + 0.31f * point.z()) * frequency),
-                         amount * std::sin((point.z() + 0.27f * point.x()) * frequency + 1.7f),
-                         amount * std::sin((point.x() + 0.23f * point.y()) * frequency + 3.1f));
+    // A planar Voronoi bisector must remain a straight shared edge.
+    return point;
 }
 
-std::vector<TraceryVoronoiVertex> clip_tracery_half_plane(
-    const std::vector<TraceryVoronoiVertex>& polygon, const Vec3f& direction, float limit)
+std::vector<TraceryVoronoiVertex> clip_tracery_half_plane(const std::vector<TraceryVoronoiVertex>& polygon,
+                                                          const Vec3d&                             direction,
+                                                          double                                   limit)
 {
     std::vector<TraceryVoronoiVertex> output;
     if (polygon.empty())
         return output;
     output.reserve(polygon.size() + 1);
     for (size_t index = 0; index < polygon.size(); ++index) {
-        const auto& first = polygon[index];
-        const auto& second = polygon[(index + 1) % polygon.size()];
-        const float first_value = first.warped.dot(direction) - limit;
-        const float second_value = second.warped.dot(direction) - limit;
+        const auto&  first        = polygon[index];
+        const auto&  second       = polygon[(index + 1) % polygon.size()];
+        const double first_value  = first.warped.cast<double>().dot(direction) - limit;
+        const double second_value = second.warped.cast<double>().dot(direction) - limit;
         if (first_value <= 0.0f)
             output.emplace_back(first);
         if ((first_value <= 0.0f) != (second_value <= 0.0f)) {
-            const float fraction = std::clamp(first_value / (first_value - second_value), 0.0f, 1.0f);
-            output.push_back({ first.local + fraction * (second.local - first.local),
-                               first.world + fraction * (second.world - first.world),
-                               first.warped + fraction * (second.warped - first.warped) });
+            const float fraction = float(std::clamp(first_value / (first_value - second_value), 0.0, 1.0));
+            output.push_back({first.local + fraction * (second.local - first.local), first.world + fraction * (second.world - first.world),
+                              first.warped + fraction * (second.warped - first.warped)});
         }
     }
     return output;
+}
+
+using TraceryBisectors = std::map<std::pair<size_t, size_t>, std::pair<Vec3d, double>>;
+
+TraceryBisectors build_tracery_bisectors(const std::vector<Vec3f>& seeds, const std::vector<size_t>& indices)
+{
+    TraceryBisectors result;
+    for (size_t a = 0; a < indices.size(); ++a) {
+        for (size_t b = a + 1; b < indices.size(); ++b) {
+            const auto  key       = std::minmax(indices[a], indices[b]);
+            const Vec3d first     = seeds[key.first].cast<double>();
+            const Vec3d second    = seeds[key.second].cast<double>();
+            const Vec3d direction = second - first;
+            result.emplace(key, std::make_pair(direction, direction.dot((first + second) * 0.5)));
+        }
+    }
+    return result;
 }
 
 std::optional<TriangleSelector::TraceryFacet2DData> make_tracery_facet_plane(
@@ -1418,6 +1469,7 @@ void GLGizmoTracery::generate_voronoi_regions(
         for (size_t index = 0; index < seeds.size(); ++index)
             if (seeds[index].color_group == region.color_group)
                 region_seeds.emplace_back(index);
+        const TraceryBisectors bisectors = build_tracery_bisectors(warped_seeds, region_seeds);
         for (size_t face_index : region.face_indices) {
             const auto& face = input.surface_triangles[face_index];
             if (face.mesh_idx >= output.size())
@@ -1430,9 +1482,9 @@ void GLGizmoTracery::generate_voronoi_regions(
                 for (size_t other : region_seeds) {
                     if (other == seed || polygon.empty())
                         continue;
-                    const Vec3f direction = warped_seeds[other] - warped_seeds[seed];
-                    const float limit = 0.5f * (warped_seeds[other].squaredNorm() - warped_seeds[seed].squaredNorm());
-                    polygon = clip_tracery_half_plane(polygon, direction, limit);
+                    const auto& boundary = bisectors.at(std::minmax(seed, other));
+                    const double side = seed < other ? 1. : -1.;
+                    polygon = clip_tracery_half_plane(polygon, side * boundary.first, side * boundary.second);
                 }
                 if (polygon.size() < 3)
                     continue;
@@ -2109,11 +2161,10 @@ bool GLGizmoTracery::generate_fragments(
         std::array<float, 3> offset;
     };
     const float warp_frequency = 1.35f / std::max(target_edge, 0.001f);
-    const float warp_amount = target_edge * 0.24f;
+    const float warp_amount = 0.f; // Preserve straight Voronoi bisectors.
     const auto compute_warp = [warp_frequency, warp_amount](const Vec3f& point) {
-        // One continuous field is shared by every seed. Unlike per-seed
-        // noise, it cannot tear a boundary into saw teeth. Voronoi borders
-        // in this gently warped field become the required interlocking arcs.
+        // Keep the diagnostic fields, but use an identity transform so the
+        // generated planar bisectors remain straight.
         WarpComputation calculation;
         calculation.phase = {
             (point.y() + 0.31f * point.z()) * warp_frequency,
@@ -4071,147 +4122,137 @@ ModelObject* GLGizmoTracery::find_masked_model_object(Model& model) const
     return nullptr;
 }
 
-bool GLGizmoTracery::bake_volume_voronoi_regions(ModelVolume& volume, size_t volume_index)
+std::vector<TriangleSelector::TriangleSplittingData> GLGizmoTracery::collect_partition_annotations(const ModelVolume& volume,
+                                                                                                   size_t             index) const
 {
-    std::function<void(const std::string&)> trace;
-#ifndef NDEBUG
-    std::shared_ptr<std::ofstream> diagnostic;
-    if (m_display_diagnostics_active) {
-        const std::filesystem::path path = m_display_diagnostics_dir /
-            ("tracery_voronoi_bake_volume_" + std::to_string(volume_index) + ".tsv");
-        const bool new_file = !std::filesystem::exists(path);
-        diagnostic = std::make_shared<std::ofstream>(path, std::ios::app | std::ios::binary);
-        if (*diagnostic && new_file)
-            *diagnostic << "record\tdetail\n";
-        trace = [diagnostic](const std::string& detail) {
-            if (*diagnostic)
-                *diagnostic << detail << '\n';
-        };
-    }
-#endif
-    const size_t generated_region_count = volume_index < m_generated_voronoi_regions.size() ?
-        m_generated_voronoi_regions[volume_index].size() : 0;
-    if (trace)
-        trace("bake_begin\tvolume=" + std::to_string(volume_index) +
-              "\tgenerated_regions=" + std::to_string(generated_region_count) +
-              "\tmixed_ids=" + std::to_string(m_fragment_mixed_filament_ids.size()));
+    const auto empty = TriangleSelector::TriangleSplittingData{};
+    const auto base  = index < m_stained_glass_base_paint_data.size() ? m_stained_glass_base_paint_data[index] :
+                                                                        volume.mmu_segmentation_facets.get_data();
+    return {m_incremental_generation ? volume.mmu_segmentation_facets.get_data() : base,
+            volume.supported_facets.get_data(),
+            volume.seam_facets.get_data(),
+            volume.fuzzy_skin_facets.get_data(),
+            volume.exterior_facets.get_data(),
+            base,
+            index < m_mask_data.size() ? m_mask_data[index] : empty,
+            index < m_previous_mask_data.size() ? m_previous_mask_data[index] : empty};
+}
 
-    const TriangleSelector::Tracery2DData data = build_voronoi_2d_data(volume_index, trace);
-    const bool has_base_paint = volume_index < m_stained_glass_base_paint_data.size();
-    const bool rebuild_from_base = !m_incremental_generation;
-    size_t projected_region_count = 0;
-    for (const TriangleSelector::TraceryFacet2DData& facet : data)
-        projected_region_count += facet.regions.size();
-    if (trace)
-        trace("projection_complete\tvolume=" + std::to_string(volume_index) +
-              "\tfacets=" + std::to_string(data.size()) +
-              "\tregions=" + std::to_string(projected_region_count) +
-              "\thas_base_paint=" + std::to_string(has_base_paint) +
-              "\tincremental=" + std::to_string(m_incremental_generation));
-    if ((!rebuild_from_base || !has_base_paint) && data.empty()) {
-        if (trace)
-            trace("bake_skipped\tvolume=" + std::to_string(volume_index) + "\treason=no_dirty_2d_regions");
+std::vector<GLGizmoTracery::GeneratedVoronoiRegion> GLGizmoTracery::remap_partition_regions(
+    const std::vector<GeneratedVoronoiRegion>& regions, const TraceryPartitionResult& partition) const
+{
+    std::map<int, std::vector<int>> children;
+    for (size_t i = 0; i < partition.source_facets.size(); ++i)
+        children[partition.source_facets[i]].push_back(int(i));
+    std::vector<GeneratedVoronoiRegion> result;
+    for (const GeneratedVoronoiRegion& region : regions) {
+        const auto found = children.find(region.source_facet_id);
+        if (found == children.end())
+            throw std::runtime_error("Lost source facet while remapping stained glass");
+        for (int facet : found->second) {
+            auto polygon = clip_tracery_polygon_to_facet(partition.mesh, facet, region.local_polygon);
+            if (polygon.size() < 3)
+                continue;
+            GeneratedVoronoiRegion child = region;
+            child.source_facet_id        = facet;
+            child.local_polygon          = std::move(polygon);
+            result.push_back(std::move(child));
+        }
+    }
+    return result;
+}
+
+std::vector<TriangleSelector::TriangleSplittingData> GLGizmoTracery::collect_volume_annotations(const ModelVolume& volume)
+{
+    return {volume.mmu_segmentation_facets.get_data(), volume.supported_facets.get_data(), volume.seam_facets.get_data(),
+            volume.fuzzy_skin_facets.get_data(), volume.exterior_facets.get_data()};
+}
+
+void GLGizmoTracery::replace_tracery_mesh(ModelVolume& volume, TraceryPartitionResult& partition)
+{
+    volume.set_mesh(std::move(partition.mesh));
+    FacetsAnnotation* annotations[] = {&volume.mmu_segmentation_facets, &volume.supported_facets, &volume.seam_facets,
+                                       &volume.fuzzy_skin_facets, &volume.exterior_facets};
+    for (size_t channel = 0; channel < 5; ++channel) {
+        TriangleSelector selector(volume.mesh());
+        selector.deserialize(partition.annotations[channel], false);
+        annotations[channel]->set(selector);
+    }
+    volume.calculate_convex_hull();
+    volume.invalidate_convex_hull_2d();
+    volume.set_new_unique_id();
+    volume.get_object()->invalidate_bounding_box();
+}
+
+GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_partition(ModelVolume& volume, size_t volume_index) const
+{
+    PreparedTraceryVolume prepared;
+    prepared.volume        = &volume;
+    prepared.index         = volume_index;
+    const auto current     = collect_volume_annotations(volume);
+    const auto snapshot    = m_mesh_restore_states.find(volume.id());
+    prepared.restore_state = snapshot == m_mesh_restore_states.end() ? capture_tracery_restore_state(volume.mesh(), current) :
+                                                                       snapshot->second;
+    const auto annotations = collect_partition_annotations(volume, volume_index);
+    prepared.partition     = build_exact_tracery_partition(volume.mesh(), annotations, build_voronoi_2d_data(volume_index, {}));
+    advance_tracery_restore_state(prepared.restore_state, volume.mesh(), current, prepared.partition);
+    if (volume_index < m_generated_voronoi_regions.size())
+        prepared.generated = remap_partition_regions(m_generated_voronoi_regions[volume_index], prepared.partition);
+    for (const TracerySelection& selection : m_tracery_selections) {
+        prepared.selections.push_back(volume_index < selection.regions.size() ?
+                                          remap_partition_regions(selection.regions[volume_index], prepared.partition) :
+                                          std::vector<GeneratedVoronoiRegion>{});
+    }
+    return prepared;
+}
+
+void GLGizmoTracery::commit_tracery_mesh_update(PreparedTraceryVolume&& prepared)
+{
+    ModelVolume&   volume = *prepared.volume;
+    const size_t   index  = prepared.index;
+    const ObjectID old_id = volume.id();
+    replace_tracery_mesh(volume, prepared.partition);
+    m_mesh_restore_states.erase(old_id);
+    m_mesh_restore_states.emplace(volume.id(), std::move(prepared.restore_state));
+    auto store = [index](auto& destination, auto&& value) {
+        if (destination.size() <= index)
+            destination.resize(index + 1);
+        destination[index] = std::move(value);
+    };
+    store(m_stained_glass_base_paint_data, std::move(prepared.partition.annotations[5]));
+    store(m_mask_data, std::move(prepared.partition.annotations[6]));
+    store(m_previous_mask_data, std::move(prepared.partition.annotations[7]));
+    store(m_generated_voronoi_regions, std::move(prepared.generated));
+    for (size_t i = 0; i < m_tracery_selections.size(); ++i)
+        store(m_tracery_selections[i].regions, std::move(prepared.selections[i]));
+}
+
+bool GLGizmoTracery::bake_exact_tracery_partitions(ModelObject& object)
+{
+    // Prepare ALL volumes and editor geometry before replacing any source mesh.
+    std::vector<PreparedTraceryVolume> updates;
+    try {
+        size_t index = 0;
+        for (ModelVolume* volume : object.volumes) {
+            if (!volume->is_model_part())
+                continue;
+            const bool has_regions = index < m_generated_voronoi_regions.size() && !m_generated_voronoi_regions[index].empty();
+            if (has_regions || (!m_incremental_generation && index < m_stained_glass_base_paint_data.size()))
+                updates.push_back(prepare_volume_tracery_partition(*volume, index));
+            ++index;
+        }
+    } catch (const std::exception& error) {
+        wxMessageBox(from_u8(error.what()), _L("Stained glass"), wxOK | wxICON_ERROR);
         return false;
     }
-    TriangleSelector selector(volume.mesh());
-    if (rebuild_from_base && has_base_paint)
-        selector.deserialize(m_stained_glass_base_paint_data[volume_index], false);
-    else
-        selector.deserialize(volume.mmu_segmentation_facets.get_data(), false);
-
-    const auto selector_state_summary = [](const TriangleSelector& value) {
-        std::vector<indexed_triangle_set> facets_by_state;
-        value.get_facets(facets_by_state);
-        std::ostringstream summary;
-        for (size_t state = 0; state < facets_by_state.size(); ++state)
-            if (!facets_by_state[state].indices.empty())
-                summary << state << ':' << facets_by_state[state].indices.size() << ';';
-        return summary.str();
-    };
-    const auto audit_persisted_coverage = [&data, &trace](const TriangleSelector& value, const char* stage) {
-        if (!trace)
-            return;
-        std::map<int, std::set<int>> allowed_states_by_source;
-        for (const TriangleSelector::TraceryFacet2DData& facet : data)
-            for (const TriangleSelector::TraceryRegion2D& region : facet.regions)
-                if (region.color != EnforcerBlockerType::NONE)
-                    allowed_states_by_source[facet.source_facet_id].insert(int(region.color));
-
-        struct StateCoverage {
-            size_t triangles = 0;
-            double area = 0.0;
-        };
-        std::map<int, std::map<int, StateCoverage>> coverage_by_source;
-        for (unsigned int state = 0; state <= unsigned(EnforcerBlockerType::ExtruderMax); ++state) {
-            const auto facets = value.get_facets_strict_with_sources(EnforcerBlockerType(state));
-            for (size_t index = 0; index < facets.facets.indices.size() && index < facets.source_facet_ids.size(); ++index) {
-                const int source_facet_id = facets.source_facet_ids[index];
-                if (!allowed_states_by_source.count(source_facet_id))
-                    continue;
-                const stl_triangle_vertex_indices& triangle = facets.facets.indices[index];
-                const Vec3d a = facets.facets.vertices[size_t(triangle[0])].cast<double>();
-                const Vec3d b = facets.facets.vertices[size_t(triangle[1])].cast<double>();
-                const Vec3d c = facets.facets.vertices[size_t(triangle[2])].cast<double>();
-                StateCoverage& coverage = coverage_by_source[source_facet_id][int(state)];
-                ++coverage.triangles;
-                coverage.area += 0.5 * (b - a).cross(c - a).norm();
-            }
-        }
-        for (const auto& [source_facet_id, allowed_states] : allowed_states_by_source) {
-            double total_area = 0.0;
-            double unexpected_area = 0.0;
-            for (const auto& [state, coverage] : coverage_by_source[source_facet_id]) {
-                total_area += coverage.area;
-                if (!allowed_states.count(state)) {
-                    unexpected_area += coverage.area;
-                    std::ostringstream detail;
-                    detail << std::setprecision(12)
-                           << "persisted_coverage_unexpected_state\tstage=" << stage
-                           << "\tsource_facet=" << source_facet_id
-                           << "\tstate=" << state
-                           << "\ttriangles=" << coverage.triangles
-                           << "\tarea=" << coverage.area;
-                    trace(detail.str());
-                }
-            }
-            std::ostringstream summary;
-            summary << std::setprecision(12)
-                    << "persisted_coverage_summary\tstage=" << stage
-                    << "\tsource_facet=" << source_facet_id
-                    << "\ttotal_area=" << total_area
-                    << "\tunexpected_area=" << unexpected_area
-                    << "\tallowed_states=";
-            for (int state : allowed_states)
-                summary << state << ',';
-            trace(summary.str());
-        }
-    };
-    if (trace)
-        trace("selector_before_paint\tvolume=" + std::to_string(volume_index) +
-              "\tstates=" + selector_state_summary(selector));
-    if (!data.empty()) {
-        // Match the ordinary MMU brush's finest boundary resolution. The
-        // per-leaf AABB candidate filter keeps this high-quality setting
-        // from evaluating every stained-glass polygon at every leaf.
-        constexpr float max_leaf_edge = 0.05f;
-        selector.paint_all_tracery_regions(data, max_leaf_edge, trace);
-    } else if (trace) {
-        trace("selector_skipped\tvolume=" + std::to_string(volume_index) + "\treason=no_2d_regions");
+    for (auto& update : updates)
+        commit_tracery_mesh_update(std::move(update));
+    if (!updates.empty()) {
+        update_from_model_object(false);
+        invalidate_painting_raycast();
+        m_seed_fill_last_mesh_id = -1;
     }
-    if (trace)
-        trace("selector_after_paint\tvolume=" + std::to_string(volume_index) +
-              "\tstates=" + selector_state_summary(selector));
-    audit_persisted_coverage(selector, "after_paint");
-    const bool volume_changed = volume.mmu_segmentation_facets.set(selector);
-    if (trace) {
-        TriangleSelector persisted_selector(volume.mesh());
-        persisted_selector.deserialize(volume.mmu_segmentation_facets.get_data(), false);
-        trace("bake_persisted\tvolume=" + std::to_string(volume_index) +
-              "\tset_changed=" + std::to_string(volume_changed) +
-              "\tstates=" + selector_state_summary(persisted_selector));
-        audit_persisted_coverage(persisted_selector, "after_persist");
-    }
-    return volume_changed;
+    return true;
 }
 
 void GLGizmoTracery::notify_mmu_paint_changed(const ModelObject& object) const
@@ -4226,102 +4267,13 @@ void GLGizmoTracery::notify_mmu_paint_changed(const ModelObject& object) const
 
 void GLGizmoTracery::bake_fragments_to_mmu_painting()
 {
-#if 0
-    // Legacy generated-surface classifier. It used leaf centroids and a
-    // nearest-distance search across every fragment, so it is intentionally
-    // disabled while the 2D region-intersection path is introduced.
-    Model &model = wxGetApp().plater()->model();
-    ModelObject *object = nullptr;
-    for (ModelObject *candidate : model.objects)
-        if (candidate->id() == m_mask_object_id) { object = candidate; break; }
-    if (object == nullptr && m_mask_object_index >= 0 && size_t(m_mask_object_index) < model.objects.size())
-        object = model.objects[size_t(m_mask_object_index)];
-    if (object == nullptr)
-        return;
-
-    bool updated = false;
-    size_t volume_index = 0;
-    for (ModelVolume *volume : object->volumes) {
-        if (!volume->is_model_part())
-            continue;
-        struct GeneratedPaint {
-            unsigned int filament_id;
-            std::unique_ptr<AABBMesh> surface;
-        };
-        std::vector<GeneratedPaint> generated;
-        BoundingBoxf3 region;
-        if (volume_index < m_generated_fragments.size()) {
-            for (const GeneratedFragment &fragment : m_generated_fragments[volume_index]) {
-                if (fragment.fragment_id >= m_fragment_mixed_filament_ids.size())
-                    continue;
-                const unsigned int filament = m_fragment_mixed_filament_ids[fragment.fragment_id];
-                if (filament == 0 || filament > unsigned(EnforcerBlockerType::ExtruderMax) || fragment.surface.indices.empty())
-                    continue;
-                for (const Vec3f &vertex : fragment.surface.vertices) {
-                    const Vec3d point = vertex.cast<double>();
-                    if (!region.defined) {
-                        region.min = point;
-                        region.max = point;
-                        region.defined = true;
-                    } else {
-                        region.min = region.min.cwiseMin(point);
-                        region.max = region.max.cwiseMax(point);
-                    }
-                }
-                generated.push_back({ filament, std::make_unique<AABBMesh>(fragment.surface) });
-            }
-        }
-        const bool has_base_paint = volume_index < m_stained_glass_base_paint_data.size();
-        if (has_base_paint || !generated.empty()) {
-            TriangleSelector selector(volume->mesh());
-            if (has_base_paint)
-                selector.deserialize(m_stained_glass_base_paint_data[volume_index], false);
-            else
-                selector.deserialize(volume->mmu_segmentation_facets.get_data(), false);
-            if (!generated.empty()) {
-                const float max_leaf_edge = std::clamp((6.5f - 4.0f * m_fragment_density) * 0.08f, 0.18f, 0.55f);
-                selector.paint_generated(region, max_leaf_edge, [&generated](const Vec3f &point) {
-                    constexpr double surface_epsilon_sq = 1e-8;
-                    double nearest = std::numeric_limits<double>::max();
-                    unsigned int filament = 0;
-                    for (const GeneratedPaint &paint : generated) {
-                        const double distance = paint.surface->squared_distance(point.cast<double>());
-                        if (distance < nearest) {
-                            nearest = distance;
-                            filament = paint.filament_id;
-                        }
-                    }
-                    return nearest <= surface_epsilon_sq ? EnforcerBlockerType(filament) : EnforcerBlockerType::NONE;
-                });
-            }
-            updated |= volume->mmu_segmentation_facets.set(selector);
-        }
-        ++volume_index;
-    }
-    if (updated) {
-        const ModelObjectPtrs &objects = wxGetApp().model().objects;
-        const size_t object_index = std::find(objects.begin(), objects.end(), object) - objects.begin();
-        wxGetApp().obj_list()->update_info_items(object_index);
-        wxGetApp().plater()->get_partplate_list().notify_instance_update(object_index, 0);
-        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
-        wxGetApp().plater()->notify_filament_usage_changed();
-    }
-    // Generated surfaces are CPU-only classifiers; release them immediately
-    // after their colours have been committed to regular MMU paint.
-    m_generated_fragments.clear();
-#endif
-
     Model& direct_model = wxGetApp().plater()->model();
     ModelObject* direct_object = find_masked_model_object(direct_model);
     if (direct_object == nullptr)
         return;
-    bool direct_updated = false;
-    size_t direct_volume_index = 0;
-    for (ModelVolume* volume : direct_object->volumes)
-        if (volume->is_model_part())
-            direct_updated |= bake_volume_voronoi_regions(*volume, direct_volume_index++);
-    if (direct_updated)
-        notify_mmu_paint_changed(*direct_object);
+    if (!bake_exact_tracery_partitions(*direct_object))
+        return;
+    notify_mmu_paint_changed(*direct_object);
     bool has_generated_regions = false;
     for (const auto& regions : m_generated_voronoi_regions)
         has_generated_regions = has_generated_regions || !regions.empty();
@@ -4342,159 +4294,10 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting()
     m_generated_voronoi_regions.clear();
     m_transition_recipe_targets.clear();
     m_generated_fragments.clear();
-    return;
-
-#if 0
-
-    Model& model = wxGetApp().plater()->model();
-    ModelObject* object = nullptr;
-    for (ModelObject* candidate : model.objects)
-        if (candidate->id() == m_mask_object_id) {
-            object = candidate;
-            break;
-        }
-    if (object == nullptr && m_mask_object_index >= 0 && size_t(m_mask_object_index) < model.objects.size())
-        object = model.objects[size_t(m_mask_object_index)];
-    if (object == nullptr)
-        return;
-
-    bool updated = false;
-    size_t volume_index = 0;
-    for (ModelVolume* volume : object->volumes) {
-        if (!volume->is_model_part())
-            continue;
-
-        const TriangleSelector::Tracery2DData tracery_data = build_tracery_2d_data(volume_index);
-        const bool has_base_paint = volume_index < m_stained_glass_base_paint_data.size();
-        size_t region_count = 0;
-        for (const TriangleSelector::TraceryFacet2DData& facet : tracery_data)
-            region_count += facet.regions.size();
-        if (m_display_diagnostics_active) {
-            const std::filesystem::path path = m_display_diagnostics_dir / "tracery_bake.tsv";
-            const bool new_file = !std::filesystem::exists(path);
-            std::ofstream output(path, std::ios::app | std::ios::binary);
-            if (output) {
-                if (new_file)
-                    output << "volume\tgenerated_fragments\tfacets\tregions\thas_base_paint\n";
-                const size_t fragment_count = volume_index < m_generated_fragments.size() ?
-                    m_generated_fragments[volume_index].size() : 0;
-                output << volume_index << '\t' << fragment_count << '\t' << tracery_data.size() << '\t'
-                       << region_count << '\t' << has_base_paint << '\n';
-            }
-
-            const std::filesystem::path plan_path = m_display_diagnostics_dir /
-                ("tracery_bake_volume_" + std::to_string(volume_index) + ".tsv");
-            const bool new_plan_file = !std::filesystem::exists(plan_path);
-            std::ofstream plan_output(plan_path, std::ios::app | std::ios::binary);
-            if (plan_output) {
-                if (new_plan_file)
-                    plan_output << "stage\tvolume\tfragment\tsource_facet\tcolor\tfaces_or_regions\tarea_2d\tdetail\n";
-
-                std::map<int, std::set<int>> input_colors_by_facet;
-                if (volume_index < m_generated_fragments.size()) {
-                    for (const GeneratedFragment& fragment : m_generated_fragments[volume_index]) {
-                        const unsigned int filament = fragment.fragment_id < m_fragment_mixed_filament_ids.size() ?
-                            m_fragment_mixed_filament_ids[fragment.fragment_id] : 0;
-                        plan_output << "input_fragment\t" << volume_index << '\t' << fragment.fragment_id << "\t-1\t"
-                                    << filament << '\t' << fragment.surface.indices.size() << "\t0\tsource_ids="
-                                    << fragment.source_facet_ids.size() << '\n';
-                        if (filament == 0 || filament > unsigned(EnforcerBlockerType::ExtruderMax) ||
-                            fragment.source_facet_ids.size() != fragment.surface.indices.size())
-                            continue;
-                        for (int source_facet_id : fragment.source_facet_ids)
-                            input_colors_by_facet[source_facet_id].insert(int(filament));
-                    }
-                }
-
-                std::map<int, std::set<int>> output_colors_by_facet;
-                for (const TriangleSelector::TraceryFacet2DData& facet : tracery_data) {
-                    std::map<int, std::pair<size_t, double>> colors;
-                    for (const TriangleSelector::TraceryRegion2D& region : facet.regions) {
-                        if (region.polygon.size() < 3)
-                            continue;
-                        const Vec2d first_edge = region.polygon[1] - region.polygon[0];
-                        const Vec2d second_edge = region.polygon[2] - region.polygon[0];
-                        auto& entry = colors[int(region.color)];
-                        ++entry.first;
-                        entry.second += std::abs(first_edge.x() * second_edge.y() - first_edge.y() * second_edge.x()) * 0.5;
-                        output_colors_by_facet[facet.source_facet_id].insert(int(region.color));
-                    }
-                    std::ostringstream color_summary;
-                    color_summary << std::setprecision(12);
-                    for (const auto& [color, values] : colors)
-                        color_summary << color << ':' << values.first << ':' << values.second << ';';
-                    plan_output << "plan_facet\t" << volume_index << "\t-1\t" << facet.source_facet_id
-                                << "\t0\t" << facet.regions.size() << "\t0\tcolors=" << color_summary.str() << '\n';
-                }
-                for (const auto& [source_facet_id, input_colors] : input_colors_by_facet)
-                    for (int color : input_colors)
-                        if (!output_colors_by_facet[source_facet_id].count(color))
-                            plan_output << "color_lost_after_projection\t" << volume_index << "\t-1\t"
-                                        << source_facet_id << '\t' << color << "\t0\t0\tno_output_region\n";
-            }
-        }
-        if (has_base_paint || !tracery_data.empty()) {
-            TriangleSelector selector(volume->mesh());
-            if (has_base_paint)
-                selector.deserialize(m_stained_glass_base_paint_data[volume_index], false);
-            else
-                selector.deserialize(volume->mmu_segmentation_facets.get_data(), false);
-
-            if (!tracery_data.empty()) {
-                const float max_leaf_edge = std::clamp((6.5f - 4.0f * m_fragment_density) * 0.08f, 0.18f, 0.55f);
-                std::shared_ptr<std::ofstream> selector_diagnostic;
-                std::function<void(const std::string&)> selector_trace;
-                if (m_display_diagnostics_active) {
-                    const std::filesystem::path path = m_display_diagnostics_dir /
-                        ("tracery_selector_volume_" + std::to_string(volume_index) + ".tsv");
-                    const bool new_file = !std::filesystem::exists(path);
-                    selector_diagnostic = std::make_shared<std::ofstream>(path, std::ios::app | std::ios::binary);
-                    if (*selector_diagnostic && new_file)
-                        *selector_diagnostic << "record\tdetail\n";
-                    selector_trace = [selector_diagnostic](const std::string& detail) {
-                        if (*selector_diagnostic)
-                            *selector_diagnostic << detail << '\n';
-                    };
-                }
-                selector.paint_all_tracery_regions(tracery_data, max_leaf_edge, selector_trace);
-            }
-            const auto selector_state_summary = [](const TriangleSelector& value) {
-                std::vector<indexed_triangle_set> facets_by_state;
-                value.get_facets(facets_by_state);
-                std::ostringstream summary;
-                for (size_t state = 0; state < facets_by_state.size(); ++state)
-                    if (!facets_by_state[state].indices.empty())
-                        summary << state << ':' << facets_by_state[state].indices.size() << ';';
-                return summary.str();
-            };
-            const std::string selector_before_set = m_display_diagnostics_active ? selector_state_summary(selector) : std::string{};
-            const bool volume_changed = volume->mmu_segmentation_facets.set(selector);
-            updated |= volume_changed;
-            if (m_display_diagnostics_active) {
-                TriangleSelector persisted_selector(volume->mesh());
-                persisted_selector.deserialize(volume->mmu_segmentation_facets.get_data(), false);
-                record_display_diagnostic_state("bake_mmu_write",
-                    "volume=" + std::to_string(volume_index) +
-                    ",set_changed=" + std::to_string(volume_changed) +
-                    ",selector_before_set=" + selector_before_set +
-                    ",selector_persisted=" + selector_state_summary(persisted_selector));
-            }
-        }
-        ++volume_index;
-    }
-    if (updated) {
-        const ModelObjectPtrs& objects = wxGetApp().model().objects;
-        const size_t object_index = std::find(objects.begin(), objects.end(), object) - objects.begin();
-        wxGetApp().obj_list()->update_info_items(object_index);
-        wxGetApp().plater()->get_partplate_list().notify_instance_update(object_index, 0);
-        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
-        wxGetApp().plater()->notify_filament_usage_changed();
-    }
-
-    // The plan is transient. Once its regions have been committed to the
-    // regular selector state, no generated geometry is retained.
-    m_generated_fragments.clear();
-#endif
+    const auto& objects = wxGetApp().model().objects;
+    const auto found = std::find(objects.begin(), objects.end(), direct_object);
+    if (found != objects.end())
+        wxGetApp().plater()->changed_mesh(int(found - objects.begin()));
 }
 
 TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(
@@ -4984,7 +4787,7 @@ void GLGizmoTracery::on_shutdown()
 void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
 {
     GLGizmoPainterBase::on_load(ar);
-    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength);
+    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength, m_mesh_restore_states);
     m_generated_fragments.clear();
     m_generated_voronoi_regions.clear();
     m_tracery_selections.clear();
@@ -4994,7 +4797,7 @@ void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
 
 void GLGizmoTracery::on_save(cereal::BinaryOutputArchive& ar) const
 {
-    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength);
+    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength, m_mesh_restore_states);
 }
 
 PainterGizmoType GLGizmoTracery::get_painter_type() const

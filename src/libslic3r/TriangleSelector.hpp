@@ -64,6 +64,7 @@ public:
         bool                 has_bounds   = false;
         EnforcerBlockerType  color       = EnforcerBlockerType::NONE;
         size_t               fragment_id = 0;
+        bool                 erase = false; // Explicit NONE painting for annotation restoration.
     };
 
     struct TraceryFacet2DData {
@@ -381,6 +382,13 @@ public:
         std::vector<int>     source_facet_ids;
     };
     StrictFacetsWithSources get_facets_strict_with_sources(EnforcerBlockerType state) const;
+    // Nonzero leaf geometry for exact remeshing of annotation boundaries.
+    struct PaintedLeaf {
+        std::array<Vec3f, 3> vertices;
+        int source_facet;
+        EnforcerBlockerType state;
+    };
+    std::vector<PaintedLeaf> painted_leaves(bool include_unpainted = false) const;
     // Get edges around the selected area by seed fill.
     std::vector<Vec2i32> get_seed_fill_contour() const;
 
