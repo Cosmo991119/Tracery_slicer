@@ -1222,7 +1222,7 @@ void MixedFilamentBatchDialog::build_mode_row()
 
     row->AddStretchSpacer();
 
-    // Segmented Start / Re-match tabs (80x28). Active tab is teal (#009688), inactive gray
+    // Segmented Start / Re-match tabs (80x28). Active tab is teal (#B69AE8), inactive gray
     // (#d9d9d9); set_match_buttons_state drives which is enabled based on match progress.
     auto make_tab = [this, panel = m_mode_row_panel](Button*& slot, const wxString& label) {
         auto* btn = new Button(panel, label);
@@ -1234,7 +1234,7 @@ void MixedFilamentBatchDialog::build_mode_row()
         // #FEFEFE (not #FFFFFF): dark map keeps it white; #FFFFFF maps to the dark bg.
         btn->SetBackgroundColor(StateColor(
             std::pair(wxColour("#DFDFDF"), static_cast<int>(StateColor::Disabled)),
-            std::pair(wxColour("#009688"), static_cast<int>(StateColor::Normal))));
+            std::pair(wxColour("#B69AE8"), static_cast<int>(StateColor::Normal))));
         btn->SetTextColor(StateColor(
             std::pair(wxColour("#6B6A6A"), static_cast<int>(StateColor::Disabled)),
             std::pair(wxColour("#FEFEFE"), static_cast<int>(StateColor::Normal))));
@@ -1763,7 +1763,7 @@ void MixedFilamentBatchDialog::build_footer()
     // #FEFEFE (not #FFFFFF): stays white in dark mode; #FFFFFF maps to the dark bg.
     m_btn_confirm->SetBackgroundColor(StateColor(
         std::pair(wxColour("#DFDFDF"), static_cast<int>(StateColor::Disabled)),
-        std::pair(wxColour("#019687"), static_cast<int>(StateColor::Normal))));
+        std::pair(wxColour("#B69AE8"), static_cast<int>(StateColor::Normal))));
     m_btn_confirm->SetTextColor(StateColor(
         std::pair(wxColour("#6B6A6A"), static_cast<int>(StateColor::Disabled)),
         std::pair(wxColour("#FEFEFE"), static_cast<int>(StateColor::Normal))));

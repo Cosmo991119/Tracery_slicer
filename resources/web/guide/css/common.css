@@ -73,7 +73,7 @@ body
 {
 	font-size:28px;
 	line-height: 28px;
-	color: #009688;
+	color: #7856AD;
 	padding: 0px 10mm;
 }
 
@@ -116,16 +116,16 @@ body
 	padding: 3mm 9mm;
 	font-size: 14px;
 	text-align: center;
-	background-color: #009688;
+	background-color: #B69AE8;
 	border-radius: 16px;
-	color: #fff;
+	color: #30213F;
 	cursor: pointer;
 	margin-left: 10px;
 }
 
 .NormalBtn:hover
 {
-	background-color:#4db6ac;
+	background-color:#C8B2EF;
 }
 
 .GrayBtn
@@ -169,22 +169,22 @@ body
 	padding: 2px 4mm;
 	font-size: 14px;
 	text-align: center;
-	background-color: #009688;
+	background-color: #B69AE8;
 	border-radius: 6px;
-	color: #fff;
+	color: #30213F;
 	cursor: pointer;
 	display: inline-block;
 }
 
 .SmallBtn_Green:hover
 {
-	background-color: #4db6ac;
+	background-color: #C8B2EF;
 }
 
 /*---HyperLink---*/
 .HyperLink
 {
-	color: #009688;
+	color: #7856AD;
 	text-decoration: underline;
     font-weight: 700;
 	cursor: pointer;
@@ -222,13 +222,13 @@ input[type="checkbox"]::before {
 	width: 0.8em;
 	height: 0.8em;
 	transform: scale(0);
-	box-shadow: inset 1em 1em #FFFFFF;
+	box-shadow: inset 1em 1em #30213F;
 	clip-path: polygon(7% 37%, 0 45%, 33% 78%, 100% 30%, 95% 21%, 33% 64%);
 }
 
 input[type="checkbox"]:checked {
-	border-color:#009688;
-	background-color:#009688;
+	border-color:#B69AE8;
+	background-color:#B69AE8;
 }
 
 input[type="checkbox"]:checked::before {

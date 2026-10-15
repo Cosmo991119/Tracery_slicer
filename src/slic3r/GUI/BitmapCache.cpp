@@ -345,6 +345,16 @@ wxBitmap* BitmapCache::load_svg(const std::string &bitmap_name, unsigned target_
     if (strstr(bitmap_name.c_str(), "toggle_on") != NULL && dark_mode) // ORCA only replace color of toggle button
         replaces["#009688"] = "#00675b";
 
+    // Recolor UI accent tokens only; do not change neutral surfaces or model colors.
+    // Small SVG marks use a deeper lilac on light surfaces for legibility.
+    const std::string accent = dark_mode ? "#B69AE8" : "#7856AD";
+    replaces["#009688"] = accent;
+    replaces["\"#009688\""] = "\"" + accent + "\"";
+    replaces["\"#0x00AE42\""] = "\"" + accent + "\"";
+    replaces["#00AE42"] = accent;
+    replaces["#00ae42"] = accent;
+    replaces["#52c7b8"] = "#C8B2EF";
+
     //if (!new_color.empty())
     //    replaces["\"#ED6B21\""] = "\"" + new_color + "\"";
 

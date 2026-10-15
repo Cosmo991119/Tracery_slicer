@@ -1032,7 +1032,7 @@ protected:
 
             if (isSelected) {
                 // teal background for the selected tab.
-                const wxColour selColor(0x00, 0x96, 0x88); // #009688
+                const wxColour selColor(0x00, 0x96, 0x88); // #B69AE8
                 dc.SetPen(wxPen(selColor, 1));
                 dc.SetBrush(wxBrush(selColor));
                 // Round only the outer top corner(s) that meet the parent card's
@@ -3413,7 +3413,7 @@ Sidebar::Sidebar(Plater *parent)
             e.Skip();
             return;
         }
-        p->m_search_bar->SetBorderColor(wxColour("#009688"));
+        p->m_search_bar->SetBorderColor(wxColour("#B69AE8"));
         wxPoint pos = this->p->m_search_bar->ClientToScreen(wxPoint(0, 0));
 #ifndef __WXGTK__
         pos.y += this->p->m_search_bar->GetRect().height;

@@ -6,18 +6,18 @@
 .BlockBanner
 {
 	padding: 0px;
-	border-bottom:#009688 1px solid;
+	border-bottom:#B69AE8 1px solid;
 	width: 100%;
 }
 
 .BlockBanner a
 {
 	display: inline-block;
-	background-color:#009688;
+	background-color:#B69AE8;
 	line-height: 40px;
 	height: 40px;
 	padding: 0px 24px;
-	color: #fff;
+	color: #30213F;
 }
 
 .PrinterArea
@@ -126,7 +126,7 @@
   
   .searchTerm {
 	width: 100%;
-	border: 3px solid #009688;
+	border: 3px solid #B69AE8;
 	/*border-right: none;*/
 	padding: 5px;
 	height: 20px;
@@ -136,7 +136,7 @@
   }
   
   .searchTerm:focus{
-	color: #009688;
+	color: #7856AD;
   }
   
   /*Resize the wrap to see the search bar change!*/

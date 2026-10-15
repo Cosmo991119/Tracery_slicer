@@ -1,5 +1,6 @@
 #include "SideButton.hpp"
 #include "Label.hpp"
+#include "../TraceryTheme.hpp"
 
 #include <wx/dcclient.h>
 #include <wx/dcgraph.h>
@@ -29,9 +30,9 @@ SideButton::SideButton(wxWindow* parent, wxString text, wxString icon, long stly
 
 
     border_color.append(0x6B6B6B, StateColor::Disabled);
-    border_color.append(wxColour(0, 137, 123), StateColor::Pressed);
-    border_color.append(wxColour(38, 166, 154), StateColor::Hovered);
-    border_color.append(0x009688, StateColor::Normal);
+    border_color.append(wxColour(160, 131, 212), StateColor::Pressed);
+    border_color.append(wxColour(200, 178, 239), StateColor::Hovered);
+    border_color.append(0xB69AE8, StateColor::Normal);
     border_color.setTakeFocusedAsHovered(false);
 
     text_color.append(0xACACAC, StateColor::Disabled);
@@ -40,9 +41,9 @@ SideButton::SideButton(wxWindow* parent, wxString text, wxString icon, long stly
     text_color.append(0xFEFEFE, StateColor::Normal);
 
     background_color.append(0x6B6B6B, StateColor::Disabled);
-    background_color.append(wxColour(0, 137, 123), StateColor::Pressed);
-    background_color.append(wxColour(38, 166, 154), StateColor::Hovered);
-    background_color.append(0x009688, StateColor::Normal);
+    background_color.append(wxColour(160, 131, 212), StateColor::Pressed);
+    background_color.append(wxColour(200, 178, 239), StateColor::Hovered);
+    background_color.append(0xB69AE8, StateColor::Normal);
     background_color.setTakeFocusedAsHovered(false);
 
     SetBottomColour(wxColour("#3B4446"));
@@ -282,7 +283,14 @@ void SideButton::dorender(wxDC& dc, wxDC& text_dc)
         pt.y += (rcContent.height - textSize.y) / 2;
 
         text_dc.SetFont(GetFont());
-        text_dc.SetTextForeground(text_color.colorForStates(states));
+        wxColour foreground = text_color.colorForStates(states);
+        const wxColour background = background_color.colorForStates(states);
+        const unsigned rgb = (background.Red() << 16) | (background.Green() << 8) | background.Blue();
+        const unsigned fallback = (foreground.Red() << 16) | (foreground.Green() << 8) | foreground.Blue();
+        const unsigned text_rgb = Slic3r::GUI::TraceryTheme::button_text(rgb, fallback);
+        if (text_rgb != fallback)
+            foreground = wxColour((text_rgb >> 16) & 255, (text_rgb >> 8) & 255, text_rgb & 255, foreground.Alpha());
+        text_dc.SetTextForeground(foreground);
         text_dc.DrawText(text, pt);
     }
 }

@@ -94,7 +94,7 @@ private:
         float frac = (float)(m_value - m_min) / (float)std::max(1, m_max - m_min);
         int active_w = std::max(0, (int)(track_w * frac));
         if (active_w > 0) {
-            dc.SetBrush(wxBrush(StateColor::darkModeColorFor(wxColour("#009688"))));
+            dc.SetBrush(wxBrush(StateColor::darkModeColorFor(wxColour("#B69AE8"))));
             dc.DrawRoundedRectangle(track_x, track_y, active_w, track_h, FromDIP(2));
         }
 
@@ -102,7 +102,7 @@ private:
         thumb_x = std::clamp(thumb_x, track_x - thumb_d/2, track_x + track_w - thumb_d/2);
         int thumb_y = (sz.y - thumb_d) / 2;
         dc.SetBrush(wxBrush(wxColour("#FFFFFF")));
-        dc.SetPen(wxPen(StateColor::darkModeColorFor(wxColour("#009688")), FromDIP(1)));
+        dc.SetPen(wxPen(StateColor::darkModeColorFor(wxColour("#B69AE8")), FromDIP(1)));
         dc.DrawEllipse(thumb_x, thumb_y, thumb_d, thumb_d);
     }
 
@@ -272,7 +272,7 @@ void MixedFilamentDialog::build_ui()
         // Unselected: transparent (no bg) — container's #F8F7F7 shows through
         auto seg_bg  = StateColor();
         auto seg_fg  = StateColor(std::pair(wxColour("#4A4A4A"), (int)StateColor::Normal));
-        auto sel_bg  = StateColor(std::pair(wxColour("#009688"), (int)StateColor::Normal));
+        auto sel_bg  = StateColor(std::pair(wxColour("#B69AE8"), (int)StateColor::Normal));
         auto sel_fg  = StateColor(std::pair(wxColour("#FEFEFE"), (int)StateColor::Normal));
 
         for (int i = 0; i < 4; ++i) {
@@ -465,7 +465,7 @@ void MixedFilamentDialog::build_ui()
             dc.SetPen(*wxTRANSPARENT_PEN);
             dc.DrawRectangle(0, 0, sz.x, sz.y);
             dc.SetBrush(*wxTRANSPARENT_BRUSH);
-            dc.SetPen(wxPen(m_match_hex_error ? StateColor::darkModeColorFor(wxColour("#FF0000")) : StateColor::darkModeColorFor(wxColour("#009688")), 1));
+            dc.SetPen(wxPen(m_match_hex_error ? StateColor::darkModeColorFor(wxColour("#FF0000")) : StateColor::darkModeColorFor(wxColour("#B69AE8")), 1));
             dc.DrawRectangle(0, 0, sz.x, sz.y);
         });
         auto* hex_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -1183,7 +1183,7 @@ void MixedFilamentDialog::build_ui()
         m_btn_confirm->SetBorderWidth(0);
         m_btn_confirm->SetBackgroundColor(StateColor(
             std::pair(wxColour("#DFDFDF"), (int)StateColor::Disabled),
-            std::pair(wxColour("#019687"), (int)StateColor::Normal)));
+            std::pair(wxColour("#B69AE8"), (int)StateColor::Normal)));
         m_btn_confirm->SetTextColor(StateColor(
             std::pair(wxColour("#6B6A6A"), (int)StateColor::Disabled),
             std::pair(wxColour("#FEFEFE"), (int)StateColor::Normal)));

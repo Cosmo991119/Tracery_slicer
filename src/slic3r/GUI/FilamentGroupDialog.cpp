@@ -318,15 +318,11 @@ FilamentGroupDialog::FilamentGroupDialog(wxWindow *parent)
 
     auto *dlg_btns = new DialogButtons(this, {"Cancel", "Confirm"});
     m_confirm_button = dlg_btns->GetCONFIRM();
-    // Figma dark spec (node 29771:88711) keeps the Confirm button at the bright ORCA
-    // teal instead of the app's muted dark accent. StateColor dark-maps #009688 ->
-    // #00675b for every Button, so to brighten only this dialog we override the fill
-    // with teals the dark map does not contain (perceptually the Figma #009688). This
-    // modal is short-lived, so the default style is never re-applied over it.
+    // Keep the same Tracery accent states in this dialog's dark-mode override.
     if (is_dark) {
-        const wxColour teal(0, 150, 137);          // ~#009688, not a dark-map key
-        const wxColour teal_hover(0, 170, 155);    // hover, slightly lighter
-        const wxColour teal_pressed(0, 128, 116);  // pressed, slightly darker
+        const wxColour teal("#B69AE8");
+        const wxColour teal_hover("#C8B2EF");
+        const wxColour teal_pressed("#A083D4");
         m_confirm_button->SetBackgroundColor(StateColor(
             std::make_pair(teal,                (int) StateColor::NotHovered),
             std::make_pair(wxColour("#DFDFDF"), (int) StateColor::Disabled),

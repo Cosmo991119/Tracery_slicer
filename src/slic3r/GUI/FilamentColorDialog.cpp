@@ -366,7 +366,7 @@ private:
         {
             const int middleHeight = std::max(0, size.GetHeight() - selectedBorderWidth * 2);
             dc.SetPen(*wxTRANSPARENT_PEN);
-            dc.SetBrush(wxBrush(wxColour("#019687")));
+            dc.SetBrush(wxBrush(wxColour("#B69AE8")));
             dc.DrawRectangle(0, 0, size.GetWidth(), selectedBorderWidth);
             dc.DrawRectangle(0, selectedBorderWidth, selectedBorderWidth, middleHeight);
             dc.DrawRectangle(size.GetWidth() - selectedBorderWidth, selectedBorderWidth,
@@ -656,8 +656,8 @@ void FilamentColorDialog::BuildUi()
     ok->SetMinSize(buttonSize);
     ok->SetSize(buttonSize);
     ok->SetCornerRadius(FromDIP(4));
-    ok->SetBackgroundColorNormal(wxColour("#019687"));
-    ok->SetBorderColorNormal(wxColour("#019687"));
+    ok->SetBackgroundColorNormal(wxColour("#B69AE8"));
+    ok->SetBorderColorNormal(wxColour("#B69AE8"));
     ok->SetTextColorNormal(wxColour("#FFFFFF"));
     ok->SetFont(DialogFont(wxFONTWEIGHT_MEDIUM));
 

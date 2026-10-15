@@ -1,5 +1,6 @@
 #include "Button.hpp"
 #include "Label.hpp"
+#include "../TraceryTheme.hpp"
 
 #include <wx/dcgraph.h>
 
@@ -27,8 +28,8 @@ Button::Button()
 {
     background_color = StateColor(
         std::make_pair(0xF0F0F1, (int) StateColor::Disabled),
-        std::make_pair(0x52c7b8, (int) StateColor::Hovered | StateColor::Checked),
-        std::make_pair(0x009688, (int) StateColor::Checked),
+        std::make_pair(0xC8B2EF, (int) StateColor::Hovered | StateColor::Checked),
+        std::make_pair(0xB69AE8, (int) StateColor::Checked),
         std::make_pair(*wxLIGHT_GREY, (int) StateColor::Hovered), 
         std::make_pair(*wxWHITE, (int) StateColor::Normal));
     text_color       = StateColor(
@@ -153,9 +154,9 @@ void Button::SetCenter(bool isCenter)
 
 //                           Background                                             Foreground                       Border on focus
 // Button Colors             0-Disabled 1-Pressed  2-Hover    3-Normal   4-Enabled  5-Disabled 6-Normal   7-Hover    8-Dark     9-Light
-wxString btn_regular[10]  = {"#DFDFDF", "#DFDFDF", "#D4D4D4", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#262E30", "#262E30", "#009688", "#009688"};
-wxString btn_confirm[10]  = {"#DFDFDF", "#009688", "#26A69A", "#009688", "#009688", "#6B6A6A", "#FEFEFE", "#FEFEFE", "#26A69A", "#00FFD4"};
-wxString btn_alert[10]    = {"#DFDFDF", "#DFDFDF", "#E14747", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#262E30", "#FFFFFD", "#009688", "#009688"};
+wxString btn_regular[10]  = {"#DFDFDF", "#DFDFDF", "#D4D4D4", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#262E30", "#262E30", "#B69AE8", "#B69AE8"};
+wxString btn_confirm[10]  = {"#DFDFDF", "#A083D4", "#C8B2EF", "#B69AE8", "#B69AE8", "#6B6A6A", "#30213F", "#30213F", "#B69AE8", "#B69AE8"};
+wxString btn_alert[10]    = {"#DFDFDF", "#DFDFDF", "#E14747", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#262E30", "#FFFFFD", "#B69AE8", "#B69AE8"};
 wxString btn_disabled[10] = {"#DFDFDF", "#DFDFDF", "#DFDFDF", "#DFDFDF", "#DFDFDF", "#6B6A6A", "#6B6A6A", "#262E30", "#DFDFDF", "#DFDFDF"};
 
 void Button::SetStyle(const ButtonStyle style, const ButtonType type)
@@ -303,7 +304,14 @@ void Button::render(wxDC& dc)
         if (pt.x + textSize.width > size.x)
             text = wxControl::Ellipsize(text, dc, wxELLIPSIZE_END, size.x - pt.x);
         pt.y += (rcContent.height - textSize.height) / 2;
-        dc.SetTextForeground(text_color.colorForStates(states));
+        wxColour foreground = text_color.colorForStates(states);
+        const wxColour background = background_color.colorForStates(states);
+        const unsigned rgb = (background.Red() << 16) | (background.Green() << 8) | background.Blue();
+        const unsigned fallback = (foreground.Red() << 16) | (foreground.Green() << 8) | foreground.Blue();
+        const unsigned text_rgb = Slic3r::GUI::TraceryTheme::button_text(rgb, fallback);
+        if (text_rgb != fallback)
+            foreground = wxColour((text_rgb >> 16) & 255, (text_rgb >> 8) & 255, text_rgb & 255, foreground.Alpha());
+        dc.SetTextForeground(foreground);
 #if 0
         dc.SetBrush(*wxLIGHT_GREY);
         dc.SetPen(wxPen(*wxLIGHT_GREY));
