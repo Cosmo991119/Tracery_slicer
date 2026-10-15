@@ -2,7 +2,18 @@
 
 `tracery-master.png` is the approved flower mosaic artwork. Preserve the petal
 silhouette and adjoining colored fragments without adding outlines between them.
-The light outer margin is part of this approved raster; exports do not redraw it.
+The outer margin is transparent. Preserve its alpha in every export, including
+the grayscale variant; do not flatten it onto white or add an outer border.
+
+The white matte was removed with the built-in image generation editor using this
+edit brief: remove only the white/off-white exterior and white edge fringe;
+preserve the flower mosaic, cyan ring, navy tile, composition and proportions;
+output a transparent background without a border, shadow or added highlights.
+An additional alpha-repair edit filled the accidental transparent holes inside
+the navy tile while retaining transparency outside its silhouette.
+The exporter validates the solid tile interior (alpha at least 250/255), allowing
+small alpha variation but rejecting holes. Only the outer silhouette band is
+excluded from that check for antialiasing.
 
 Regenerate with Python and Pillow 11.3.0:
 
