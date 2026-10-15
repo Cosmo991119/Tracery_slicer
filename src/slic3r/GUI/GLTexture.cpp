@@ -5,6 +5,7 @@
 
 #include "libslic3r/libslic3r.h"
 #include "GLTexture.hpp"
+#include "BitmapCache.hpp"
 
 #include "3DScene.hpp"
 #include "OpenGLManager.hpp"
@@ -33,6 +34,19 @@
 #include <wx/dcgraph.h>
 namespace Slic3r {
 namespace GUI {
+
+// UI SVGs also reach OpenGL directly, bypassing the wx bitmap cache.
+// Restrict recoloring to bundled UI icons; preserve bed/model artwork.
+static NSVGimage* parse_ui_svg(const std::string& filename)
+{
+    if (boost::filesystem::path(filename).parent_path() != boost::filesystem::path(Slic3r::resources_dir()) / "images")
+        return nsvgParseFromFile(filename.c_str(), "px", 96.0f);
+
+    const std::map<std::string, std::string> accents{
+        {"#009688", "#B69AE8"}, {"#00AE42", "#B69AE8"}, {"#00ae42", "#B69AE8"},
+        {"#00675b", "#7856AD"}, {"#00675B", "#7856AD"}, {"#52c7b8", "#C8B2EF"}};
+    return BitmapCache::nsvgParseFromFileWithReplace(filename.c_str(), "px", 96.0f, accents);
+}
 
 void GLTexture::Compressor::reset()
 {
@@ -298,7 +312,7 @@ bool GLTexture::load_from_svg_files_as_sprites_array(const std::vector<std::stri
         if (!boost::algorithm::iends_with(filename, ".svg"))
             continue;
 
-        NSVGimage* image = nsvgParseFromFile(filename.c_str(), "px", 96.0f);
+        NSVGimage* image = parse_ui_svg(filename);
         if (image == nullptr)
             continue;
 
@@ -919,7 +933,7 @@ bool GLTexture::load_from_svg(const std::string& filename, bool use_mipmaps, boo
 {
     const bool compression_enabled = compress && OpenGLManager::are_compressed_textures_supported();
 
-    NSVGimage* image = nsvgParseFromFile(filename.c_str(), "px", 96.0f);
+    NSVGimage* image = parse_ui_svg(filename);
     if (image == nullptr) {
         reset();
         return false;

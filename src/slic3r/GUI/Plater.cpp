@@ -1031,8 +1031,8 @@ protected:
             int tabWidth = GetTabWidth(textWidth);
 
             if (isSelected) {
-                // teal background for the selected tab.
-                const wxColour selColor(0x00, 0x96, 0x88); // #B69AE8
+                // Lilac background for the selected nozzle tab.
+                const wxColour selColor("#B69AE8");
                 dc.SetPen(wxPen(selColor, 1));
                 dc.SetBrush(wxBrush(selColor));
                 // Round only the outer top corner(s) that meet the parent card's
@@ -1161,14 +1161,14 @@ private:
             m_selectedTabColor  = wxColour(255, 255, 255);
             m_textColor         = wxColour(107, 107, 107); // #6B6B6B: match the process flow toggle's unselected grey
             m_dividerColor      = wxColour(240, 240, 240);
-            m_selectedTextColor = wxColour(255, 255, 255); // white text on the teal selected tab
+            m_selectedTextColor = wxColour("#30213F"); // readable text on lilac
         } else {
             m_bgColor           = wxColour(45, 45, 49);
             m_borderColor       = wxColour(76, 76, 85);
             m_selectedTabColor  = wxColour(45, 45, 49);
             m_textColor         = wxColour(107, 107, 107); // #6B6B6B: match the process flow toggle's unselected grey
             m_dividerColor      = wxColour(51, 51, 55);
-            m_selectedTextColor = wxColour(255, 255, 255);
+            m_selectedTextColor = wxColour("#30213F");
         }
     }
 

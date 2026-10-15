@@ -15,6 +15,14 @@
 <script type="text/javascript" src="11.js"></script>		
 </head>
 <body onLoad="OnInit()">
+<!-- Retint the original globe without changing its silhouette or alpha. -->
+<svg width="0" height="0" aria-hidden="true" style="position:absolute">
+  <defs>
+    <filter id="tracery-earth-lilac" color-interpolation-filters="sRGB">
+      <feColorMatrix type="matrix" values="0 1.213333 0 0 0  0 1.026667 0 0 0  0 1.546667 0 0 0  0 0 0 1 0"/>
+    </filter>
+  </defs>
+</svg>
 <div id="Title">
 	<div class="trans" tid="t47">Please select your login region</div>
 </div>

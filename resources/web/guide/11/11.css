@@ -11,6 +11,7 @@
 
 #EarthIcon img
 {
+	filter: url(#tracery-earth-lilac);
 	width: 40%;
 	min-width: 100px;
 }
