@@ -4413,6 +4413,8 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    // Legacy project compatibility only. Tracery now derives the material mode
+    // from the black filament preset actually referenced by the current plate.
     def = this->add("tracery_black_material_mode", coInt);
     def->label = L("Stained-glass black material");
     def->tooltip = L("0: detect Full Spectrum preset; 1: opaque black, use CMY; 2: translucent black, use CMYK.");

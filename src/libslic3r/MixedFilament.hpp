@@ -425,6 +425,9 @@ public:
     // Return the display colours of all enabled mixed filaments (in order).
     std::vector<std::string> display_colors() const;
     void set_display_context(const MixedFilamentDisplayContext &context);
+    // Evaluate without allocating a slot; uses exactly the batch-add display pipeline.
+    std::string preview_custom_filament(const MixedFilamentBatchEntry& entry,
+                                       const std::vector<std::string>& filament_colours) const;
     // Recompute every mixed filament's display_color from its recipe against the
     // given physical colours (also refreshes the internal display context).
     void refresh_display_colors(const std::vector<std::string> &filament_colours);

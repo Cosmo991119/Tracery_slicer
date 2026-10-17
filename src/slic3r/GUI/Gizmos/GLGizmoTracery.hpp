@@ -204,6 +204,7 @@ private:
         std::map<int, DynamicPrintConfig> plate_material_updates;
         std::unique_ptr<Model> model;
         size_t selected_object_index = 0;
+        size_t approximate_colour_count = 0;
         EnforcerBlockerStateMap conversion = tracery_identity_material_map();
         std::vector<PreparedTraceryVolume> partitions;
         std::vector<ColorRGBA> preview_colours;

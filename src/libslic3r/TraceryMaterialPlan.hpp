@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <limits>
 #include <set>
 #include <vector>
@@ -10,6 +11,25 @@
 namespace Slic3r {
 
 enum class TraceryMaterialMode { CMYW, CMY, CMYK };
+
+constexpr double TRACERY_VISUAL_REUSE_DELTA_E = 2.0;
+
+// Distances must use final preview colours from eligible existing/pending slots.
+// Return distances.size() if none qualify; when full, use the closest valid slot.
+// Stable ties preserve existing references across repeated applications.
+inline size_t tracery_preview_slot(const std::vector<double>& distances, bool can_add)
+{
+    size_t best = distances.size();
+    double nearest = can_add ? TRACERY_VISUAL_REUSE_DELTA_E : std::numeric_limits<double>::infinity();
+    for (size_t i = 0; i < distances.size(); ++i) {
+        if (std::isfinite(distances[i]) && distances[i] >= 0.0 && distances[i] <= nearest &&
+            (best == distances.size() || distances[i] < nearest)) {
+            best = i;
+            nearest = distances[i];
+        }
+    }
+    return best;
+}
 
 // Physical slots are one-based. Merely listing a black filament must never
 // select CMY/CMYK: only references from the current plate count.

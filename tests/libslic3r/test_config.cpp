@@ -287,7 +287,7 @@ TEST_CASE("DynamicPrintConfig keeps ordinary filament types unchanged", "[Config
     CHECK(display_type == "PLA");
 }
 
-TEST_CASE("Stained-glass black material override survives config serialization", "[TraceryMaterialsConfig]")
+TEST_CASE("Legacy stained-glass black setting remains readable for project compatibility", "[TraceryMaterialsConfig]")
 {
     for (int mode : {0, 1, 2}) {
         Slic3r::DynamicPrintConfig original;

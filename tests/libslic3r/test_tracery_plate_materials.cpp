@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include "libslic3r/Model.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TraceryPlateMaterials.hpp"
 #include "libslic3r/TraceryPartition.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
@@ -249,4 +250,115 @@ TEST_CASE("Inherited materials become plate-local and converted paint survives 3
     CHECK(restored.objects[1]->config.extruder() == 7);
     REQUIRE(restored.objects[1]->config.has("support_filament"));
     CHECK(restored.objects[1]->config.opt_int("support_filament") == 9);
+}
+
+TEST_CASE("Legacy manual black settings cannot override the material used by the plate", "[TraceryPlate]")
+{
+    PresetBundle bundle;
+    bundle.filaments.load_preset("", "Opaque PLA", DynamicPrintConfig{}, false);
+    bundle.filaments.load_preset("", "Snapmaker PLA Full Spectrum", DynamicPrintConfig{}, false);
+    bundle.filament_presets = {"Opaque PLA", "Snapmaker PLA Full Spectrum"};
+    for (int legacy : {0, 1, 2}) {
+        bundle.project_config.set_deserialize_strict("tracery_black_material_mode", std::to_string(legacy));
+        CHECK(tracery_plate_material_mode(bundle, 1) == TraceryMaterialMode::CMY);
+        CHECK(tracery_plate_material_mode(bundle, 2) == TraceryMaterialMode::CMYK);
+        CHECK(tracery_plate_material_mode(bundle, 0) == TraceryMaterialMode::CMYW);
+    }
+}
+
+TEST_CASE("Black material category follows preset ancestry and slot changes", "[TraceryPlate]")
+{
+    PresetBundle bundle;
+    auto add = [&](const std::string& name, const std::string& parent) {
+        DynamicPrintConfig config;
+        Preset::inherits(config) = parent;
+        bundle.filaments.load_preset("", name, config, false);
+    };
+    add("Snapmaker PLA Full Spectrum", "");
+    add("Derived glass material", "Snapmaker PLA Full Spectrum");
+    add("My black material", "Derived glass material");
+    add("Opaque PLA", "");
+    add("Cycle A", "Cycle B");
+    add("Cycle B", "Cycle A");
+    bundle.filament_presets = {"My black material", "Missing preset", "Cycle A", "Opaque PLA", "Missing Full Spectrum"};
+    CHECK(tracery_plate_material_mode(bundle, 1) == TraceryMaterialMode::CMYK);
+    CHECK(tracery_plate_material_mode(bundle, 2) == TraceryMaterialMode::CMY);
+    CHECK(tracery_plate_material_mode(bundle, 3) == TraceryMaterialMode::CMY);
+    CHECK(tracery_plate_material_mode(bundle, 4) == TraceryMaterialMode::CMY);
+    CHECK(tracery_plate_material_mode(bundle, 5) == TraceryMaterialMode::CMY);
+    CHECK(tracery_plate_material_mode(bundle, 0) == TraceryMaterialMode::CMYW);
+    CHECK_FALSE(tracery_filament_is_full_spectrum(bundle, 6));
+    bundle.filament_presets[0] = "Opaque PLA";
+    CHECK(tracery_plate_material_mode(bundle, 1) == TraceryMaterialMode::CMY);
+    bundle.filament_presets[0] = "Snapmaker PLA Full Spectrum";
+    CHECK(tracery_plate_material_mode(bundle, 1) == TraceryMaterialMode::CMYK);
+}
+
+TEST_CASE("Different glass ratios reuse the colour actually displayed after layer allocation", "[TraceryPlate]")
+{
+    MixedFilamentManager manager;
+    MixedFilamentDisplayContext context;
+    context.preview_settings.local_z_mode = true;
+    context.preview_settings.preferred_a_height = 0.1;
+    context.preview_settings.preferred_b_height = 0.1;
+    manager.set_display_context(context);
+    const std::vector<std::string> colours{"#FF00FF", "#FFFF00"};
+    MixedFilamentBatchEntry first;
+    first.component_a = 1;
+    first.component_b = 2;
+    first.mix_b_percent = 45;
+    first.distribution_mode = int(MixedFilament::LayerCycle);
+    first.gradient_component_ids = "1/2";
+    first.gradient_component_weights = "55/45";
+    first.display_color = "#123456"; // Nominal prediction must not determine reuse.
+    auto second = first;
+    second.mix_b_percent = 53;
+    second.gradient_component_weights = "47/53";
+    second.display_color = "#654321";
+    const auto final_first = manager.preview_custom_filament(first, colours);
+    const auto final_second = manager.preview_custom_filament(second, colours);
+    CHECK(final_first == final_second);
+    CHECK(manager.mixed_filaments().empty()); // Planning cannot change shared slots.
+    manager.add_batch_custom_filaments({first, second}, colours);
+    REQUIRE(manager.mixed_filaments().size() == 2);
+    CHECK(final_first == manager.mixed_filaments()[0].display_color);
+    CHECK(final_second == manager.mixed_filaments()[1].display_color);
+    CHECK(tracery_preview_slot({final_first == final_second ? 0.0 : 100.0}, true) == 0);
+}
+
+TEST_CASE("Previewing a full palette leaves shared recipes and stable identities unchanged", "[TraceryPlate]")
+{
+    MixedFilamentManager manager;
+    MixedFilamentDisplayContext context;
+    context.preview_settings.local_z_mode = true;
+    context.preview_settings.preferred_a_height = 0.1;
+    context.preview_settings.preferred_b_height = 0.1;
+    manager.set_display_context(context);
+    const std::vector<std::string> colours{"#FF00FF", "#FFFF00", "#00FFFF"};
+    MixedFilamentBatchEntry entry;
+    entry.component_a = 1;
+    entry.component_b = 2;
+    entry.mix_b_percent = 45;
+    entry.distribution_mode = int(MixedFilament::LayerCycle);
+    manager.add_batch_custom_filaments(std::vector<MixedFilamentBatchEntry>(MAXIMUM_FILAMENT_NUMBER - colours.size(), entry), colours);
+    REQUIRE(manager.total_filaments(colours.size()) == MAXIMUM_FILAMENT_NUMBER);
+    const auto original = manager.mixed_filaments();
+    const auto original_colours = manager.display_colors();
+    // Repeated strokes still resolve to the existing displayed colour when full.
+    for (int percent : {30, 38, 45, 53, 60, 70}) {
+        entry.mix_b_percent = percent;
+        const auto preview = manager.preview_custom_filament(entry, colours);
+        REQUIRE(preview == original_colours.front());
+        CHECK(tracery_preview_slot({preview == original_colours.front() ? 0.0 : 100.0}, false) == 0);
+    }
+    CHECK(manager.mixed_filaments() == original);
+    CHECK(manager.display_colors() == original_colours);
+    // Three-component previews also use the same normalized sequence as insertion.
+    MixedFilamentManager fresh;
+    entry.gradient_component_ids = "3/1/2";
+    entry.gradient_component_weights = "30/35/35";
+    const auto preview = fresh.preview_custom_filament(entry, colours);
+    fresh.add_batch_custom_filaments({entry}, colours);
+    REQUIRE(fresh.mixed_filaments().size() == 1);
+    CHECK(preview == fresh.mixed_filaments().front().display_color);
 }

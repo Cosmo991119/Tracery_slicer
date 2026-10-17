@@ -51,3 +51,18 @@ TEST_CASE("Unused palette slots do not cost heads but used white and black confl
     REQUIRE_FALSE(tracery_fits_four_heads({8, 9}, {2, 4, 7}));
     REQUIRE_FALSE(tracery_fits_four_heads({0}, {2, 4, 7}));
 }
+
+TEST_CASE("Glass reuses the closest final preview regardless of recipe percentages", "[TraceryMaterials]")
+{
+    // Existing and newly planned slots are searched together. A closer planned
+    // slot wins over the first existing slot inside the reuse tolerance.
+    CHECK(tracery_preview_slot({1.8, 0.3, 8.0}, true) == 1);
+    CHECK(tracery_preview_slot({0.0, 0.0}, true) == 0);
+    CHECK(tracery_preview_slot({3.0, 8.0}, true) == 2); // create a new colour
+}
+
+TEST_CASE("A full glass palette falls back to the nearest eligible colour", "[TraceryMaterials]")
+{
+    CHECK(tracery_preview_slot({8.0, 3.0, 12.0}, false) == 1);
+    CHECK(tracery_preview_slot({}, false) == 0);
+}

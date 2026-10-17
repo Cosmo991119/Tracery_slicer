@@ -12,6 +12,8 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TraceryMaterialPlan.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
+#include "slic3r/GUI/NotificationManager.hpp"
+#include "slic3r/GUI/format.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 
 #include "libslic3r/AABBMesh.hpp"
@@ -326,24 +328,6 @@ std::vector<unsigned int> tracery_plate_materials(
             if (item.type == CustomGCode::Type::ToolChange && item.extruder > 0)
                 add(unsigned(item.extruder));
     return {used.begin(), used.end()};
-}
-
-bool tracery_black_is_full_spectrum(unsigned int id)
-{
-    using namespace Slic3r;
-    auto* bundle = Slic3r::GUI::wxGetApp().preset_bundle;
-    if (id == 0 || id > bundle->filament_presets.size())
-        return false;
-    const Preset* preset = bundle->filaments.find_preset(bundle->filament_presets[id - 1]);
-    std::set<std::string> visited;
-    while (preset && visited.insert(preset->name).second) {
-        // Recognise the selected Full Spectrum family, including derived
-        // presets. Transparency of arbitrary black filaments is never guessed.
-        if (preset->name.find("Full Spectrum") != std::string::npos)
-            return true;
-        preset = preset->inherits().empty() ? nullptr : bundle->filaments.find_preset(preset->inherits());
-    }
-    return false;
 }
 
 struct TraceryEditorRecipe {
@@ -993,40 +977,6 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         generate_paint_plan();
         apply_stained_glass_colors();
         m_parent.set_as_dirty();
-    }
-
-    ImGui::Separator();
-    if (auto* bundle = wxGetApp().preset_bundle) {
-        auto* option = bundle->project_config.option<ConfigOptionInt>("tracery_black_material_mode", true);
-        int mode = std::clamp(option->value, 0, 2);
-        const std::array<std::string, 3> labels = {into_u8(_L("Auto (Full Spectrum preset)")),
-            into_u8(_L("Opaque black: CMY only")), into_u8(_L("Translucent black: CMYK"))};
-        m_imgui->text(_L("Black material"));
-        if (ImGui::BeginCombo("##tracery_black_material", labels[mode].c_str())) {
-            for (int i = 0; i < 3; ++i) {
-                if (ImGui::Selectable(labels[i].c_str(), mode == i)) {
-                    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Change stained-glass materials", UndoRedo::SnapshotType::GizmoAction);
-                    option->value = i;
-                    wxGetApp().plater()->update_project_dirty_from_presets();
-                    m_regeneration_requested = true;
-                    m_incremental_generation = false;
-                    m_pending_selection_mode = m_paint_mode;
-                    generate_paint_plan();
-                    if (m_fragment_colors.empty()) {
-                        try {
-                            auto plan = prepare_stained_glass_apply(true);
-                            if (plan) commit_stained_glass_apply(std::move(*plan));
-                        } catch (const std::exception& error) {
-                            wxMessageBox(from_u8(error.what()), _L("Stained glass"), wxOK | wxICON_ERROR);
-                        }
-                    } else apply_stained_glass_colors();
-                    m_parent.set_as_dirty();
-                }
-            }
-            ImGui::EndCombo();
-        }
-        if (ImGui::IsItemHovered())
-            m_imgui->tooltip(_L("Opaque black reserves a print head but is excluded from glass recipes. Only allow black in CMYK recipes when the loaded filament is suitable for translucent colour mixing."), ImGui::GetFontSize() * 22.f);
     }
 
     ImGui::Separator();
@@ -3243,10 +3193,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         return std::nullopt;
     }
     const unsigned int black_id = used_black.empty() ? 0 : used_black.front();
-    const auto* black_option = bundle->project_config.option<ConfigOptionInt>("tracery_black_material_mode");
-    const int black_mode = black_option ? black_option->value : 0;
-    const bool black_can_mix = black_mode == 2 || (black_mode == 0 && tracery_black_is_full_spectrum(black_id));
-    const auto material_mode = tracery_material_mode(black_id != 0, black_can_mix);
+    const auto material_mode = tracery_plate_material_mode(*bundle, black_id);
     std::vector<wxColour> base_colours = {wxColour("#08ABFB"), wxColour("#D93B90"), wxColour("#F9ED3D")};
     if (material_mode == TraceryMaterialMode::CMYW)
         base_colours.emplace_back("#FFFFFF");
@@ -3262,7 +3209,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         }
         size_t index = 0;
         for (; index < projected_colours.size(); ++index)
-            if (wxColour(projected_colours[index]) == base_colours[i] && tracery_black_is_full_spectrum(unsigned(index + 1)))
+            if (wxColour(projected_colours[index]) == base_colours[i] && tracery_filament_is_full_spectrum(*bundle, unsigned(index + 1)))
                 break;
         // Prefer a calibrated preset, but reuse an exact existing colour when
         // that preset is unavailable. Never change a shared physical preset.
@@ -3395,44 +3342,34 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
     constexpr size_t no_new_row = size_t(-1);
     std::vector<MixedFilamentBatchEntry> new_rows;
     std::vector<size_t> target_row_indices(target_colours.size(), no_new_row);
-    std::map<std::string, size_t> recipe_rows;
-    std::map<std::string, unsigned int> existing_recipe_ids;
     struct VisualRecipeSlot {
         wxColour colour;
         unsigned int filament_id = 0;
+        size_t new_row = no_new_row;
     };
-    // A formula may differ by a few CMYW percentage points while its printed
-    // preview is indistinguishable. Reuse at most a just-noticeable colour
-    // difference so this saves slots without visibly flattening the glass.
-    constexpr double visual_reuse_delta_e = 2.0;
-    std::vector<VisualRecipeSlot> existing_visual_slots;
-    std::vector<wxColour> pending_row_colours;
-    // This is a live paint brush, not an export operation: later strokes must
-    // refer to an equivalent existing virtual filament instead of consuming a
-    // new slot for the same CMYW recipe.
+    std::vector<VisualRecipeSlot> visual_slots;
+    // Physical bases are valid colours too, and provide a bounded fallback even
+    // when all virtual slots belong to incompatible recipes on other plates.
+    for (unsigned int id : base_ids)
+        visual_slots.push_back({wxColour(projected_colours[id - 1]), id, no_new_row});
     unsigned int virtual_id = unsigned(projected_colours.size());
-    for (const MixedFilament &row : mixed_manager.mixed_filaments()) {
+    for (const MixedFilament& row : mixed_manager.mixed_filaments()) {
         if (row.deleted || !row.enabled)
             continue;
         ++virtual_id;
-        auto references = MixedFilamentManager::decode_gradient_component_ids(row.gradient_component_ids, 0);
-        references.push_back(row.component_a);
-        references.push_back(row.component_b);
         if (!row.manual_pattern.empty() || row.gradient_enabled ||
-            !tracery_recipe_uses_only(references, base_ids))
+            !tracery_recipe_uses_only(tracery_recipe_ingredients(row, projected_colours.size()), base_ids))
             continue;
-        const std::string fingerprint = std::to_string(row.component_a) + ":" + std::to_string(row.component_b) + ":" +
-            std::to_string(row.mix_b_percent) + ":" + row.gradient_component_ids + ":" + row.gradient_component_weights;
-        existing_recipe_ids.emplace(fingerprint, virtual_id);
+        // Existing rows retain their displayed colour and recipe, including
+        // rows used on another plate. Reuse never rewrites them.
         const wxColour display_colour(row.display_color);
         if (display_colour.IsOk())
-            existing_visual_slots.push_back({ display_colour, virtual_id });
+            visual_slots.push_back({display_colour, virtual_id, no_new_row});
     }
     for (size_t index = 0; index < target_colours.size(); ++index) {
         MixedColorMatchRecipeResult recipe = build_tracery_recipe(base_colour_strings, target_colours[index], material_mode);
         if (!recipe.valid)
             continue;
-        palette_preview_colours[index] = recipe.preview_color;
 
         const auto physical_id = [&base_ids](unsigned int local_id) {
             return local_id >= 1 && local_id <= base_ids.size() ? base_ids[local_id - 1] : 0u;
@@ -3447,49 +3384,6 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         }
         if (recipe.component_a == 0 || recipe.component_b == 0)
             continue;
-        const std::string fingerprint = std::to_string(recipe.component_a) + ":" + std::to_string(recipe.component_b) + ":" +
-            std::to_string(recipe.mix_b_percent) + ":" + recipe.gradient_component_ids + ":" + recipe.gradient_component_weights;
-        if (const auto existing = existing_recipe_ids.find(fingerprint); existing != existing_recipe_ids.end()) {
-            palette_filament_ids[index] = existing->second;
-            continue;
-        }
-        if (const auto existing = recipe_rows.find(fingerprint); existing != recipe_rows.end()) {
-            target_row_indices[index] = existing->second;
-            continue;
-        }
-
-        // Exact recipe re-use above preserves the old fast path. For recipes
-        // that differ only in their percentages, compare the actual display
-        // colours: existing slots are what the model already renders, and
-        // pending rows are what this operation will add after the batch commit.
-        size_t nearest_existing = existing_visual_slots.size();
-        double nearest_distance = visual_reuse_delta_e;
-        for (size_t slot = 0; slot < existing_visual_slots.size(); ++slot) {
-            const double distance = color_delta_e00(recipe.preview_color, existing_visual_slots[slot].colour);
-            if (distance <= nearest_distance) {
-                nearest_existing = slot;
-                nearest_distance = distance;
-            }
-        }
-        if (nearest_existing != existing_visual_slots.size()) {
-            palette_filament_ids[index] = existing_visual_slots[nearest_existing].filament_id;
-            continue;
-        }
-
-        size_t nearest_pending = pending_row_colours.size();
-        nearest_distance = visual_reuse_delta_e;
-        for (size_t row = 0; row < pending_row_colours.size(); ++row) {
-            const double distance = color_delta_e00(recipe.preview_color, pending_row_colours[row]);
-            if (distance <= nearest_distance) {
-                nearest_pending = row;
-                nearest_distance = distance;
-            }
-        }
-        if (nearest_pending != pending_row_colours.size()) {
-            target_row_indices[index] = nearest_pending;
-            continue;
-        }
-
         MixedFilamentBatchEntry entry;
         entry.component_a = recipe.component_a;
         entry.component_b = recipe.component_b;
@@ -3498,10 +3392,30 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         entry.gradient_component_ids = recipe.gradient_component_ids;
         entry.gradient_component_weights = recipe.gradient_component_weights;
         entry.distribution_mode = recipe.gradient_component_ids.empty() ? int(MixedFilament::Simple) : int(MixedFilament::LayerCycle);
-        entry.display_color = tracery_hex(recipe.preview_color);
+        // Evaluate the same normalized recipe and display context used by batch
+        // insertion before comparing colours. Nominal mix percentages are not
+        // a reliable proxy for the final preview (notably with local Z layers).
+        entry.display_color = mixed_manager.preview_custom_filament(entry, projected_colours);
+        const wxColour final_colour(entry.display_color);
+        if (!final_colour.IsOk())
+            continue;
+        std::vector<double> distances;
+        distances.reserve(visual_slots.size());
+        for (const auto& slot : visual_slots)
+            distances.push_back(color_delta_e00(final_colour, slot.colour));
+        const size_t selected = tracery_preview_slot(distances, new_rows.size() < available_mixed);
+        if (selected < visual_slots.size()) {
+            const auto& slot = visual_slots[selected];
+            palette_filament_ids[index] = slot.filament_id;
+            target_row_indices[index] = slot.new_row;
+            palette_preview_colours[index] = slot.colour;
+            if (distances[selected] > TRACERY_VISUAL_REUSE_DELTA_E)
+                ++plan.approximate_colour_count;
+            continue;
+        }
         target_row_indices[index] = new_rows.size();
-        recipe_rows.emplace(fingerprint, new_rows.size());
-        pending_row_colours.emplace_back(recipe.preview_color);
+        palette_preview_colours[index] = final_colour;
+        visual_slots.push_back({final_colour, 0, new_rows.size()});
         new_rows.emplace_back(std::move(entry));
     }
 
@@ -4414,6 +4328,10 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
         update_from_model_object(false);
         invalidate_painting_raycast();
         plater->update_project_dirty_from_presets();
+        if (plan.approximate_colour_count > 0)
+            plater->get_notification_manager()->push_notification(GUI::format(_L(
+                "Stained glass: material slots are full. Used the closest available colours for %1% palette entries."),
+                plan.approximate_colour_count));
     }
 
 #ifndef NDEBUG

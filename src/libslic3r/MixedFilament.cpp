@@ -1940,6 +1940,69 @@ void MixedFilamentManager::add_custom_filament(unsigned int component_a,
     refresh_display_colors(filament_colours);
 }
 
+static MixedFilament make_batch_filament(const MixedFilamentBatchEntry& e, unsigned int a, unsigned int b)
+{
+    MixedFilament mf;
+    mf.component_a     = a;
+    mf.component_b     = b;
+    mf.mix_b_percent   = std::clamp(e.mix_b_percent, 0, 100);
+    mf.ratio_a         = 1;
+    mf.ratio_b         = 1;
+    mf.manual_pattern  = e.manual_pattern;
+    mf.gradient_component_ids     = e.gradient_component_ids;
+    mf.gradient_component_weights = e.gradient_component_weights;
+    mf.pointillism_all_filaments  = false;
+    mf.distribution_mode          = e.distribution_mode;
+    mf.local_z_max_sublayers      = 0;
+    mf.component_a_surface_offset = 0.f;
+    mf.component_b_surface_offset = 0.f;
+    mf.enabled        = true;
+    mf.deleted        = false;
+    mf.custom         = true;
+    mf.origin_auto    = false;
+    mf.ui_mode        = 2; // MATCH
+    mf.gradient_enabled = e.gradient_enabled;
+    mf.gradient_start   = e.gradient_start;
+    mf.gradient_end     = e.gradient_end;
+    mf.display_color    = e.display_color;
+
+    mf.manual_pattern = MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern);
+    mf.gradient_component_ids = MixedFilamentManager::normalize_gradient_component_ids(mf.gradient_component_ids);
+    if (mf.gradient_enabled &&
+        std::abs(mf.gradient_start - mf.gradient_end) < MixedFilament::k_min_gradient_difference) {
+        mf.gradient_enabled = false;
+    }
+    return mf;
+}
+
+static MixedFilamentDisplayContext batch_display_context(MixedFilamentDisplayContext context,
+                                                         const std::vector<std::string>& filament_colours)
+{
+    context.num_physical = filament_colours.size();
+    context.physical_colors = filament_colours;
+    if (context.preview_settings.wall_loops == 0)
+        context.preview_settings.wall_loops = 1;
+    if (context.nozzle_diameters.size() < context.num_physical)
+        context.nozzle_diameters.resize(context.num_physical, 0.4);
+    return context;
+}
+
+std::string MixedFilamentManager::preview_custom_filament(const MixedFilamentBatchEntry& entry,
+                                                          const std::vector<std::string>& filament_colours) const
+{
+    const unsigned int n = unsigned(filament_colours.size());
+    if (n < 2)
+        return {};
+    const unsigned int a = std::clamp(entry.component_a, 1u, n);
+    unsigned int b = std::clamp(entry.component_b, 1u, n);
+    if (a == b)
+        b = a == 1 ? 2u : 1u;
+    const auto row = make_batch_filament(entry, a, b);
+    if (mixed_filament_references_exceed_physical(row.gradient_component_ids, row.manual_pattern, n))
+        return {};
+    return compute_mixed_filament_display_color(row, batch_display_context(m_display_context, filament_colours));
+}
+
 void MixedFilamentManager::add_batch_custom_filaments(
     const std::vector<MixedFilamentBatchEntry>& entries,
     const std::vector<std::string>&             filament_colours,
@@ -1976,37 +2039,8 @@ void MixedFilamentManager::add_batch_custom_filaments(
             }
         }
 
-        MixedFilament mf;
-        mf.component_a     = a;
-        mf.component_b     = b;
-        mf.stable_id       = allocate_stable_id();
-        mf.mix_b_percent   = std::clamp(e.mix_b_percent, 0, 100);
-        mf.ratio_a         = 1;
-        mf.ratio_b         = 1;
-        mf.manual_pattern  = e.manual_pattern;
-        mf.gradient_component_ids     = e.gradient_component_ids;
-        mf.gradient_component_weights = e.gradient_component_weights;
-        mf.pointillism_all_filaments  = false;
-        mf.distribution_mode          = e.distribution_mode;
-        mf.local_z_max_sublayers      = 0;
-        mf.component_a_surface_offset = 0.f;
-        mf.component_b_surface_offset = 0.f;
-        mf.enabled        = true;
-        mf.deleted        = false;
-        mf.custom         = true;
-        mf.origin_auto    = false;
-        mf.ui_mode        = 2; // MATCH
-        mf.gradient_enabled = e.gradient_enabled;
-        mf.gradient_start   = e.gradient_start;
-        mf.gradient_end     = e.gradient_end;
-        mf.display_color    = e.display_color;
-
-        mf.manual_pattern = MixedFilamentManager::normalize_manual_pattern(mf.manual_pattern);
-        mf.gradient_component_ids = MixedFilamentManager::normalize_gradient_component_ids(mf.gradient_component_ids);
-        if (mf.gradient_enabled &&
-            std::abs(mf.gradient_start - mf.gradient_end) < MixedFilament::k_min_gradient_difference) {
-            mf.gradient_enabled = false;
-        }
+        MixedFilament mf = make_batch_filament(e, a, b);
+        mf.stable_id = allocate_stable_id();
 
         // Validation perimeter: reject rows whose gradient/pattern references a
         // literal physical id > n.  This is the SAME invariant load_custom_entries
@@ -2991,13 +3025,7 @@ int MixedFilamentManager::apparent_mix_b_percent(int   mix_b_percent,
 
 void MixedFilamentManager::refresh_display_colors(const std::vector<std::string> &filament_colours)
 {
-    MixedFilamentDisplayContext context = m_display_context;
-    context.num_physical = filament_colours.size();
-    context.physical_colors = filament_colours;
-    if (context.preview_settings.wall_loops == 0)
-        context.preview_settings.wall_loops = 1;
-    if (context.nozzle_diameters.size() < context.num_physical)
-        context.nozzle_diameters.resize(context.num_physical, 0.4);
+    const auto context = batch_display_context(m_display_context, filament_colours);
 
     for (MixedFilament &mf : m_mixed)
         mf.display_color = compute_mixed_filament_display_color(mf, context);

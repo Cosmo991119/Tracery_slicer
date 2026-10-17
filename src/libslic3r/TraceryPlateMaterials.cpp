@@ -1,4 +1,5 @@
 #include "TraceryPlateMaterials.hpp"
+#include "PresetBundle.hpp"
 #include <stdexcept>
 
 namespace Slic3r {
@@ -36,6 +37,27 @@ void remap_config(ModelConfig& config, const EnforcerBlockerStateMap& mapping)
     for (const char* key : feature_keys)
         remap(key);
 }
+}
+
+bool tracery_filament_is_full_spectrum(const PresetBundle& bundle, unsigned int filament_id)
+{
+    if (filament_id == 0 || filament_id > bundle.filament_presets.size())
+        return false;
+    const Preset* preset = bundle.filaments.find_preset(bundle.filament_presets[filament_id - 1]);
+    std::set<std::string> visited;
+    while (preset && visited.insert(preset->name).second) {
+        if (preset->name.find("Full Spectrum") != std::string::npos)
+            return true;
+        preset = preset->inherits().empty() ? nullptr : bundle.filaments.find_preset(preset->inherits());
+    }
+    return false;
+}
+
+TraceryMaterialMode tracery_plate_material_mode(const PresetBundle& bundle, unsigned int used_black_id)
+{
+    // The legacy project override is intentionally ignored. Resolve the slot
+    // on every application so changing its preset immediately changes the mode.
+    return tracery_material_mode(used_black_id != 0, tracery_filament_is_full_spectrum(bundle, used_black_id));
 }
 
 std::vector<unsigned int> tracery_object_materials(const ModelObject& object, const DynamicPrintConfig& inherited)

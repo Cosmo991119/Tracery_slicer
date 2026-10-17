@@ -3,9 +3,15 @@
 
 #include "Model.hpp"
 #include "MixedFilament.hpp"
+#include "TraceryMaterialPlan.hpp"
 #include <set>
 
 namespace Slic3r {
+class PresetBundle;
+
+bool tracery_filament_is_full_spectrum(const PresetBundle& bundle, unsigned int filament_id);
+TraceryMaterialMode tracery_plate_material_mode(const PresetBundle& bundle, unsigned int used_black_id);
+
 using TraceryPlateInstances = std::map<size_t, std::set<size_t>>;
 
 // Raw physical/virtual references, before resolving recipes into ingredients.
