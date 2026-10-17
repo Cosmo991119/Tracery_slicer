@@ -29,6 +29,7 @@
 #include "Format/OBJ.hpp"
 
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <utility>
@@ -1653,6 +1654,9 @@ public:
     ModelObject* add_object(const char *name, const char *path, const TriangleMesh &mesh);
     ModelObject* add_object(const char *name, const char *path, TriangleMesh &&mesh);
     ModelObject* add_object(const ModelObject &other);
+    // Detach these instances into a new object, preserving instance IDs and
+    // leaving unselected instances on the original object. Returns its index.
+    size_t isolate_instances(size_t object_index, const std::set<size_t>& instances);
     /**
      * @brief Initializes newly created objects as one assembly-view layout batch.
      * @param modelObjects Objects owned by this model, in their desired layout order.
@@ -1663,6 +1667,8 @@ public:
     bool         delete_object(ObjectID id);
     bool         delete_object(ModelObject* object);
     void         clear_objects();
+    // Exchange objects while preserving each model's project metadata and backup ownership.
+    void         swap_objects(Model& other);
     // BBS: backup, reuse objects
     void         collect_reusable_objects(std::vector<ObjectBase *> & objects);
     void         set_object_backup_id(ModelObject const & object, int uuid);

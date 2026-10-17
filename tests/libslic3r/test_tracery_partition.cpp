@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 #include "libslic3r/TraceryPartition.hpp"
+#include "libslic3r/TraceryMaterialPlan.hpp"
 #include "libslic3r/TraceryRestore.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/3mf.hpp"
@@ -126,6 +127,43 @@ double precise_volume(const indexed_triangle_set& mesh)
     return volume;
 }
 } // namespace
+
+TEST_CASE("Replacing an old paint colour frees its head while preserving the black border", "[TraceryPartition][TraceryBudget]")
+{
+    const TriangleMesh source = square_mesh();
+    TriangleSelector paint(source);
+    paint.set_facet(0, EnforcerBlockerType(5)); // old target colour, not a CMY ingredient
+    paint.set_facet(1, EnforcerBlockerType(4)); // retained black border / base material
+    const auto original = paint.serialize();
+    REQUIRE_FALSE(tracery_fits_four_heads({4, 5}, {1, 2, 3}));
+
+    TriangleSelector::TraceryFacet2DData facet;
+    facet.source_facet_id = 0;
+    TriangleSelector::TraceryRegion2D region;
+    region.polygon = {Vec2d(0, 0), Vec2d(10, 0), Vec2d(10, 10)};
+    facet.regions.push_back(region);
+    const auto retained = tracery_retained_paint_materials(source, original, {facet});
+    REQUIRE(retained == std::vector<unsigned int>{4});
+    REQUIRE(tracery_fits_four_heads(retained, {1, 2, 3}));
+    REQUIRE(paint.serialize() == original);
+}
+
+TEST_CASE("Partially covered and unselected paint still reserves its physical materials", "[TraceryPartition][TraceryBudget]")
+{
+    const TriangleMesh source = square_mesh();
+    TriangleSelector paint(source);
+    paint.set_facet(0, EnforcerBlockerType(5));
+    paint.set_facet(1, EnforcerBlockerType(4));
+    const auto retained = tracery_retained_paint_materials(source, paint.serialize(), straight_partition());
+    REQUIRE(retained == std::vector<unsigned int>{4, 5});
+    REQUIRE_FALSE(tracery_fits_four_heads(retained, {1, 2, 3}));
+
+    // A later stroke must retain older recipes beyond its own footprint.
+    paint.set_facet(1, EnforcerBlockerType(120));
+    const auto incremental = tracery_retained_paint_materials(source, paint.serialize(), straight_partition());
+    REQUIRE(incremental == std::vector<unsigned int>{5, 120});
+    REQUIRE(tracery_retained_paint_materials(source, paint.serialize(), {}) == incremental);
+}
 
 TEST_CASE("Exact tracery keeps an oblique material boundary straight after paint serialization", "[TraceryPartition]")
 {

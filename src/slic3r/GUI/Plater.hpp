@@ -153,7 +153,7 @@ public:
     void jump_to_option(size_t selected);
     void jump_to_option(const std::string& opt_key, Preset::Type type, const std::wstring& category);
     // BBS. Add on_filaments_change() method.
-    void on_filaments_change(size_t num_filaments);
+    void on_filaments_change(size_t num_filaments, bool sync_mixed_manager = true);
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);

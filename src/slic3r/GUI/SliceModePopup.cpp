@@ -15,7 +15,7 @@
 
 namespace Slic3r { namespace GUI {
 
-static const wxColour BRAND_GREEN("#B69AE8");
+static const wxColour BRAND_GREEN("#A78BDA");
 
 // Clip the popup window to a rounded rect so the corners outside the rounded
 // border painted in on_paint stay transparent instead of showing the square

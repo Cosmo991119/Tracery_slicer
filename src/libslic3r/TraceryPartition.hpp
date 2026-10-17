@@ -23,5 +23,10 @@ TraceryPartitionResult build_exact_tracery_partition(const TriangleMesh&        
 // Clips retained editor geometry when original facet IDs are replaced.
 std::vector<Vec3f> clip_tracery_polygon_to_facet(const indexed_triangle_set& mesh, int facet, const std::vector<Vec3f>& polygon);
 
+// Paint IDs still needed outside the pending glass regions. The volume's base
+// material and the new recipes are budgeted separately by the caller.
+std::vector<unsigned int> tracery_retained_paint_materials(const TriangleMesh& source,
+    const TriangleSelector::TriangleSplittingData& paint, const TriangleSelector::Tracery2DData& replacement);
+
 } // namespace Slic3r
 #endif

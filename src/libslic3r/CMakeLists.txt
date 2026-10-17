@@ -456,6 +456,8 @@ set(lisbslic3r_sources
     TriangleMeshSlicer.hpp
     TriangleSelector.cpp
     TriangleSelector.hpp
+    TraceryPlateMaterials.cpp
+    TraceryPlateMaterials.hpp
     TraceryPartition.cpp
     TraceryPartition.hpp
     TraceryRestore.cpp

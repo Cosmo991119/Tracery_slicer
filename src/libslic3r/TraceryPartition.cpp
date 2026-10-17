@@ -610,4 +610,20 @@ std::vector<Vec3f> clip_tracery_polygon_to_facet(const indexed_triangle_set& mes
         result.push_back(frame.frame.lift(point).cast<float>());
     return result;
 }
+std::vector<unsigned int> tracery_retained_paint_materials(const TriangleMesh& source,
+    const TriangleSelector::TriangleSplittingData& paint, const TriangleSelector::Tracery2DData& replacement)
+{
+    // Use the same clipping / annotation path as the real bake, on a copy.
+    // NONE marks only the pending replacement; its recipe is budgeted separately.
+    auto cleared = replacement;
+    for (auto& facet : cleared)
+        for (auto& region : facet.regions)
+            region.color = EnforcerBlockerType::NONE;
+    const auto remaining = cleared.empty() ? paint : build_exact_tracery_partition(source, {paint}, cleared).annotations.front();
+    std::vector<unsigned int> result;
+    for (size_t state = 1; state < remaining.used_states.size(); ++state)
+        if (remaining.used_states[state])
+            result.push_back(unsigned(state));
+    return result;
+}
 } // namespace Slic3r

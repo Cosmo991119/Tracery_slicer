@@ -5,6 +5,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TraceryPartition.hpp"
 #include "libslic3r/TraceryRestore.hpp"
+#include "libslic3r/TraceryPlateMaterials.hpp"
 
 #include "slic3r/GUI/I18N.hpp"
 
@@ -63,12 +64,14 @@ protected:
     ColorRGBA get_cursor_sphere_right_button_color() const override { return { 0.0f, 0.59f, 0.53f, 0.15f }; }
 
 private:
+    bool m_convert_plate_on_open = false;
     void commit_material_selection();
     bool on_init() override;
     void update_model_object() override;
     void update_from_model_object(bool first_update) override;
     void on_opening() override
     {
+        m_convert_plate_on_open = true;
         m_selection_modified = false;
         m_regeneration_requested = false;
         m_palette_update_requested = false;
@@ -183,8 +186,10 @@ private:
                                      PublishGeneratedFragmentsIntegrity* builder_integrity);
     PublishGeneratedFragmentsIntegrity inspect_published_fragments(size_t fragment_count) const;
     void apply_stained_glass_colors();
+    struct PreparedTraceryVolume;
     struct StainedGlassApplyPlan {
         enum class Mode {
+            ConvertPlate,
             RestoreBasePaint,
             BakeFragments
         };
@@ -192,22 +197,32 @@ private:
         Mode                      mode = Mode::RestoreBasePaint;
         std::vector<unsigned int> fragment_mixed_filament_ids;
         std::string               mixed_filament_definitions;
+        std::vector<std::string> colours;
+        std::vector<unsigned int> new_physical_ids;
+        MixedFilamentManager manager;
+        DynamicPrintConfig global_material_updates;
+        std::map<int, DynamicPrintConfig> plate_material_updates;
+        std::unique_ptr<Model> model;
+        size_t selected_object_index = 0;
+        EnforcerBlockerStateMap conversion = tracery_identity_material_map();
+        std::vector<PreparedTraceryVolume> partitions;
+        std::vector<ColorRGBA> preview_colours;
     };
-    std::optional<StainedGlassApplyPlan> prepare_stained_glass_apply();
+    std::optional<StainedGlassApplyPlan> prepare_stained_glass_apply(bool palette_only = false);
     void                                 generate_through_fragments();
     void                                 generate_through_voronoi_regions();
     void                                 apply_incremental_boundary_transitions();
     void                                 commit_stained_glass_apply(StainedGlassApplyPlan&& plan);
-    void bake_fragments_to_mmu_painting();
+    void bake_fragments_to_mmu_painting(bool prepared = false);
     TriangleSelector::Tracery2DData build_voronoi_2d_data(
-        size_t volume_index, const std::function<void(const std::string&)>& diagnostic) const;
+        size_t volume_index, const std::function<void(const std::string&)>& diagnostic, bool material_budget = false) const;
     TriangleSelector::Tracery2DData build_tracery_2d_data(size_t volume_index) const;
     ModelObject* find_masked_model_object(Model& model) const;
-    struct PreparedTraceryVolume;
     std::vector<TriangleSelector::TriangleSplittingData> collect_partition_annotations(const ModelVolume& volume, size_t index) const;
     std::vector<GeneratedVoronoiRegion> remap_partition_regions(
         const std::vector<GeneratedVoronoiRegion>& regions, const TraceryPartitionResult& partition) const;
-    PreparedTraceryVolume prepare_volume_tracery_partition(ModelVolume& volume, size_t index) const;
+    PreparedTraceryVolume prepare_volume_tracery_partition(ModelVolume& volume, size_t index,
+        const EnforcerBlockerStateMap* mapping = nullptr, const std::vector<unsigned int>* recipes = nullptr, unsigned int black_id = 0) const;
     void commit_tracery_mesh_update(PreparedTraceryVolume&& prepared);
     static std::vector<TriangleSelector::TriangleSplittingData> collect_volume_annotations(const ModelVolume& volume);
     static void replace_tracery_mesh(ModelVolume& volume, TraceryPartitionResult& partition);

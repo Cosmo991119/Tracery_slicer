@@ -214,6 +214,7 @@ static std::vector<std::string> s_project_options {
     "nozzle_volume_type",
     "filament_grouping_mode",
     "flush_multiplier",
+    "tracery_black_material_mode",
     // Mixed filament / local-Z settings
     "mixed_filament_gradient_mode",
     "mixed_filament_height_lower_bound",

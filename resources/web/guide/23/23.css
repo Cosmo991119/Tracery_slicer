@@ -34,7 +34,7 @@ input
 {
 	flex: 0 0 40px;
 	height:40px;
-	border-top: 1px solid #B69AE8;
+	border-top: 1px solid #A78BDA;
 	display: flex;
 	align-items: center;
 }
@@ -148,7 +148,7 @@ input
 	height: calc(100% - 6px);
 	display: flex;
 	align-items: center;
-	border-bottom: 6px solid #B69AE8;
+	border-bottom: 6px solid #A78BDA;
 }
 
 #Title div.TitleUnselected

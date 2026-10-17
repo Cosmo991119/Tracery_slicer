@@ -14,6 +14,8 @@ add_executable(${_TEST_NAME}_tests
 	test_mixed_filament_color_golden.cpp
 	test_triangle_selector.cpp
 	test_tracery_partition.cpp
+	test_tracery_material_plan.cpp
+	test_tracery_plate_materials.cpp
 	test_local_z_order_optimizer.cpp
 	test_placeholder_parser.cpp
 	test_polygon.cpp
@@ -63,6 +65,11 @@ if (WIN32)
 endif()
 add_test(NAME tracery_partition COMMAND tracery_partition_tests "[TraceryPartition]")
 
+add_executable(tracery_material_tests test_tracery_material_plan.cpp)
+target_include_directories(tracery_material_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(tracery_material_tests PRIVATE Catch2::Catch2WithMain)
+add_test(NAME tracery_materials COMMAND tracery_material_tests "[TraceryMaterials]")
+
 if (WIN32)
 	if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
 	Snapmaker_Orca_copy_dlls(COPY_DLLS "Debug" "d" output_dlls_Debug)
@@ -75,3 +82,10 @@ endif()
 
 catch_discover_tests(${_TEST_NAME}_tests TEST_PREFIX "${_TEST_NAME}: " EXTRA_ARGS ${CATCH_EXTRA_ARGS})
 # add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests ${CATCH_EXTRA_ARGS})
+
+add_executable(tracery_plate_tests test_tracery_plate_materials.cpp)
+target_link_libraries(tracery_plate_tests PRIVATE ${TEST_LINK_LIBS})
+if (WIN32)
+    target_link_libraries(tracery_plate_tests PRIVATE bcrypt.lib crypt32.lib)
+endif()
+add_test(NAME tracery_plate COMMAND tracery_plate_tests "[TraceryPlate]")

@@ -16,6 +16,7 @@ typedef std::pair<coordf_t, coordf_t>   t_layer_height_range;
 namespace Slic3r {
 
 class Model;
+struct TraceryPaletteSnapshot;
 
 namespace GUI {
 	class Selection;
@@ -57,6 +58,7 @@ struct SnapshotData
 	// Bitmap of Flags (see the Flags enum).
 	unsigned int        flags { 0 };
     int                 layer_range_idx { -1 };
+    std::shared_ptr<const TraceryPaletteSnapshot> filament_state;
 
 	// Bitmask of various binary flags to be stored with the snapshot.
 	enum Flags {

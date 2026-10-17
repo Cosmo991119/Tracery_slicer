@@ -481,6 +481,34 @@ ModelObject* Model::add_object(const char *name, const char *path, TriangleMesh 
     return new_object;
 }
 
+void Model::swap_objects(Model& other)
+{
+    objects.swap(other.objects);
+    update_links_bottom_up_recursive();
+    other.update_links_bottom_up_recursive();
+}
+
+size_t Model::isolate_instances(size_t object_index, const std::set<size_t>& selected)
+{
+    ModelObject* source = objects.at(object_index);
+    if (selected.empty() || *selected.rbegin() >= source->instances.size())
+        throw std::invalid_argument("Invalid instances for plate material conversion");
+    if (selected.size() == source->instances.size())
+        return object_index;
+    ModelObject* target = add_object(*source);
+    target->clear_instances();
+    for (size_t i : selected) {
+        ModelInstance* instance = source->instances[i];
+        instance->set_model_object(target);
+        target->instances.push_back(instance);
+    }
+    for (auto it = selected.rbegin(); it != selected.rend(); ++it)
+        source->instances.erase(source->instances.begin() + *it);
+    source->invalidate_bounding_box();
+    target->invalidate_bounding_box();
+    return objects.size() - 1;
+}
+
 ModelObject* Model::add_object(const ModelObject &other)
 {
     ModelObject* new_object = ModelObject::new_clone(other);

@@ -286,3 +286,14 @@ TEST_CASE("DynamicPrintConfig keeps ordinary filament types unchanged", "[Config
     CHECK(config.get_filament_type(display_type, 0) == "PLA");
     CHECK(display_type == "PLA");
 }
+
+TEST_CASE("Stained-glass black material override survives config serialization", "[TraceryMaterialsConfig]")
+{
+    for (int mode : {0, 1, 2}) {
+        Slic3r::DynamicPrintConfig original;
+        original.set_key_value("tracery_black_material_mode", new Slic3r::ConfigOptionInt(mode));
+        Slic3r::DynamicPrintConfig restored;
+        restored.set_deserialize_strict("tracery_black_material_mode", original.option("tracery_black_material_mode")->serialize());
+        REQUIRE(restored.opt_int("tracery_black_material_mode") == mode);
+    }
+}

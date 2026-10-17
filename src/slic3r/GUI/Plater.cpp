@@ -9,6 +9,7 @@
 #include "libslic3r/FilamentColorLibrary.hpp" // kFullSpectrumSlotCount (recommended slot write-back)
 #include "libslic3r/Config.hpp"
 #include "libslic3r/MixedFilament.hpp"
+#include "libslic3r/TraceryPlateMaterials.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "common_func/common_func.hpp"
 #include "slic3r/Utils/SnapLogClient.hpp"
@@ -1031,8 +1032,8 @@ protected:
             int tabWidth = GetTabWidth(textWidth);
 
             if (isSelected) {
-                // teal background for the selected tab.
-                const wxColour selColor(0x00, 0x96, 0x88); // #B69AE8
+                // Lilac background for the selected nozzle tab.
+                const wxColour selColor("#A78BDA");
                 dc.SetPen(wxPen(selColor, 1));
                 dc.SetBrush(wxBrush(selColor));
                 // Round only the outer top corner(s) that meet the parent card's
@@ -1161,14 +1162,14 @@ private:
             m_selectedTabColor  = wxColour(255, 255, 255);
             m_textColor         = wxColour(107, 107, 107); // #6B6B6B: match the process flow toggle's unselected grey
             m_dividerColor      = wxColour(240, 240, 240);
-            m_selectedTextColor = wxColour(255, 255, 255); // white text on the teal selected tab
+            m_selectedTextColor = wxColour("#30213F"); // readable text on lilac
         } else {
             m_bgColor           = wxColour(45, 45, 49);
             m_borderColor       = wxColour(76, 76, 85);
             m_selectedTabColor  = wxColour(45, 45, 49);
             m_textColor         = wxColour(107, 107, 107); // #6B6B6B: match the process flow toggle's unselected grey
             m_dividerColor      = wxColour(51, 51, 55);
-            m_selectedTextColor = wxColour(255, 255, 255);
+            m_selectedTextColor = wxColour("#30213F");
         }
     }
 
@@ -3413,7 +3414,7 @@ Sidebar::Sidebar(Plater *parent)
             e.Skip();
             return;
         }
-        p->m_search_bar->SetBorderColor(wxColour("#B69AE8"));
+        p->m_search_bar->SetBorderColor(wxColour("#A78BDA"));
         wxPoint pos = this->p->m_search_bar->ClientToScreen(wxPoint(0, 0));
 #ifndef __WXGTK__
         pos.y += this->p->m_search_bar->GetRect().height;
@@ -4121,14 +4122,14 @@ void Sidebar::jump_to_option(size_t selected)
 }
 
 // BBS. Move logic from Plater::on_extruders_change() to Sidebar::on_filaments_change().
-void Sidebar::on_filaments_change(size_t num_filaments)
+void Sidebar::on_filaments_change(size_t num_filaments, bool sync_mixed_manager)
 {
     auto& choices = combos_filament();
 
     if (num_filaments == choices.size()) {
         // Project load may keep the same physical filament count while mixed
         // definitions changed. Refresh mixed panel even without count changes.
-        const bool sync_manager = !p->m_skip_mixed_filament_sync_once;
+        const bool sync_manager = sync_mixed_manager && !p->m_skip_mixed_filament_sync_once;
         p->m_skip_mixed_filament_sync_once = false;
         update_ui_from_settings();
         update_dynamic_filament_list();
@@ -4214,7 +4215,7 @@ void Sidebar::on_filaments_change(size_t num_filaments)
     p->m_panel_filament_title->Refresh();
     update_ui_from_settings();
     update_dynamic_filament_list();
-    update_mixed_filament_panel();
+    update_mixed_filament_panel(sync_mixed_manager);
     update_color_mix_panel();
 
     // Disable add buttons when combined filament limit reached
@@ -17076,6 +17077,11 @@ void Plater::priv::take_snapshot(const std::string& snapshot_name, const UndoRed
         return;
     UndoRedo::SnapshotData snapshot_data;
     snapshot_data.snapshot_type      = snapshot_type;
+    if (this->printer_technology == ptFFF) {
+        const auto* bundle = wxGetApp().preset_bundle;
+        snapshot_data.filament_state = capture_tracery_palette(bundle->project_config, bundle->filament_presets, bundle->mixed_filaments,
+            &bundle->prints.get_edited_preset().config);
+    }
     snapshot_data.printer_technology = this->printer_technology;
     if (this->view3D->is_layers_editing_enabled())
         snapshot_data.flags |= UndoRedo::SnapshotData::VARIABLE_LAYER_EDITING_ACTIVE;
@@ -17236,6 +17242,11 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
     unsigned int new_flags = it_snapshot->snapshot_data.flags;
     UndoRedo::SnapshotData top_snapshot_data;
     top_snapshot_data.printer_technology = this->printer_technology;
+    if (this->printer_technology == ptFFF) {
+        const auto* bundle = wxGetApp().preset_bundle;
+        top_snapshot_data.filament_state = capture_tracery_palette(bundle->project_config, bundle->filament_presets, bundle->mixed_filaments,
+            &bundle->prints.get_edited_preset().config);
+    }
     if (this->view3D->is_layers_editing_enabled())
         top_snapshot_data.flags |= UndoRedo::SnapshotData::VARIABLE_LAYER_EDITING_ACTIVE;
     if (this->sidebar->obj_list()->is_selected(itSettings)) {
@@ -17283,6 +17294,22 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
             // Load the currently selected preset into the GUI, update the preset selection box.
             // This also switches the printer technology based on the printer technology of the active printer profile.
             wxGetApp().load_current_presets();
+        }
+        if (this->printer_technology == ptFFF && snapshot_copy.snapshot_data.filament_state) {
+            const auto& state = *snapshot_copy.snapshot_data.filament_state;
+            auto* bundle = wxGetApp().preset_bundle;
+            bundle->project_config.apply(state.config);
+            bundle->prints.get_edited_preset().config.apply(state.print_materials);
+            bundle->filament_presets = state.presets;
+            bundle->ams_multi_color_filment.resize(state.presets.size());
+            bundle->mixed_filaments = state.manager;
+            bundle->consume_last_filament_id_remap();
+            if (const auto* definitions = state.config.option("mixed_filament_definitions"))
+                bundle->prints.get_edited_preset().config.set_key_value("mixed_filament_definitions", definitions->clone());
+            q->update_filament_colors_in_full_config();
+            // Model references already belong to the restored palette: do not
+            // run on_filaments_change's old-to-new paint remapping a second time.
+            sidebar->on_filaments_change(state.presets.size(), false);
         }
         //FIXME updating the Print config from the Wipe tower config values at the ModelWipeTower.
         // This is a workaround until we refactor the Wipe Tower position / orientation to live solely inside the Model, not in the Print config.

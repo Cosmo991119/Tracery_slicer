@@ -6,14 +6,14 @@
 .BlockBanner
 {
 	padding: 0px;
-	border-bottom:#B69AE8 1px solid;
+	border-bottom:#A78BDA 1px solid;
 	width: 100%;
 }
 
 .BlockBanner a
 {
 	display: inline-block;
-	background-color:#B69AE8;
+	background-color:#A78BDA;
 	line-height: 40px;
 	height: 40px;
 	padding: 0px 24px;
@@ -126,7 +126,7 @@
   
   .searchTerm {
 	width: 100%;
-	border: 3px solid #B69AE8;
+	border: 3px solid #A78BDA;
 	/*border-right: none;*/
 	padding: 5px;
 	height: 20px;

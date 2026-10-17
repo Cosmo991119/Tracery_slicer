@@ -1,14 +1,16 @@
+<p>
+  <img src="resources/images/tracery-app.png" alt="Tracery Slicer app icon" width="128" height="128">
+</p>
+
 # Tracery Slicer
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 [![Tracery Slicer feature preview: colorful stained-glass fragments on a window model](doc/images/tracery-feature-preview.png)](doc/images/tracery-feature-preview.png)
 
-Tracery Slicer is an FDM slicer based on [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer), focused on stained-glass effects for multicolor printing. Paint an area on a model to automatically generate colorful fragments and apply them as multi-material painting data that can be sliced.
+Tracery Slicer is an FDM slicing tool for creating stained-glass effects. Paint an area on a model to automatically generate colorful fragments and apply them as multi-material painting data that can be sliced.
 
-Some upstream application names, build targets, and directory names are retained, including `Snapmaker_Orca`.
-
-I use a Snapmaker U1 printer, so this project branches from Snapmaker Orca and implements the features directly in that codebase.
+For now, development is focused solely on this feature; whether other features will be added is undecided. I use a Snapmaker U1 printer, so I forked [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) and implemented the feature directly in that codebase.
 
 This project is under development. A known limitation is slow stained-glass generation over large areas.
 
@@ -42,13 +44,9 @@ Newly selected regions can use different modes. For example, paint region A in N
 
 ### Available Recipes for Automatic Color Matching
 
-![CMYW stained-glass palette: 292 valid recipes; two-color recipes require each material to contribute at least 30%, while one- and three-color recipes retain a 15% minimum](doc/images/tracery-cmyw-palette-two-min30.svg)
+![CMYW stained-glass palette: 292 valid recipes; two-color recipes require at least 30% per color, while three-color recipes require at least 15%](doc/images/tracery-cmyw-palette-two-min30.svg)
 
-Stained glass uses a fixed CMYW palette: C (cyan), M (magenta), Y (yellow), and W (white). The available palette contains 292 recipes at 5% increments. In two-color recipes, each material contributes at least 30%; one- and three-color recipes retain a 15% minimum. A material contributes 0% when absent. When generating fragment colors, the system matches the target appearance against these combinations, favoring recipes that balance color error and component proportions.
-
-![CMYW recipe selection: among recipes visually close to the best color match, prefer the more balanced material proportions, while preserving color separation between neighboring fragments](doc/images/tracery-recipe-selection.svg)
-
-For each fragment, the system keeps recipes within ΔE 2.0 of the closest target-color match. It then prefers the recipe with the smallest spread among active material proportions; equal spreads are resolved by lower ΔE. The existing neighbor check still prefers a ΔE of at least 12 between adjacent fragments, so visually equivalent but over-similar choices are skipped.
+Stained glass uses a fixed CMYW palette: C (cyan), M (magenta), Y (yellow), and W (white). Recipes use 5% increments. Each active color contributes at least 30% in two-color recipes and at least 15% in three-color recipes. Three-color recipes must contain white and two CMY colors. Single-color recipes use 100% of that color; unused colors contribute 0%. When generating fragment colors, the system matches the target appearance against these combinations, favoring recipes that balance color error and component proportions.
 
 ### Example
 

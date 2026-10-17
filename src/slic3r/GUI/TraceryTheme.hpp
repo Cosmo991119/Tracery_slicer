@@ -3,7 +3,7 @@
 
 namespace Slic3r::GUI::TraceryTheme {
 
-inline constexpr unsigned ACCENT = 0xB69AE8;
+inline constexpr unsigned ACCENT = 0xA78BDA;
 inline constexpr unsigned HOVER = 0xC8B2EF;
 inline constexpr unsigned PRESSED = 0xA083D4;
 inline constexpr unsigned ON_ACCENT = 0x30213F;
