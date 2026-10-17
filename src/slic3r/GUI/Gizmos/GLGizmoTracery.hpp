@@ -66,6 +66,8 @@ protected:
 private:
     bool m_convert_plate_on_open = false;
     void commit_material_selection();
+    void refresh_source_selection_policy(bool filter_masks = false);
+    std::vector<std::set<EnforcerBlockerType>> m_source_selection_policy;
     bool on_init() override;
     void update_model_object() override;
     void update_from_model_object(bool first_update) override;
@@ -223,7 +225,7 @@ private:
     std::vector<GeneratedVoronoiRegion> remap_partition_regions(
         const std::vector<GeneratedVoronoiRegion>& regions, const TraceryPartitionResult& partition) const;
     PreparedTraceryVolume prepare_volume_tracery_partition(ModelVolume& volume, size_t index,
-        const EnforcerBlockerStateMap* mapping = nullptr, const std::vector<unsigned int>* recipes = nullptr, unsigned int black_id = 0) const;
+        const EnforcerBlockerStateMap* mapping = nullptr, const std::vector<unsigned int>* recipes = nullptr) const;
     void commit_tracery_mesh_update(PreparedTraceryVolume&& prepared);
     static std::vector<TriangleSelector::TriangleSplittingData> collect_volume_annotations(const ModelVolume& volume);
     static void replace_tracery_mesh(ModelVolume& volume, TraceryPartitionResult& partition);

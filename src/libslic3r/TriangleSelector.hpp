@@ -8,6 +8,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
@@ -321,6 +322,10 @@ public:
     // Set a limit to the edge length, below which the edge will not be split by select_patch().
     // Called by select_patch() internally. Made public for debugging purposes, see TriangleSelectorGUI::render_debug().
     void set_edge_limit(float edge_limit);
+
+    // Optional source-material restriction for interactive brushes and fill.
+    // Generated paint and ordinary selectors (empty set) are unaffected.
+    void set_unselectable_states(const std::set<EnforcerBlockerType>& states);
 
     // Create new object on a TriangleMesh. The referenced mesh must
     // stay valid, a ptr to it is saved and used.
@@ -636,6 +641,7 @@ private:
     void get_seed_fill_contour_recursive(int facet_idx, const Vec3i32 &neighbors, const Vec3i32 &neighbors_propagated, std::vector<Vec2i32> &edges_out) const;
 
     int m_free_triangles_head { -1 };
+    std::set<EnforcerBlockerType> m_unselectable_states;
     int m_free_vertices_head { -1 };
 };
 

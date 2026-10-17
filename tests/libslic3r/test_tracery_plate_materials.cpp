@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TraceryPlateMaterials.hpp"
@@ -7,6 +8,59 @@
 #include <boost/filesystem.hpp>
 
 using namespace Slic3r;
+
+TEST_CASE("Opaque source materials cannot enter a flower fill selection", "[TraceryPlate]")
+{
+    const TriangleMesh mesh(its_make_cube(10., 10., 1.));
+    TriangleSelector material(mesh), selection(mesh);
+    const auto source = GENERATE(EnforcerBlockerType::NONE, EnforcerBlockerType(4));
+    material.set_facet(0, source);
+    material.set_unselectable_states({source});
+    const auto& face = mesh.its.indices[0];
+    const Vec3f hit = (mesh.its.vertices[face[0]] + mesh.its.vertices[face[1]] + mesh.its.vertices[face[2]]) / 3.f;
+    const bool propagate = GENERATE(false, true);
+    material.bucket_fill_select_triangles(hit, 0, {}, -1.f, propagate, true);
+    CHECK(material.get_seed_fill_contour().empty());
+    material.apply_seed_fill_to(selection, EnforcerBlockerType::ENFORCER);
+    CHECK_FALSE(selection.has_facets(EnforcerBlockerType::ENFORCER));
+    // Changing to an eligible material restores normal selection.
+    material.set_unselectable_states({});
+    material.bucket_fill_select_triangles(hit, 0, {}, -1.f, propagate, true);
+    material.apply_seed_fill_to(selection, EnforcerBlockerType::ENFORCER);
+    CHECK(selection.has_facets(EnforcerBlockerType::ENFORCER));
+}
+
+TEST_CASE("Brush and smart fill keep opaque subregions out of the source selection", "[TraceryPlate]")
+{
+    const TriangleMesh mesh(its_make_cube(10., 10., 1.));
+    TriangleSelector material(mesh);
+    material.paint_generated(mesh.bounding_box(), 2.f, [](const Vec3f& point) {
+        return point.x() < 5.f ? EnforcerBlockerType(4) : EnforcerBlockerType(2);
+    });
+    const auto before = material.painted_leaves();
+    material.set_unselectable_states({EnforcerBlockerType(4)});
+    const bool brush = GENERATE(false, true);
+    if (brush) {
+        auto cursor = TriangleSelector::SinglePointCursor::cursor_factory(Vec3f(5, 5, .5), Vec3f(5, 5, 30), 30.f,
+            TriangleSelector::CursorType::SPHERE, Transform3d::Identity(), {});
+        material.select_patch(0, std::move(cursor), EnforcerBlockerType::ExtruderMax, Transform3d::Identity(), true, 0.f);
+    } else {
+        const auto& face = mesh.its.indices[0];
+        const Vec3f hit = (mesh.its.vertices[face[0]] + mesh.its.vertices[face[1]] + mesh.its.vertices[face[2]]) / 3.f;
+        material.seed_fill_select_triangles(hit, 0, Transform3d::Identity(), {}, 180.f, 0.f, true);
+        material.seed_fill_apply_on_triangles(EnforcerBlockerType::ExtruderMax);
+    }
+    size_t selected = 0;
+    for (const auto& leaf : before) {
+        const Vec3f point = (leaf.vertices[0] + leaf.vertices[1] + leaf.vertices[2]) / 3.f;
+        const auto after = material.state_at(point, leaf.source_facet);
+        if (leaf.state == EnforcerBlockerType(4))
+            CHECK(after == EnforcerBlockerType(4));
+        else if (after == EnforcerBlockerType::ExtruderMax)
+            ++selected;
+    }
+    CHECK(selected > 0);
+}
 
 TEST_CASE("Isolating a plate preserves the other plate and instance identities", "[TraceryPlate]")
 {
@@ -115,11 +169,52 @@ TEST_CASE("Appending physical bases reindexes shared virtual IDs without changin
     CHECK(model.objects[0]->config.extruder() == int(old_ids[0]));
 }
 
-TEST_CASE("Glass coverage never overwrites original black paint or a black default surface", "[TraceryPlate]")
+TEST_CASE("Restored source masks exclude opaque black but keep translucent black", "[TraceryPlate]")
+{
+    PresetBundle bundle;
+    bundle.filaments.load_preset("", "Opaque PLA", DynamicPrintConfig{}, false);
+    bundle.filaments.load_preset("", "PLA Full Spectrum", DynamicPrintConfig{}, false);
+    DynamicPrintConfig derived;
+    Preset::inherits(derived) = "PLA Full Spectrum";
+    bundle.filaments.load_preset("", "Custom transparent black", derived, false);
+    bundle.filament_presets = {"Opaque PLA", "Custom transparent black", "Opaque PLA"};
+    bundle.project_config.set_key_value("filament_colour", new ConfigOptionStrings({"#000000", "#000000", "#FFFFFF"}));
+    const bool default_black = GENERATE(false, true);
+    const bool translucent = GENERATE(false, true);
+    const unsigned int black_id = translucent ? 2 : 1;
+    const TriangleMesh mesh(its_make_cube(10., 10., 1.));
+    TriangleSelector source(mesh), selection(mesh);
+    source.set_facet(0, default_black ? EnforcerBlockerType::NONE : EnforcerBlockerType(black_id));
+    source.set_facet(1, EnforcerBlockerType(3));
+    const auto original_paint = source.serialize();
+    selection.set_facet(0, EnforcerBlockerType::ENFORCER);
+    selection.set_facet(1, EnforcerBlockerType::ENFORCER);
+    const auto blocked = tracery_unselectable_states(bundle, default_black ? black_id : 3);
+    tracery_filter_source_selection(selection, source, blocked);
+    for (int facet : {0, 1}) {
+        const auto& face = mesh.its.indices[facet];
+        const Vec3f point = (mesh.its.vertices[face[0]] + mesh.its.vertices[face[1]] + mesh.its.vertices[face[2]]) / 3.f;
+        CHECK(selection.state_at(point, facet) == ((facet == 1 || translucent) ?
+              EnforcerBlockerType::ENFORCER : EnforcerBlockerType::NONE));
+    }
+    CHECK(source.serialize() == original_paint); // Filtering never repaints materials.
+    if (translucent) {
+        bundle.filament_presets[1] = "Opaque PLA";
+        tracery_filter_source_selection(selection, source,
+            tracery_unselectable_states(bundle, default_black ? black_id : 3));
+        const auto& face = mesh.its.indices[0];
+        const Vec3f point = (mesh.its.vertices[face[0]] + mesh.its.vertices[face[1]] + mesh.its.vertices[face[2]]) / 3.f;
+        CHECK(selection.state_at(point, 0) == EnforcerBlockerType::NONE);
+        CHECK(source.serialize() == original_paint);
+    }
+}
+
+TEST_CASE("Through projections ignore target colour and stay inside their footprint", "[TraceryPlate]")
 {
     TriangleMesh mesh(its_make_cube(10., 10., 1.));
     TriangleSelector paint(mesh);
-    paint.set_facet(0, EnforcerBlockerType(4));
+    const auto original_state = GENERATE(EnforcerBlockerType::NONE, EnforcerBlockerType(4), EnforcerBlockerType(2));
+    paint.set_facet(0, original_state);
     const auto& triangle = mesh.its.indices[0];
     const Vec3d a = mesh.its.vertices[triangle[0]].cast<double>();
     const Vec3d b = mesh.its.vertices[triangle[1]].cast<double>() - a;
@@ -131,16 +226,26 @@ TEST_CASE("Glass coverage never overwrites original black paint or a black defau
     facet.axis_v = b.cross(c).normalized().cross(facet.axis_u);
     TriangleSelector::TraceryRegion2D region;
     region.color = EnforcerBlockerType(8);
-    region.polygon = {Vec2d::Zero(), Vec2d(b.norm(), 0), Vec2d(c.dot(facet.axis_u), c.dot(facet.axis_v))};
+    region.polygon = {Vec2d::Zero(), Vec2d(b.norm() * .5, 0.),
+                      Vec2d(c.dot(facet.axis_u) * .5, c.dot(facet.axis_v) * .5)};
     facet.regions.push_back(region);
-    auto regions = tracery_preserve_black(mesh, paint.serialize(), {facet}, 4, 1);
-    auto result = build_exact_tracery_partition(mesh, {paint.serialize()}, regions);
-    CHECK(result.annotations[0].used_states[4]);
-    CHECK_FALSE(result.annotations[0].used_states[8]);
-    TriangleSelector empty(mesh);
-    regions = tracery_preserve_black(mesh, empty.serialize(), {facet}, 4, 4);
-    result = build_exact_tracery_partition(mesh, {empty.serialize()}, regions);
-    CHECK_FALSE(result.annotations[0].used_states[8]);
+    // Destination colour is deliberately not a selection/generation filter.
+    const auto result = build_exact_tracery_partition(mesh, {paint.serialize()}, {facet});
+    const TriangleMesh partitioned_mesh(result.mesh);
+    TriangleSelector actual(partitioned_mesh);
+    actual.deserialize(result.annotations[0], false);
+    double glass_area = 0.;
+    double retained_area = 0.;
+    for (const auto& leaf : actual.painted_leaves(true)) {
+        if (result.source_facets.at(leaf.source_facet) != 0)
+            continue;
+        const double area = .5 * (leaf.vertices[1] - leaf.vertices[0]).cross(leaf.vertices[2] - leaf.vertices[0]).norm();
+        if (leaf.state == EnforcerBlockerType(8)) glass_area += area;
+        else if (leaf.state == original_state) retained_area += area;
+    }
+    const double source_area = .5 * b.cross(c).norm();
+    CHECK(std::abs(glass_area - source_area * .25) < 1e-4);
+    CHECK(std::abs(retained_area - source_area * .75) < 1e-4);
 }
 
 TEST_CASE("Palette snapshots remain independent and failed conversion leaves the source intact", "[TraceryPlate]")

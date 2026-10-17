@@ -21,9 +21,12 @@ EnforcerBlockerStateMap tracery_palette_reindex(const MixedFilamentManager& befo
                                                const MixedFilamentManager& after, size_t new_physical);
 TriangleSelector::TriangleSplittingData tracery_remap_paint(const TriangleMesh& mesh,
     const TriangleSelector::TriangleSplittingData& paint, const EnforcerBlockerStateMap& mapping);
-TriangleSelector::Tracery2DData tracery_preserve_black(const TriangleMesh& mesh,
-    const TriangleSelector::TriangleSplittingData& paint, TriangleSelector::Tracery2DData regions,
-    unsigned int black_id, unsigned int default_material);
+std::vector<unsigned int> tracery_black_materials(const PresetBundle& bundle, const std::vector<unsigned int>& used);
+std::set<EnforcerBlockerType> tracery_unselectable_states(const PresetBundle& bundle, unsigned int default_material);
+// Only active source masks are filtered. Generated/back-projected paint must
+// never use this policy. Source and mask share the material subdivision tree.
+void tracery_filter_source_selection(TriangleSelector& selection, const TriangleSelector& source,
+                                     const std::set<EnforcerBlockerType>& blocked);
 void tracery_remap_object_materials(ModelObject& object, const EnforcerBlockerStateMap& mapping,
                                     const DynamicPrintConfig* inherited = nullptr);
 

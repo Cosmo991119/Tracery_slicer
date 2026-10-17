@@ -238,6 +238,16 @@ int TriangleSelector::select_unsplit_triangle(const Vec3f &hit, int facet_idx) c
     return this->select_unsplit_triangle(hit, facet_idx, neighbors);
 }
 
+void TriangleSelector::set_unselectable_states(const std::set<EnforcerBlockerType>& states)
+{
+    if (m_unselectable_states == states)
+        return;
+    m_unselectable_states = states;
+    for (Triangle& triangle : m_triangles)
+        if (triangle.valid() && !triangle.is_split() && states.count(triangle.get_state()))
+            triangle.unselect_by_seed_fill();
+}
+
 void TriangleSelector::select_patch(int facet_start, std::unique_ptr<Cursor> &&cursor, EnforcerBlockerType new_state, const Transform3d& trafo_no_translate, bool triangle_splitting, float highlight_by_angle_deg)
 {
     assert(facet_start < m_orig_size_indices);
@@ -359,7 +369,7 @@ void TriangleSelector::seed_fill_select_triangles(const Vec3f &hit, int facet_st
                         // Child triangle shares normal with its parent. Select it.
                         facet_queue.push(child);
                 }
-            } else
+            } else if (!m_unselectable_states.count(m_triangles[current_facet].get_state()))
                 m_triangles[current_facet].select_by_seed_fill();
 
             if (current_facet < m_orig_size_indices)
@@ -495,6 +505,8 @@ void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_
     assert(!m_triangles[start_facet_idx].is_split());
     EnforcerBlockerType start_facet_state = m_triangles[start_facet_idx].get_state();
     this->seed_fill_unselect_all_triangles();
+    if (m_unselectable_states.count(start_facet_state))
+        return;
 
     if (!propagate) {
         m_triangles[start_facet_idx].select_by_seed_fill();
@@ -593,7 +605,7 @@ void TriangleSelector::apply_seed_fill_to(TriangleSelector& target, EnforcerBloc
                     return false;
             return true;
         }
-        if (source.is_selected_by_seed_fill())
+        if (source.is_selected_by_seed_fill() && !m_unselectable_states.count(source.get_state()))
             target_triangle.set_state(new_state);
         return true;
     };
@@ -975,7 +987,11 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
      && ! m_cursor->is_edge_inside_cursor(*tr, m_vertices))
         return false;
 
-    if (num_of_inside_vertices == 3) {
+    // Do not collapse a mixed-material subdivision: eligible and blocked
+    // leaves must be visited separately even when the brush covers the root.
+    if (!tr->is_split() && m_unselectable_states.count(tr->get_state()))
+        return true;
+    if (num_of_inside_vertices == 3 && (m_unselectable_states.empty() || !tr->is_split())) {
         // dump any subdivision and select whole triangle
         undivide_triangle(facet_idx);
         tr->set_state(type);
@@ -2726,7 +2742,7 @@ void TriangleSelector::seed_fill_unselect_all_triangles()
 void TriangleSelector::seed_fill_apply_on_triangles(EnforcerBlockerType new_state)
 {
     for (Triangle &triangle : m_triangles)
-        if (!triangle.is_split() && triangle.is_selected_by_seed_fill())
+        if (!triangle.is_split() && triangle.is_selected_by_seed_fill() && !m_unselectable_states.count(triangle.get_state()))
             triangle.set_state(new_state);
 
     for (Triangle &triangle : m_triangles)

@@ -175,8 +175,6 @@ Slic3r::ColorRGBA glass_color(const Slic3r::ColorRGBA& base, const Slic3r::Color
         local.b() * (1.0f - boundary_mix) + neighboring.b() * boundary_mix, 1.0f);
 }
 
-bool is_legal_tracery_recipe(const std::array<int, 4>& weights);
-
 Slic3r::GUI::MixedColorMatchRecipeResult build_tracery_recipe(
     const std::vector<std::string>& physical_colours, const wxColour& target, Slic3r::TraceryMaterialMode mode)
 {
@@ -335,31 +333,32 @@ struct TraceryEditorRecipe {
     wxColour            preview;
 };
 
-bool is_legal_tracery_recipe(const std::array<int, 4>& weights)
-{
-    return Slic3r::legal_tracery_weights(weights, Slic3r::TraceryMaterialMode::CMYW);
-}
-
 std::vector<TraceryEditorRecipe> build_tracery_editor_palette()
 {
-    const std::array<wxColour, 4> cmyw = {
-        wxColour("#08ABFB"), wxColour("#D93B90"), wxColour("#F9ED3D"), wxColour("#FFFFFF")
-    };
-    std::vector<wxColour> colours(cmyw.begin(), cmyw.end());
+    using namespace Slic3r;
+    using namespace Slic3r::GUI;
+    const auto* bundle = wxGetApp().preset_bundle;
+    if (!bundle)
+        return {};
+    const auto used_black = tracery_black_materials(*bundle, tracery_plate_materials());
+    const unsigned int black_id = used_black.empty() ? 0 : used_black.front();
+    const auto mode = tracery_plate_material_mode(*bundle, black_id);
+    std::vector<wxColour> colours{wxColour("#08ABFB"), wxColour("#D93B90"), wxColour("#F9ED3D")};
+    if (mode == TraceryMaterialMode::CMYW)
+        colours.emplace_back("#FFFFFF");
+    else if (mode == TraceryMaterialMode::CMYK)
+        colours.emplace_back(bundle->project_config.option<ConfigOptionStrings>("filament_colour")->values.at(black_id - 1));
     std::vector<TraceryEditorRecipe> palette;
-    // Five-percent increments are sufficient for a visual palette, keep the
-    // editor responsive, and leave 328 legal recipes before colour grouping.
+    // Use the same material mode as final recipe generation, including
+    // translucent black. Never match a CMYK source against a white-only palette.
     constexpr int step = 5;
     for (int c = 0; c <= 100; c += step)
         for (int m = 0; m <= 100 - c; m += step)
             for (int y = 0; y <= 100 - c - m; y += step) {
                 const std::array<int, 4> weights = { c, m, y, 100 - c - m - y };
-                if (!is_legal_tracery_recipe(weights))
+                if (!legal_tracery_weights(weights, mode))
                     continue;
-                std::vector<double> mix_weights;
-                mix_weights.reserve(weights.size());
-                for (const int weight : weights)
-                    mix_weights.emplace_back(weight);
+                std::vector<double> mix_weights(weights.begin(), weights.begin() + colours.size());
                 palette.push_back({ weights, Slic3r::GUI::blend_multi_filament_mixer(colours, mix_weights) });
             }
     return palette;
@@ -508,6 +507,7 @@ bool GLGizmoTracery::on_init()
 
 bool GLGizmoTracery::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_position, bool shift_down, bool alt_down, bool control_down)
 {
+    refresh_source_selection_policy();
     if (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown) {
         // Holding Shift has the same effect as clearing the selection in the
         // painter base. Remember the operation for the commit that runs on
@@ -531,6 +531,7 @@ std::string GLGizmoTracery::on_get_name() const
 
 void GLGizmoTracery::render_painter_gizmo()
 {
+    refresh_source_selection_policy();
     // This is an editing overlay only. The final stained-glass colours still
     // come exclusively from ordinary MMU paint; no generated fragment is
     // rendered here.
@@ -1088,6 +1089,39 @@ void GLGizmoTracery::update_model_object()
     // visible result even while this editor remains open.
     apply_stained_glass_colors();
     m_parent.set_as_dirty();
+}
+
+void GLGizmoTracery::refresh_source_selection_policy(bool filter_masks)
+{
+    const auto* bundle = wxGetApp().preset_bundle;
+    const auto* object = m_c && m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (!bundle || !object)
+        return;
+    size_t index = 0;
+    for (const auto* volume : object->volumes) {
+        if (!volume->is_model_part())
+            continue;
+        if (index >= m_fill_reference_selectors.size() || index >= m_triangle_selectors.size())
+            break;
+        const auto blocked = tracery_unselectable_states(*bundle, unsigned(std::max(1, volume->extruder_id())));
+        const bool changed = index >= m_source_selection_policy.size() || m_source_selection_policy[index] != blocked;
+        if (index >= m_source_selection_policy.size())
+            m_source_selection_policy.resize(index + 1);
+        m_source_selection_policy[index] = blocked;
+        m_fill_reference_selectors[index]->set_unselectable_states(blocked);
+        if (changed)
+            m_fill_reference_selectors[index]->request_update_render_data();
+        if ((filter_masks || changed) && !blocked.empty()) {
+            TriangleSelector source(volume->mesh());
+            source.deserialize(index < m_stained_glass_base_paint_data.size() ?
+                m_stained_glass_base_paint_data[index] : volume->mmu_segmentation_facets.get_data(), false);
+            tracery_filter_source_selection(*m_triangle_selectors[index], source, blocked);
+            m_triangle_selectors[index]->request_update_render_data(true);
+            if (index < m_mask_data.size())
+                m_mask_data[index] = m_triangle_selectors[index]->serialize();
+        }
+        ++index;
+    }
 }
 
 void GLGizmoTracery::commit_material_selection()
@@ -2859,6 +2893,9 @@ void GLGizmoTracery::publish_generated_fragments(
 
 void GLGizmoTracery::generate_paint_plan()
 {
+    // Revalidate restored masks and changed filament presets before generation.
+    // Back projections are generated later and never pass through this filter.
+    refresh_source_selection_policy(true);
     m_regeneration_requested = false;
     if (!m_incremental_generation)
         m_tracery_selections.clear();
@@ -3181,12 +3218,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
     const size_t old_physical_count = colour_option->values.size();
 
     const auto used_materials = tracery_plate_materials();
-    std::vector<bool> black_slots;
-    for (const auto& text : colour_option->values) {
-        const wxColour colour(text);
-        black_slots.push_back(colour.IsOk() && colour.Red() <= 32 && colour.Red() == colour.Green() && colour.Green() == colour.Blue());
-    }
-    const auto used_black = tracery_used_black_materials(black_slots, used_materials);
+    const auto used_black = tracery_black_materials(*bundle, used_materials);
     if (used_black.size() > 1) {
         wxMessageBox(_L("More than one black material is used on this plate. Assign the black areas to one material before applying stained glass."),
                      _L("Stained glass"), wxOK | wxICON_WARNING);
@@ -3482,7 +3514,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         const bool has_regions = model_part < m_generated_voronoi_regions.size() && !m_generated_voronoi_regions[model_part].empty();
         if (!palette_only && (has_regions || (!m_incremental_generation && model_part < m_stained_glass_base_paint_data.size()))) {
             auto prepared = prepare_volume_tracery_partition(*volume, model_part, &plan.conversion,
-                                                             &plan.fragment_mixed_filament_ids, black_id);
+                                                             &plan.fragment_mixed_filament_ids);
             prepared.volume = converted->volumes[vi];
             plan.partitions.emplace_back(std::move(prepared));
         }
@@ -4477,7 +4509,7 @@ void GLGizmoTracery::replace_tracery_mesh(ModelVolume& volume, TraceryPartitionR
 }
 
 GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_partition(ModelVolume& volume, size_t volume_index,
-    const EnforcerBlockerStateMap* mapping, const std::vector<unsigned int>* recipes, unsigned int black_id) const
+    const EnforcerBlockerStateMap* mapping, const std::vector<unsigned int>* recipes) const
 {
     PreparedTraceryVolume prepared;
     prepared.volume        = &volume;
@@ -4496,12 +4528,13 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
         restore.original_annotations[0] = tracery_remap_paint(restore.original_mesh, restore.original_annotations[0], *mapping);
         restore.last_annotations[0] = tracery_remap_paint(volume.mesh(), restore.last_annotations[0], *mapping);
     }
-    if (recipes)
+    if (recipes) {
         for (auto& facet : regions)
             for (auto& region : facet.regions)
                 region.color = EnforcerBlockerType(recipes->at(region.fragment_id));
-    regions = tracery_preserve_black(volume.mesh(), annotations[0], std::move(regions), black_id,
-                                      unsigned(std::max(1, volume.extruder_id())));
+    }
+    // Source eligibility was enforced before generation. Target paint, including
+    // opaque black, must not overwrite either generated or through-projected regions.
     prepared.partition = build_exact_tracery_partition(volume.mesh(), annotations, regions);
     advance_tracery_restore_state(prepared.restore_state, volume.mesh(), current, prepared.partition);
     if (volume_index < m_generated_voronoi_regions.size())
@@ -5054,6 +5087,7 @@ void GLGizmoTracery::update_from_model_object(bool)
     }
     m_triangle_selectors.clear();
     m_fill_reference_selectors.clear();
+    m_source_selection_policy.clear();
     std::vector<ColorRGBA> extruder_colors = ::get_extruders_colors();
     if (extruder_colors.empty())
         extruder_colors.push_back(GLVolume::NEUTRAL_COLOR);
@@ -5095,6 +5129,7 @@ void GLGizmoTracery::update_from_model_object(bool)
     }
     // The finished effect is ordinary MMU paint. Reopening restores only the
     // editing mask; it never recreates a renderable fragment layer.
+    refresh_source_selection_policy(true);
 }
 
 void GLGizmoTracery::on_shutdown()

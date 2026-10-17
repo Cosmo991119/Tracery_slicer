@@ -1,5 +1,6 @@
 #include "TraceryPlateMaterials.hpp"
 #include "PresetBundle.hpp"
+#include "Color.hpp"
 #include <stdexcept>
 
 namespace Slic3r {
@@ -131,32 +132,44 @@ TriangleSelector::TriangleSplittingData tracery_remap_paint(const TriangleMesh& 
     return selector.serialize();
 }
 
-TriangleSelector::Tracery2DData tracery_preserve_black(const TriangleMesh& mesh,
-    const TriangleSelector::TriangleSplittingData& paint, TriangleSelector::Tracery2DData regions,
-    unsigned int black_id, unsigned int default_material)
+std::vector<unsigned int> tracery_black_materials(const PresetBundle& bundle, const std::vector<unsigned int>& used)
 {
-    if (black_id == 0) return regions;
-    TriangleSelector selector(mesh);
-    selector.deserialize(paint, false);
-    for (const auto& leaf : selector.painted_leaves(default_material == black_id)) {
-        if (unsigned(leaf.state) != black_id && !(leaf.state == EnforcerBlockerType::NONE && default_material == black_id))
-            continue;
-        const Vec3d a = leaf.vertices[0].cast<double>();
-        const Vec3d b = leaf.vertices[1].cast<double>() - a;
-        const Vec3d c = leaf.vertices[2].cast<double>() - a;
-        if (b.cross(c).squaredNorm() <= 1e-24) continue;
-        TriangleSelector::TraceryFacet2DData facet;
-        facet.source_facet_id = leaf.source_facet;
-        facet.origin = a;
-        facet.axis_u = b.normalized();
-        facet.axis_v = b.cross(c).normalized().cross(facet.axis_u);
-        TriangleSelector::TraceryRegion2D region;
-        region.color = leaf.state;
-        region.polygon = {Vec2d::Zero(), Vec2d(b.norm(), 0.), Vec2d(c.dot(facet.axis_u), c.dot(facet.axis_v))};
-        facet.regions.push_back(std::move(region));
-        regions.push_back(std::move(facet)); // priority over generated regions
+    const auto* colours = bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+    if (!colours) return {};
+    std::vector<bool> black_slots;
+    for (const auto& text : colours->values) {
+        ColorRGB colour;
+        black_slots.push_back(decode_color(text, colour) && colour.r() <= 32.f / 255.f &&
+                              colour.r() == colour.g() && colour.g() == colour.b());
     }
-    return regions;
+    return tracery_used_black_materials(black_slots, used);
+}
+
+std::set<EnforcerBlockerType> tracery_unselectable_states(const PresetBundle& bundle, unsigned int default_material)
+{
+    const auto* colours = bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+    if (!colours) return {};
+    std::vector<unsigned int> ids;
+    for (size_t index = 0; index < colours->values.size(); ++index)
+        ids.push_back(unsigned(index + 1));
+    std::set<EnforcerBlockerType> result;
+    for (unsigned int id : tracery_black_materials(bundle, ids)) {
+        if (tracery_filament_is_full_spectrum(bundle, id))
+            continue;
+        result.insert(EnforcerBlockerType(id));
+        if (id == default_material)
+            result.insert(EnforcerBlockerType::NONE);
+    }
+    return result;
+}
+
+void tracery_filter_source_selection(TriangleSelector& selection, const TriangleSelector& source,
+                                     const std::set<EnforcerBlockerType>& blocked)
+{
+    if (blocked.empty()) return;
+    selection.set_leaf_states([&](const Vec3f& point, int facet) {
+        return blocked.count(source.state_at(point, facet)) ? EnforcerBlockerType::NONE : selection.state_at(point, facet);
+    });
 }
 
 void tracery_remap_object_materials(ModelObject& object, const EnforcerBlockerStateMap& mapping,
