@@ -4,6 +4,7 @@
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
 #include <algorithm>
+#include <array>
 #include <map>
 #include <cmath>
 #include <iterator>
@@ -185,6 +186,11 @@ void collect_edge_cuts(const indexed_triangle_set& mesh, const std::vector<Facet
 void allocate_edge_vertices(const indexed_triangle_set& source, EdgeCuts& cuts, indexed_triangle_set& output)
 {
     output.vertices = source.vertices;
+    // Cuts on incident source edges may round to exactly the same float
+    // position near their common endpoint. Share their identity without
+    // welding unrelated shells or enlarging the geometric tolerance.
+    using Position = std::array<float, 3>;
+    std::map<std::pair<int, Position>, int> incident_vertices;
     for (auto& [edge, parameters] : cuts.parameters) {
         parameters.push_back(0.);
         parameters.push_back(1.);
@@ -201,9 +207,24 @@ void allocate_edge_vertices(const indexed_triangle_set& source, EdgeCuts& cuts, 
         parameters = std::move(unique);
         auto& ids  = cuts.vertices[edge];
         for (double t : parameters) {
-            const int index = t == 0. ? edge.first : (t == 1. ? edge.second : int(output.vertices.size()));
-            if (t != 0. && t != 1.)
-                output.vertices.push_back((a + t * delta).cast<float>());
+            const Vec3f position = (a + t * delta).cast<float>();
+            const Position key{position.x(), position.y(), position.z()};
+            int index = t == 0. ? edge.first : (t == 1. ? edge.second : -1);
+            if (index < 0) {
+                for (int endpoint : {edge.first, edge.second}) {
+                    const auto found = incident_vertices.find({endpoint, key});
+                    if (found != incident_vertices.end()) {
+                        index = found->second;
+                        break;
+                    }
+                }
+                if (index < 0) {
+                    index = int(output.vertices.size());
+                    output.vertices.push_back(position);
+                }
+            }
+            incident_vertices.emplace(std::make_pair(edge.first, key), index);
+            incident_vertices.emplace(std::make_pair(edge.second, key), index);
             ids.push_back(index);
         }
     }
@@ -263,6 +284,16 @@ void allocate_partition_vertex(const Point& point, const FacetFrame& frame, std:
 {
     if (vertices.count(point))
         return;
+    const Vec3f position = frame.lift(point).cast<float>();
+    // Different projected points may round to the same stored mesh vertex.
+    // Reuse the shared-edge identity before applying the planar weld tolerance.
+    // Otherwise edge enforcement can split a face through its own third vertex.
+    for (const auto& [candidate, id] : vertices) {
+        if (output.vertices[id] == position) {
+            vertices[point] = id;
+            return;
+        }
+    }
     int    nearest  = -1;
     double distance = std::pow(scale_(weld_tolerance) + 2., 2);
     for (const auto& [candidate, id] : vertices) {
@@ -274,7 +305,7 @@ void allocate_partition_vertex(const Point& point, const FacetFrame& frame, std:
     }
     if (nearest < 0) {
         nearest = int(output.vertices.size());
-        output.vertices.push_back(frame.lift(point).cast<float>());
+        output.vertices.push_back(position);
     }
     vertices[point] = nearest;
 }

@@ -148,6 +148,32 @@ TEST_CASE("Replacing an old paint colour frees its head while preserving the bla
     REQUIRE(paint.serialize() == original);
 }
 
+TEST_CASE("Exact cut sharing does not join coincident disconnected shells", "[TraceryPartition]")
+{
+    indexed_triangle_set mesh = square_mesh().its;
+    const auto original = mesh;
+    mesh.vertices.insert(mesh.vertices.end(), original.vertices.begin(), original.vertices.end());
+    for (const auto& t : original.indices)
+        mesh.indices.emplace_back(t[0] + 4, t[1] + 4, t[2] + 4);
+    auto regions = straight_partition();
+    const auto first_regions = regions;
+    for (auto facet : first_regions) {
+        facet.source_facet_id += 2;
+        regions.push_back(std::move(facet));
+    }
+    const auto result = build_exact_tracery_partition(TriangleMesh(mesh), {TriangleSelector::TriangleSplittingData{}}, regions);
+    std::map<int, int> vertex_shells;
+    for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
+        const int shell = result.source_facets[i] / 2;
+        const auto& t = result.mesh.indices[i];
+        for (int e = 0; e < 3; ++e) {
+            const auto entry = vertex_shells.emplace(t[e], shell);
+            CHECK(entry.first->second == shell);
+        }
+    }
+    CHECK(result.mesh.indices.size() > mesh.indices.size());
+}
+
 TEST_CASE("Partially covered and unselected paint still reserves its physical materials", "[TraceryPartition][TraceryBudget]")
 {
     const TriangleMesh source = square_mesh();
@@ -488,8 +514,58 @@ TEST_CASE("Existing stained-glass project can migrate its painted topology", "[T
     REQUIRE(load_bbs_3mf(path.c_str(), &config, &context, &model, &plates, &presets, &is_bbs, &version, nullptr, LoadStrategy::LoadModel));
     REQUIRE(presets.empty());
     size_t painted_volumes = 0;
+    size_t arched_volumes = 0;
     for (const ModelObject* object : model.objects) {
         for (const ModelVolume* volume : object->volumes) {
+            if (volume->is_model_part() && volume->name == "part_22") {
+                ++arched_volumes;
+                for (bool both_sides : {false, true}) {
+                    CAPTURE(both_sides);
+                    // The arched window's shared edge produces independently allocated
+                    // cut vertices that round to identical float coordinates.
+                    const auto& mesh = volume->mesh();
+                    TriangleSelector::Tracery2DData regions;
+                    for (size_t i = 0; i < mesh.its.indices.size(); ++i) {
+                        const auto& t = mesh.its.indices[i];
+                        const Vec3d a = mesh.its.vertices[t[0]].cast<double>();
+                        const Vec3d b = mesh.its.vertices[t[1]].cast<double>() - a;
+                        const Vec3d c = mesh.its.vertices[t[2]].cast<double>() - a;
+                        const Vec3d normal = b.cross(c);
+                        if (std::abs(normal.normalized().z()) < .5)
+                            continue;
+                        if (!both_sides && normal.z() < 0.)
+                            continue;
+                        TriangleSelector::TraceryFacet2DData facet;
+                        facet.source_facet_id = int(i);
+                        facet.origin = a;
+                        facet.axis_u = b.normalized();
+                        facet.axis_v = normal.normalized().cross(facet.axis_u);
+                        TriangleSelector::TraceryRegion2D region;
+                        region.color = EnforcerBlockerType(2);
+                        region.polygon = {Vec2d::Zero(), Vec2d(b.norm() * .371, 0.),
+                                          Vec2d(c.dot(facet.axis_u) * .371, c.dot(facet.axis_v) * .371)};
+                        facet.regions.push_back(region);
+                        regions.push_back(facet);
+                    }
+                    const auto partition = build_exact_tracery_partition(mesh, {volume->mmu_segmentation_facets.get_data()}, regions);
+                    CHECK(precise_volume(partition.mesh) == Catch::Approx(precise_volume(mesh.its)).epsilon(1e-6).margin(.001));
+                    for (size_t i = 0; i < partition.mesh.indices.size(); ++i) {
+                        const auto& t = partition.mesh.indices[i];
+                        const Vec3d a = partition.mesh.vertices[t[0]].cast<double>();
+                        const Vec3d b = partition.mesh.vertices[t[1]].cast<double>();
+                        const Vec3d c = partition.mesh.vertices[t[2]].cast<double>();
+                        REQUIRE((b - a).cross(c - a).norm() >= 1e-12);
+                        CHECK_NOTHROW(clip_tracery_polygon_to_facet(partition.mesh, int(i),
+                            {a.cast<float>(), b.cast<float>(), c.cast<float>()}));
+                    }
+                    std::map<std::pair<int, int>, size_t> edges;
+                    for (const auto& t : partition.mesh.indices)
+                        for (int e = 0; e < 3; ++e)
+                            ++edges[std::minmax(t[e], t[(e + 1) % 3])];
+                    for (const auto& edge : edges)
+                        CHECK(edge.second == 2);
+                }
+            }
             if (!volume->is_model_part() || volume->mmu_segmentation_facets.empty())
                 continue;
             ++painted_volumes;
@@ -514,6 +590,7 @@ TEST_CASE("Existing stained-glass project can migrate its painted topology", "[T
         }
     }
     CHECK(painted_volumes > 0);
+    CHECK(arched_volumes > 0);
 }
 
 TEST_CASE("Tracery restore snapshots survive undo serialization for independent volumes", "[TraceryPartition]")
