@@ -187,7 +187,7 @@ private:
                                      bool verify_integrity,
                                      PublishGeneratedFragmentsIntegrity* builder_integrity);
     PublishGeneratedFragmentsIntegrity inspect_published_fragments(size_t fragment_count) const;
-    void apply_stained_glass_colors();
+    void apply_stained_glass_colors(const std::function<void()>& rollback_preparation = {});
     struct PreparedTraceryVolume;
     struct StainedGlassApplyPlan {
         enum class Mode {

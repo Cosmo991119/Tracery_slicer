@@ -1,0 +1,59 @@
+Tracery performance diagnostics
+
+Enable only in a diagnostic process:
+    TRACERY_PERF_TRACE=1 <app executable> ... > trace.log 2>&1
+Unset the variable (the default) to disable all trace output.
+
+Tests:
+    python3 scripts/test_tracery_performance_trace.py
+    ctest --test-dir <build> -C Release -R '^tracery_(performance|partition|materials|plate)$' -V
+    TRACERY_PERF_TRACE=1 ctest --test-dir <build> -C Release -R '^tracery_performance$' -V
+
+Log schema (TRACERY_UI_PERF):
+- kind=total: inclusive scope duration. scope_id is process-local and unique;
+  parent_id links it to its enclosing scope (0 means a root).
+- kind=detail: stage or accumulated loop duration in scope_id. parent_phase
+  identifies the enclosing stage/scope. calls is the number of accumulated
+  samples. Never add an inclusive duration to its own children.
+- metric/value: numerical workload metadata associated with scope_id.
+- status=completed: this scope returned normally, not necessarily a paint commit.
+  Look for a completed commit under the same successful stroke to confirm apply.
+- status=exception: scope/stage unwound through an exception.
+- status=failed: a descendant failed or the apply handler caught an error.
+
+stroke is the completed-stroke callback. It excludes selection while dragging
+and presentation of the next rendered frame. apply.compute excludes the error
+message wait; apply.error_dialog_wait measures that wait separately. Failed
+stroke/apply totals still include the wait and must not be treated as successful
+compute samples. The most recent failure may have partial logs until the dialog
+is dismissed. No model names, coordinates, or material definitions are logged.
+
+partition_and_remap stages:
+- collect_current_annotations, copy_restore_snapshot, collect_partition_annotations
+- build_regions, remap_material_ids (five material_mapping sub-stages)
+- geometry (nested exact_partition scope)
+- advance_restore_state
+- remap_generated_regions, remap_history_regions (nested region_mapping scopes)
+- assign_region_materials, cleanup
+
+exact_partition stages:
+- initialize_facets, overlay_annotations, overlay_tracery
+- collect_edge_cuts_initial/final, allocate_edge_vertices_initial/final
+- presynchronize_vertices
+- triangulate_facets_total, containing accumulated facet_vertex_sync,
+  constrained_triangulation, and emit_and_classify_faces samples
+- enforce_edge_cuts, validate_topology
+- rebuild_annotations, containing annotation_selector_construction,
+  annotation_assign_states, and annotation_serialize samples
+- cleanup
+
+region_mapping stages: build_children_index, clip_regions, cleanup.
+Workload metrics include volume index, source/output face count, annotation
+channels, input regions, partitioned facets, overlay cells, history selection
+count and clipping calls. Parent scope IDs relate these to each stroke.
+
+Tracing adds clock reads, aggregation and log I/O. It is for attribution, not
+zero-overhead benchmarking. Samples inside loops are aggregated, not printed
+per triangle. Parent timings include child log I/O and small instrumentation
+costs. Compare equivalent inputs and settings; use repeated runs, and report
+trace-disabled timings separately when evaluating an optimization.

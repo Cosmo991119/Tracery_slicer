@@ -89,3 +89,27 @@ if (WIN32)
     target_link_libraries(tracery_plate_tests PRIVATE bcrypt.lib crypt32.lib)
 endif()
 add_test(NAME tracery_plate COMMAND tracery_plate_tests "[TraceryPlate]")
+
+# Explicit performance diagnostics: real production paths, no wall-time pass/fail
+# thresholds. Keep separate from the general suite and its unrelated fixtures.
+if(TARGET libslic3r_gui)
+    add_executable(tracery_performance_tests
+        test_tracery_performance.cpp
+        ${PROJECT_SOURCE_DIR}/src/sentry_wrapper/SentryWrapper.cpp
+        ${PROJECT_SOURCE_DIR}/src/bury_cfg/bury_point.cpp
+        ${PROJECT_SOURCE_DIR}/src/common_func/common_func.cpp)
+    # wxWidgets is discovered in src/, whose directory settings do not reach tests/.
+    get_directory_property(_tracery_wx_includes DIRECTORY "${PROJECT_SOURCE_DIR}/src" DEFINITION wxWidgets_INCLUDE_DIRS)
+    get_directory_property(_tracery_wx_definitions DIRECTORY "${PROJECT_SOURCE_DIR}/src" DEFINITION wxWidgets_DEFINITIONS)
+    target_include_directories(tracery_performance_tests SYSTEM PRIVATE ${_tracery_wx_includes})
+    target_compile_definitions(tracery_performance_tests PRIVATE ${_tracery_wx_definitions})
+    # The GUI already provides NanoSVG's implementation via BitmapCache.cpp.
+    set(_tracery_perf_libraries ${TEST_LINK_LIBS})
+    list(REMOVE_ITEM _tracery_perf_libraries test_nanosvg_impl)
+    target_link_libraries(tracery_performance_tests PRIVATE libslic3r_gui ${_tracery_perf_libraries})
+    if(WIN32)
+        target_link_libraries(tracery_performance_tests PRIVATE bcrypt.lib crypt32.lib)
+    endif()
+    add_test(NAME tracery_performance COMMAND tracery_performance_tests "[TraceryPerformance]")
+    set_tests_properties(tracery_performance PROPERTIES LABELS "performance" RUN_SERIAL TRUE TIMEOUT 180)
+endif()

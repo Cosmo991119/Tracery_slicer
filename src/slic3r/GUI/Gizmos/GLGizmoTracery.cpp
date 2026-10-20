@@ -11,6 +11,7 @@
 #include "slic3r/GUI/MixedFilamentColorMapPanel.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TraceryMaterialPlan.hpp"
+#include "libslic3r/TraceryPerformance.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "slic3r/GUI/format.hpp"
@@ -29,6 +30,8 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <chrono>
 #include <cstring>
@@ -43,9 +46,12 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <tuple>
 #include <utility>
 
 namespace {
+
+using Slic3r::TraceryPerformanceScope;
 
 #ifndef NDEBUG
 struct TraceryDisplayCanvasProbe {
@@ -1081,13 +1087,36 @@ void GLGizmoTracery::clear_stained_glass_editor()
 
 void GLGizmoTracery::update_model_object()
 {
-    commit_material_selection();
-    m_selection_modified = true;
-    capture_mask_and_generate();
-    // This gizmo is a destructive, generated paint brush. Commit on every
-    // completed stroke so the standard colour-painting renderer owns the
-    // visible result even while this editor remains open.
-    apply_stained_glass_colors();
+    const TraceryPerformanceScope performance("stroke");
+    // The selectors already contain the brush preview, but m_mask_data still
+    // describes the last committed stroke. Keep the complete editor checkpoint
+    // until every volume's replacement geometry has been prepared.
+    auto state = std::tie(m_mask_object_id, m_mask_object_index, m_mask_data, m_previous_mask_data,
+                         m_stained_glass_base_paint_data, m_tracery_selections, m_generated_fragments,
+                         m_generated_voronoi_regions, m_fragment_colors, m_fragment_mixed_filament_ids,
+                         m_transition_recipe_targets, m_pending_selection_fragment_count, m_pending_selection_mode,
+                         m_incremental_generation, m_selection_modified, m_generation_integrity_valid,
+                         m_regeneration_requested, m_regeneration_version);
+    auto checkpoint = std::apply([](const auto&... values) { return std::make_tuple(values...); }, state);
+    bool restored = false;
+    const std::function<void()> rollback = [&] {
+        if (restored)
+            return;
+        state = std::move(checkpoint);
+        restored = true;
+        update_from_model_object(false);
+        m_parent.set_as_dirty();
+    };
+    try {
+        commit_material_selection();
+        m_selection_modified = true;
+        capture_mask_and_generate();
+    } catch (const std::exception& error) {
+        rollback();
+        wxMessageBox(from_u8(error.what()), _L("Stained glass"), wxOK | wxICON_ERROR);
+        return;
+    }
+    apply_stained_glass_colors(rollback);
     m_parent.set_as_dirty();
 }
 
@@ -1163,6 +1192,7 @@ void GLGizmoTracery::commit_material_selection()
 
 void GLGizmoTracery::capture_mask_and_generate()
 {
+    const TraceryPerformanceScope performance("selection_and_generation");
     const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
         m_c->selection_info()->model_object() : nullptr;
     if (model_object == nullptr)
@@ -2941,18 +2971,20 @@ void GLGizmoTracery::generate_paint_plan()
     publish_generated_regions(std::move(generated));
 }
 
-void GLGizmoTracery::apply_stained_glass_colors()
+void GLGizmoTracery::apply_stained_glass_colors(const std::function<void()>& rollback_preparation)
 {
-    if (!m_generation_integrity_valid)
+    TraceryPerformanceScope performance("apply");
+    performance.stage("apply.compute");
+    if (!m_generation_integrity_valid) {
+        if (rollback_preparation)
+            rollback_preparation();
         return;
+    }
 
     // An incremental stroke fully inside an existing selection has no new
     // leaves to bake. Crucially, do not restore the base snapshot here.
     if (m_incremental_generation && m_fragment_colors.empty())
         return;
-
-    if (m_pending_selection_mode == PaintMode::THROUGH)
-        generate_through_voronoi_regions();
 
     const auto previous_colours = m_fragment_colors;
     const auto previous_regions = m_generated_voronoi_regions;
@@ -2964,16 +2996,45 @@ void GLGizmoTracery::apply_stained_glass_colors()
     };
     bool commit_started = false;
     try {
+        if (m_pending_selection_mode == PaintMode::THROUGH)
+            generate_through_voronoi_regions();
         apply_incremental_boundary_transitions();
         auto plan = prepare_stained_glass_apply();
         if (!plan) {
             restore_pending();
+            if (rollback_preparation)
+                rollback_preparation();
             return;
+        }
+        // Restoring the base paint used to build geometry inside commit, after
+        // the editor mask had changed. Prepare it here just like plate conversion
+        // so an exception leaves all live volumes untouched.
+        if (!plan->model && plan->mode != StainedGlassApplyPlan::Mode::ConvertPlate) {
+            auto* object = find_masked_model_object(wxGetApp().plater()->model());
+            if (!object)
+                throw std::runtime_error("Stained-glass object is no longer available");
+            size_t index = 0;
+            for (ModelVolume* volume : object->volumes) {
+                if (!volume->is_model_part())
+                    continue;
+                const bool has_regions = index < m_generated_voronoi_regions.size() && !m_generated_voronoi_regions[index].empty();
+                if (has_regions || (!m_incremental_generation && index < m_stained_glass_base_paint_data.size()))
+                    plan->partitions.push_back(prepare_volume_tracery_partition(
+                        *volume, index, nullptr,
+                        plan->mode == StainedGlassApplyPlan::Mode::BakeFragments ? &plan->fragment_mixed_filament_ids : nullptr));
+                ++index;
+            }
         }
         commit_started = true;
         commit_stained_glass_apply(std::move(*plan));
     } catch (const std::exception& error) {
-        if (!commit_started) restore_pending();
+        if (!commit_started) {
+            restore_pending();
+            if (rollback_preparation)
+                rollback_preparation();
+        }
+        performance.mark_failed();
+        performance.stage("apply.error_dialog_wait");
         wxMessageBox(from_u8(error.what()), _L("Stained glass"), wxOK | wxICON_ERROR);
     }
 }
@@ -3167,6 +3228,7 @@ void GLGizmoTracery::apply_incremental_boundary_transitions()
 
 std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_stained_glass_apply(bool palette_only)
 {
+    const TraceryPerformanceScope performance("prepare");
     if (!palette_only && m_fragment_colors.empty()) {
         // An empty selector means the user erased the complete glass mask.
         // Commit the base snapshot so those facets return to their ordinary
@@ -3398,6 +3460,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         if (display_colour.IsOk())
             visual_slots.push_back({display_colour, virtual_id, no_new_row});
     }
+    TraceryPerformanceScope recipe_performance("recipe_search_and_reuse");
     for (size_t index = 0; index < target_colours.size(); ++index) {
         MixedColorMatchRecipeResult recipe = build_tracery_recipe(base_colour_strings, target_colours[index], material_mode);
         if (!recipe.valid)
@@ -3451,6 +3514,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         new_rows.emplace_back(std::move(entry));
     }
 
+    recipe_performance.finish();
     bool has_unresolved_recipe = false;
     for (size_t index = 0; index < target_row_indices.size(); ++index) {
         if (palette_filament_ids[index] == 0 && target_row_indices[index] == no_new_row) {
@@ -3488,8 +3552,10 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
 
     for (const auto& [id, target] : plate_targets)
         plan.conversion.at(id) = EnforcerBlockerType(palette_filament_ids[target]);
+    TraceryPerformanceScope conversion_performance("plate_conversion");
     auto conversion = prepare_tracery_plate_conversion(source_model, plate_instances, inherited, reindex,
                                                         plan.conversion, plate->get_index());
+    conversion_performance.finish();
     auto allowed_materials = base_ids;
     if (black_id != 0) allowed_materials.push_back(black_id);
     for (const auto& [source, target] : conversion.target_objects)
@@ -4287,6 +4353,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
 
 void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
 {
+    const TraceryPerformanceScope performance("commit");
     const bool plate_conversion = bool(plan.model);
     if (plate_conversion) {
         auto* plater = wxGetApp().plater();
@@ -4386,6 +4453,13 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
             ",plan_mixed_ids=" + std::to_string(plan.fragment_mixed_filament_ids.size()));
     }
 #endif
+    if (!plate_conversion && !plan.partitions.empty()) {
+        for (auto& partition : plan.partitions)
+            commit_tracery_mesh_update(std::move(partition));
+        update_from_model_object(false);
+        invalidate_painting_raycast();
+        m_seed_fill_last_mesh_id = -1;
+    }
     if (plan.mode == StainedGlassApplyPlan::Mode::BakeFragments) {
         m_fragment_mixed_filament_ids = std::move(plan.fragment_mixed_filament_ids);
         for (size_t index = 0; index < m_transition_recipe_targets.size(); ++index) {
@@ -4422,7 +4496,7 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
             "mixed_ids=" + std::to_string(m_fragment_mixed_filament_ids.size()));
 #endif
     if (plan.mode != StainedGlassApplyPlan::Mode::ConvertPlate)
-        bake_fragments_to_mmu_painting(plate_conversion);
+        bake_fragments_to_mmu_painting(true);
     else if (const auto* object = find_masked_model_object(wxGetApp().plater()->model()))
         notify_mmu_paint_changed(*object);
 #ifndef NDEBUG
@@ -4465,15 +4539,21 @@ std::vector<TriangleSelector::TriangleSplittingData> GLGizmoTracery::collect_par
 std::vector<GLGizmoTracery::GeneratedVoronoiRegion> GLGizmoTracery::remap_partition_regions(
     const std::vector<GeneratedVoronoiRegion>& regions, const TraceryPartitionResult& partition) const
 {
+    TraceryPerformanceScope performance("region_mapping");
+    performance.count("input_regions", regions.size());
+    performance.stage("region_mapping.build_children_index");
     std::map<int, std::vector<int>> children;
     for (size_t i = 0; i < partition.source_facets.size(); ++i)
         children[partition.source_facets[i]].push_back(int(i));
+    performance.stage("region_mapping.clip_regions");
+    size_t clip_calls = 0;
     std::vector<GeneratedVoronoiRegion> result;
     for (const GeneratedVoronoiRegion& region : regions) {
         const auto found = children.find(region.source_facet_id);
         if (found == children.end())
             throw std::runtime_error("Lost source facet while remapping stained glass");
         for (int facet : found->second) {
+            ++clip_calls;
             auto polygon = clip_tracery_polygon_to_facet(partition.mesh, facet, region.local_polygon);
             if (polygon.size() < 3)
                 continue;
@@ -4483,6 +4563,9 @@ std::vector<GLGizmoTracery::GeneratedVoronoiRegion> GLGizmoTracery::remap_partit
             result.push_back(std::move(child));
         }
     }
+    performance.count("clip_calls", clip_calls);
+    performance.count("output_regions", result.size());
+    performance.stage("region_mapping.cleanup");
     return result;
 }
 
@@ -4511,22 +4594,47 @@ void GLGizmoTracery::replace_tracery_mesh(ModelVolume& volume, TraceryPartitionR
 GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_partition(ModelVolume& volume, size_t volume_index,
     const EnforcerBlockerStateMap* mapping, const std::vector<unsigned int>* recipes) const
 {
+    TraceryPerformanceScope performance("partition_and_remap");
+    performance.count("volume_index", volume_index);
+    performance.count("input_facets", volume.mesh().its.indices.size());
+    performance.count("history_selections", m_tracery_selections.size());
+    performance.stage("partition.collect_current_annotations");
     PreparedTraceryVolume prepared;
     prepared.volume        = &volume;
     prepared.index         = volume_index;
     auto current           = collect_volume_annotations(volume);
+    performance.stage("partition.copy_restore_snapshot");
     const auto snapshot    = m_mesh_restore_states.find(volume.id());
     prepared.restore_state = snapshot == m_mesh_restore_states.end() ? capture_tracery_restore_state(volume.mesh(), current) :
                                                                        snapshot->second;
+    performance.stage("partition.collect_partition_annotations");
     auto annotations = collect_partition_annotations(volume, volume_index);
+    performance.stage("partition.build_regions");
     auto regions = build_voronoi_2d_data(volume_index, {}, recipes != nullptr);
+    performance.count("region_source_facets", regions.size());
+    performance.stage("partition.remap_material_ids");
     if (mapping) {
-        current[0] = tracery_remap_paint(volume.mesh(), current[0], *mapping);
-        annotations[0] = tracery_remap_paint(volume.mesh(), annotations[0], *mapping);
-        annotations[5] = tracery_remap_paint(volume.mesh(), annotations[5], *mapping);
+        {
+            TraceryPerformanceScope::Sample sample(performance, "material_mapping.current_paint");
+            current[0] = tracery_remap_paint(volume.mesh(), current[0], *mapping);
+        }
+        {
+            TraceryPerformanceScope::Sample sample(performance, "material_mapping.partition_paint");
+            annotations[0] = tracery_remap_paint(volume.mesh(), annotations[0], *mapping);
+        }
+        {
+            TraceryPerformanceScope::Sample sample(performance, "material_mapping.base_paint");
+            annotations[5] = tracery_remap_paint(volume.mesh(), annotations[5], *mapping);
+        }
         auto& restore = prepared.restore_state;
-        restore.original_annotations[0] = tracery_remap_paint(restore.original_mesh, restore.original_annotations[0], *mapping);
-        restore.last_annotations[0] = tracery_remap_paint(volume.mesh(), restore.last_annotations[0], *mapping);
+        {
+            TraceryPerformanceScope::Sample sample(performance, "material_mapping.restore_original");
+            restore.original_annotations[0] = tracery_remap_paint(restore.original_mesh, restore.original_annotations[0], *mapping);
+        }
+        {
+            TraceryPerformanceScope::Sample sample(performance, "material_mapping.restore_last");
+            restore.last_annotations[0] = tracery_remap_paint(volume.mesh(), restore.last_annotations[0], *mapping);
+        }
     }
     if (recipes) {
         for (auto& facet : regions)
@@ -4535,15 +4643,21 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
     }
     // Source eligibility was enforced before generation. Target paint, including
     // opaque black, must not overwrite either generated or through-projected regions.
+    performance.stage("partition.geometry");
     prepared.partition = build_exact_tracery_partition(volume.mesh(), annotations, regions);
+    performance.count("output_facets", prepared.partition.mesh.indices.size());
+    performance.stage("partition.advance_restore_state");
     advance_tracery_restore_state(prepared.restore_state, volume.mesh(), current, prepared.partition);
+    performance.stage("partition.remap_generated_regions");
     if (volume_index < m_generated_voronoi_regions.size())
         prepared.generated = remap_partition_regions(m_generated_voronoi_regions[volume_index], prepared.partition);
+    performance.stage("partition.remap_history_regions");
     for (const TracerySelection& selection : m_tracery_selections) {
         prepared.selections.push_back(volume_index < selection.regions.size() ?
                                           remap_partition_regions(selection.regions[volume_index], prepared.partition) :
                                           std::vector<GeneratedVoronoiRegion>{});
     }
+    performance.stage("partition.assign_region_materials");
     if (recipes)
         for (auto& region : prepared.generated)
             region.mixed_filament_id = recipes->at(region.fragment_id);
@@ -4551,6 +4665,7 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
         for (auto& selection : prepared.selections)
             for (auto& region : selection)
                 region.mixed_filament_id = unsigned(mapping->at(region.mixed_filament_id));
+    performance.stage("partition.cleanup");
     return prepared;
 }
 
