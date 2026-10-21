@@ -1,3 +1,4 @@
+#include "TraceryDocument.hpp"
 #include "TraceryPlateMaterials.hpp"
 #include "PresetBundle.hpp"
 #include "Color.hpp"
@@ -180,6 +181,13 @@ void tracery_remap_object_materials(ModelObject& object, const EnforcerBlockerSt
     for (auto* volume : object.volumes) {
         if (!volume->is_model_part() && !volume->is_modifier()) continue;
         remap_config(volume->config, mapping);
+        if (!volume->tracery_edit_data.empty()) {
+            auto document = TraceryDocument::decode(volume->tracery_edit_data);
+            if (!document.matches(volume->mesh()))
+                throw std::runtime_error("Stained-glass editing data does not match the volume being converted");
+            document.remap_materials(mapping);
+            volume->tracery_edit_data = document.encode();
+        }
         const auto paint = tracery_remap_paint(volume->mesh(), volume->mmu_segmentation_facets.get_data(), mapping);
         if (paint != volume->mmu_segmentation_facets.get_data()) {
             TriangleSelector selector(volume->mesh());

@@ -458,8 +458,12 @@ set(lisbslic3r_sources
     TriangleSelector.hpp
     TraceryPlateMaterials.cpp
     TraceryPlateMaterials.hpp
+    TraceryRegionMapping.cpp
+    TraceryRegionMapping.hpp
     TraceryPartition.cpp
     TraceryPartition.hpp
+    TraceryDocument.cpp
+    TraceryDocument.hpp
     TraceryRestore.cpp
     TraceryRestore.hpp
     TriangleSetSampling.cpp

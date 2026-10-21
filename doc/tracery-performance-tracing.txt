@@ -6,7 +6,7 @@ Unset the variable (the default) to disable all trace output.
 
 Tests:
     python3 scripts/test_tracery_performance_trace.py
-    ctest --test-dir <build> -C Release -R '^tracery_(performance|partition|materials|plate)$' -V
+    ctest --test-dir <build> -C Release -R '^tracery_(performance|partition|materials|plate|mapping|mapping_performance|document)$' -V
     TRACERY_PERF_TRACE=1 ctest --test-dir <build> -C Release -R '^tracery_performance$' -V
 
 Log schema (TRACERY_UI_PERF):
@@ -29,12 +29,22 @@ compute samples. The most recent failure may have partial logs until the dialog
 is dismissed. No model names, coordinates, or material definitions are logged.
 
 partition_and_remap stages:
-- collect_current_annotations, copy_restore_snapshot, collect_partition_annotations
-- build_regions, remap_material_ids (five material_mapping sub-stages)
-- geometry (nested exact_partition scope)
-- advance_restore_state
+- collect_current_annotations, collect_partition_annotations
+- build_regions, remap_material_ids (partition_paint and base_paint samples)
+- geometry (nested stable_base_rebuild and exact_partition scopes)
+- save_editing_data (serialize the authoritative base and region document)
+- build_mapping_index (one index shared by generated regions and history)
 - remap_generated_regions, remap_history_regions (nested region_mapping scopes)
 - assign_region_materials, cleanup
+
+stable_base_rebuild stages:
+- annotation_deltas: import changes from ordinary painting/support/seam tools
+- mask_delta: project selection changes onto the immutable base facets
+- paint_regions: apply paint or restore erased regions without regenerating survivors
+- partition: reconstruct all annotation channels from the base
+- publish: update editing state only after the partition passes validation
+Metrics base_facets and derived_facets distinguish the fixed source workload
+from the previous output mesh; repeated strokes never promote output to base.
 
 exact_partition stages:
 - initialize_facets, overlay_annotations, overlay_tracery
@@ -47,10 +57,31 @@ exact_partition stages:
   annotation_assign_states, and annotation_serialize samples
 - cleanup
 
-region_mapping stages: build_children_index, clip_regions, cleanup.
+region_mapping stages: clip_regions, cleanup. clip_regions includes the spatial
+query, exact containment/separation predicates and any necessary clipping.
 Workload metrics include volume index, source/output face count, annotation
 channels, input regions, partitioned facets, overlay cells, history selection
 count and clipping calls. Parent scope IDs relate these to each stroke.
+
+Mapping-specific metrics:
+- candidate_pairs: pairs the legacy source-facet-only mapper would examine.
+- spatial_candidates: pairs retained by conservative 2D bounding-box filtering.
+- separated_candidates: spatial candidates rejected by exact convex separation.
+- inherited_regions / inherited_facets: fully contained regions or children
+  mapped without a polygon Boolean operation.
+- clip_calls: actual polygon Boolean operations after filtering and containment.
+- nonempty_results / output_regions: emitted region pieces.
+- mapping_index_estimated_bytes: approximate shared index and cached frame memory,
+  reported by partition_and_remap after all mappings; excludes allocator overhead.
+
+The tracery_mapping suite compares output face ownership and polygon coverage
+against exhaustive clipping, including thin faces, boundary slivers, tilted
+planes, coincident disconnected shells and repeated history mapping.
+tracery_mapping_performance runs both implementations on the same dense local
+mapping workload three times, reports median milliseconds and includes index
+construction in the optimized time. It checks workload reduction, not a fragile
+wall-clock threshold. This synthetic mapping benchmark is not an end-to-end
+brush latency measurement; manual tests must use identical models and strokes.
 
 Tracing adds clock reads, aggregation and log I/O. It is for attribution, not
 zero-overhead benchmarking. Samples inside loops are aggregated, not printed

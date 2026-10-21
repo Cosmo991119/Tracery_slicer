@@ -2,6 +2,7 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/TraceryPartition.hpp"
+#include "libslic3r/TraceryDocument.hpp"
 #include "libslic3r/TraceryMaterialPlan.hpp"
 #include "libslic3r/TraceryRestore.hpp"
 #include "libslic3r/Model.hpp"
@@ -23,6 +24,151 @@
 #include <cereal/types/vector.hpp>
 
 using namespace Slic3r;
+
+TEST_CASE("Circle brush partitions preserve topology beside a sub-micron sliver", "[TraceryPartition][BrushSlivers]")
+{
+    // Reduced from the first-stroke failure on source facet 4044. Facet 19 is
+    // almost collinear; distinct cuts on its two sides round to equal floats.
+    indexed_triangle_set its;
+    its.vertices = {
+        Vec3f(19.0329914f, 14.0040569f, 5.0f),
+        Vec3f(16.959877f, 16.253191f, 5.0f),
+        Vec3f(17.9964333f, 15.1286249f, 5.0f),
+        Vec3f(20.037117f, 12.9146757f, 5.0f),
+        Vec3f(16.9344044f, 13.056819f, 5.0f),
+        Vec3f(16.611145f, 12.9109087f, 5.0f),
+        Vec3f(15.8851118f, 12.5831995f, 5.0f),
+        Vec3f(14.8485527f, 13.7077665f, 5.0f),
+        Vec3f(14.9781218f, 13.5671959f, 5.0f),
+        Vec3f(15.3668308f, 13.145483f, 5.0f),
+        Vec3f(15.3636475f, 12.7459354f, 5.0f),
+        Vec3f(16.1847839f, 11.7543287f, 5.0f),
+        Vec3f(16.4957504f, 11.3162098f, 5.0f),
+        Vec3f(16.5585098f, 11.2481232f, 5.0f),
+        Vec3f(16.6212654f, 11.1800385f, 5.0f),
+        Vec3f(16.3131237f, 11.7158432f, 5.0f),
+        Vec3f(16.1876068f, 11.8520164f, 5.0f),
+        Vec3f(16.2503662f, 11.7839298f, 5.0f),
+        Vec3f(16.1248493f, 11.9201031f, 5.0f),
+        Vec3f(15.9491272f, 12.1107445f, 5.0f),
+        Vec3f(17.93853f, 11.9674377f, 5.0f),
+        Vec3f(17.4364662f, 12.5121269f, 5.0f)};
+    its.indices = {
+        Vec3i32(7, 4, 1),
+        Vec3i32(9, 7, 8),
+        Vec3i32(10, 6, 9),
+        Vec3i32(9, 6, 5),
+        Vec3i32(4, 0, 2),
+        Vec3i32(7, 9, 4),
+        Vec3i32(4, 9, 5),
+        Vec3i32(20, 13, 14),
+        Vec3i32(20, 21, 13),
+        Vec3i32(3, 0, 20),
+        Vec3i32(12, 21, 15),
+        Vec3i32(12, 13, 21),
+        Vec3i32(17, 15, 21),
+        Vec3i32(17, 18, 16),
+        Vec3i32(5, 17, 21),
+        Vec3i32(18, 17, 5),
+        Vec3i32(4, 5, 21),
+        Vec3i32(18, 5, 19),
+        Vec3i32(5, 6, 19),
+        Vec3i32(20, 4, 21),
+        Vec3i32(4, 20, 0),
+        Vec3i32(11, 15, 17)};
+    const TriangleMesh mesh(its);
+
+    const float radius = GENERATE(1.f, 3.f, 8.f);
+    CAPTURE(radius);
+    const Vec3i32 seed = its.indices[16];
+    const Vec3f center = (its.vertices[seed[0]] + its.vertices[seed[1]] + its.vertices[seed[2]]) / 3.f;
+    TriangleSelector mask(mesh);
+    auto cursor = TriangleSelector::SinglePointCursor::cursor_factory(
+        center, center + Vec3f(0, 0, 100), radius, TriangleSelector::CursorType::CIRCLE,
+        Transform3d::Identity(), TriangleSelector::ClippingPlane());
+    mask.select_patch(16, std::move(cursor), EnforcerBlockerType(1), Transform3d::Identity(), true);
+
+    // Clip the actual selector leaves against two adjacent Voronoi half-planes.
+    // Keeping the serialized brush mask exercises the same overlay as the GUI.
+    std::map<int, TriangleSelector::TraceryFacet2DData> grouped;
+    for (const auto& leaf : mask.painted_leaves()) {
+        for (int half = 0; half < 2; ++half) {
+            std::vector<Vec3d> clipped;
+            for (int e = 0; e < 3; ++e) {
+                const Vec3d a = leaf.vertices[e].cast<double>();
+                const Vec3d b = leaf.vertices[(e + 1) % 3].cast<double>();
+                const double da = (a.x() - center.x()) * (half ? -1 : 1);
+                const double db = (b.x() - center.x()) * (half ? -1 : 1);
+                if (da <= 0.)
+                    clipped.push_back(a);
+                if ((da < 0. && db > 0.) || (da > 0. && db < 0.))
+                    clipped.push_back(a + da / (da - db) * (b - a));
+            }
+            if (clipped.size() < 3)
+                continue;
+            auto& facet = grouped[leaf.source_facet];
+            facet.source_facet_id = leaf.source_facet;
+            const Vec3i32 original = its.indices[leaf.source_facet];
+            facet.origin = its.vertices[original[0]].cast<double>();
+            const Vec3d ab = its.vertices[original[1]].cast<double>() - facet.origin;
+            const Vec3d ac = its.vertices[original[2]].cast<double>() - facet.origin;
+            facet.axis_u = ab.normalized();
+            facet.axis_v = ab.cross(ac).normalized().cross(facet.axis_u);
+            TriangleSelector::TraceryRegion2D region;
+            region.fragment_id = half;
+            region.color = EnforcerBlockerType(2 + half);
+            for (const Vec3d& vertex : clipped) {
+                const Vec3d delta = vertex - facet.origin;
+                region.polygon.emplace_back(delta.dot(facet.axis_u), delta.dot(facet.axis_v));
+            }
+            facet.regions.push_back(std::move(region));
+        }
+    }
+    TriangleSelector::Tracery2DData regions;
+    for (auto& [id, facet] : grouped)
+        regions.push_back(std::move(facet));
+    TriangleSelector paint(mesh);
+    for (size_t i = 0; i < its.indices.size(); ++i)
+        paint.set_facet(int(i), EnforcerBlockerType(4));
+    const auto colors = paint.serialize();
+    TraceryPartitionResult result;
+    if (GENERATE(false, true)) {
+        std::vector<TriangleSelector::TriangleSplittingData> annotations{colors, {}, {}, {}, {}, colors, {}, {}};
+        auto document = TraceryDocument::capture(mesh, annotations);
+        annotations[6] = mask.serialize();
+        result = document.rebuild(mesh, annotations, regions, TraceryEdit::Paint);
+        const auto first = result.mesh;
+        result = document.rebuild(TriangleMesh(result.mesh), result.annotations, {}, TraceryEdit::Paint);
+        CHECK(result.mesh.vertices == first.vertices);
+        CHECK(result.mesh.indices == first.indices);
+    } else {
+        result = build_exact_tracery_partition(mesh, {colors, {}, {}, {}, {}, colors, mask.serialize(), {}}, regions);
+    }
+    REQUIRE(result.annotations.size() == 8);
+    REQUIRE(result.source_facets.size() == result.mesh.indices.size());
+    std::map<std::pair<int, int>, std::vector<std::pair<int, int>>> edges;
+    for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
+        const auto& triangle = result.mesh.indices[i];
+        const Vec3d a = result.mesh.vertices[triangle[0]].cast<double>();
+        const Vec3d b = result.mesh.vertices[triangle[1]].cast<double>();
+        const Vec3d c = result.mesh.vertices[triangle[2]].cast<double>();
+        REQUIRE((b - a).cross(c - a).squaredNorm() > 0.);
+        for (int e = 0; e < 3; ++e) {
+            const int from = triangle[e], to = triangle[(e + 1) % 3];
+            edges[std::minmax(from, to)].emplace_back(result.source_facets[i], from < to ? 1 : -1);
+        }
+    }
+    for (const auto& [edge, owners] : edges) {
+        REQUIRE(owners.size() <= 2);
+        if (owners.size() == 2 && owners[0].first == owners[1].first)
+            CHECK(owners[0].second + owners[1].second == 0);
+    }
+    const TriangleMesh output(result.mesh);
+    TriangleSelector output_colors(output);
+    output_colors.deserialize(result.annotations.front(), false);
+    CHECK(output_colors.has_facets(EnforcerBlockerType(2)));
+    CHECK(output_colors.has_facets(EnforcerBlockerType(3)));
+}
 
 TEST_CASE("Tracery classifies faces after a clipped corner collapses during snapping", "[TraceryPartition][CollapsedContour]")
 {
@@ -131,7 +277,7 @@ TEST_CASE("Repartitioning a thin tracery facet preserves its coverage", "[Tracer
 
 TEST_CASE("Repartitioning adjacent Cathedral slivers keeps shared edges matched", "[TraceryPartition][SharedSlivers]")
 {
-    const int fixture = GENERATE(0, 1, 2);
+    const int fixture = GENERATE(0, 1, 2, 3, 4, 5);
     CAPTURE(fixture);
     indexed_triangle_set its;
     its.vertices = {
@@ -186,6 +332,33 @@ TEST_CASE("Repartitioning adjacent Cathedral slivers keeps shared edges matched"
             Vec3i32(5, 6, 2), Vec3i32(8, 1, 2), Vec3i32(27, 0, 1), Vec3i32(1, 0, 28), Vec3i32(30, 3, 2),
             Vec3i32(1, 30, 2), Vec3i32(1, 29, 30), Vec3i32(1, 28, 29)};
     }
+    if (fixture == 3) {
+        // Reduced from the user's first-stroke failure: a narrow middle facet
+        // shares nearly coincident edges with two ordinary neighbouring facets.
+        its.vertices = {
+            Vec3f(-29.4556007f, 3.58566856f, 5), Vec3f(-28.0551758f, 3.63688588f, 5),
+            Vec3f(-27.880125f, 3.64328814f, 5), Vec3f(-28.0202827f, 3.20639396f, 5),
+            Vec3f(-27.9330521f, 2.13016605f, 5)};
+        its.indices = {Vec3i32(2, 1, 3), Vec3i32(1, 4, 3), Vec3i32(4, 1, 0)};
+    }
+    if (fixture == 4) {
+        // A cut imposed by the narrow neighbour rounds to the same integer
+        // projection as a source corner, but has a distinct stored position.
+        its.vertices = {
+            Vec3f(3.89525723f, -19.6925774f, 5), Vec3f(3.89525723f, -19.2046452f, 5),
+            Vec3f(3.56012392f, -19.342762f, 5), Vec3f(4.21185207f, -19.4177971f, 5),
+            Vec3f(4.52844763f, -19.1430168f, 5)};
+        its.indices = {Vec3i32(2, 0, 1), Vec3i32(3, 1, 0), Vec3i32(0, 4, 3)};
+    }
+    if (fixture == 5) {
+        // Saved Cathedral: float-collapsed connections put all three corners
+        // of a surviving boundary wedge on one canonical source-edge chain.
+        its.vertices = {
+            Vec3f(31.8730888367f, 11.7837581635f, 5), Vec3f(28.9829483032f, 14.0740566254f, 5),
+            Vec3f(28.1191482544f, 13.9897508621f, 5), Vec3f(28.119140625f, 13.9897537231f, 5),
+            Vec3f(28.1191425323f, 13.9897527695f, 5)};
+        its.indices = {Vec3i32(0, 1, 2), Vec3i32(0, 2, 3), Vec3i32(3, 4, 0)};
+    }
     const TriangleMesh source(its);
     TriangleSelector paint(source);
     TriangleSelector::Tracery2DData regions;
@@ -226,6 +399,31 @@ TEST_CASE("Repartitioning adjacent Cathedral slivers keeps shared edges matched"
     }
     for (const auto& [edge, count] : edge_counts)
         CHECK(count <= 2);
+}
+
+TEST_CASE("Untouched narrow neighbours do not manufacture new edge cuts", "[TraceryPartition][UnchangedSlivers]")
+{
+    indexed_triangle_set its;
+    its.vertices = {
+        Vec3f(-1.23958433f, -20.1610222f, 5), Vec3f(-1.1896919f, -20.1593876f, 5),
+        Vec3f(-1.15513623f, -20.1481895f, 5), Vec3f(-1.08602476f, -20.1257858f, 5),
+        Vec3f(-1.1091274f, -20.1768837f, 5), Vec3f(-1.13223028f, -20.2279835f, 5),
+        Vec3f(-1.14776266f, -20.3493118f, 5), Vec3f(-1.28569031f, -20.197773f, 5)};
+    its.indices = {Vec3i32(5, 3, 4), Vec3i32(4, 2, 5), Vec3i32(6, 3, 5), Vec3i32(2, 1, 5),
+                   Vec3i32(5, 0, 7), Vec3i32(1, 0, 5), Vec3i32(7, 6, 5)};
+    const TriangleMesh source(its);
+    TriangleSelector paint(source);
+    for (size_t i = 0; i < its.indices.size(); ++i)
+        paint.set_facet(int(i), EnforcerBlockerType(2));
+    const auto result = build_exact_tracery_partition(source, {paint.serialize()}, {});
+    REQUIRE(result.mesh.indices == its.indices);
+    REQUIRE(result.mesh.vertices == its.vertices);
+    CHECK(result.source_facets == std::vector<int>{0, 1, 2, 3, 4, 5, 6});
+    TriangleMesh output(result.mesh);
+    TriangleSelector restored(output);
+    restored.deserialize(result.annotations.front(), false);
+    for (const auto& leaf : restored.painted_leaves())
+        CHECK(leaf.state == EnforcerBlockerType(2));
 }
 
 TEST_CASE("Erasing tracery restores the exact original mesh and annotations", "[TraceryPartition]")

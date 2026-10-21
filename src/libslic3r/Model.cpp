@@ -9,6 +9,7 @@
 #include "MTUtils.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+#include "TraceryDocument.hpp"
 
 #include "Format/AMF.hpp"
 #include "Format/svg.hpp"
@@ -2102,6 +2103,7 @@ bool ModelVolume::is_the_only_one_part() const
 
 void ModelVolume::reset_extra_facets()
 {
+    tracery_edit_data.clear();
     this->supported_facets.reset();
     this->seam_facets.reset();
     this->mmu_segmentation_facets.reset();
@@ -2637,8 +2639,34 @@ std::vector<int> ModelVolume::get_extruders() const
     return volume_extruders;
 }
 
+// Hidden base colours must follow the same material-ID changes as visible
+// MMU paint, even when the affected slot is completely covered by stained glass.
+static void remap_tracery_materials(ModelVolume& volume, const EnforcerBlockerStateMap& mapping)
+{
+    if (volume.tracery_edit_data.empty())
+        return;
+    try {
+        auto document = TraceryDocument::decode(volume.tracery_edit_data);
+        if (!document.matches(volume.mesh())) {
+            volume.tracery_edit_data.clear();
+            return;
+        }
+        document.remap_materials(mapping);
+        volume.tracery_edit_data = document.encode();
+    } catch (const std::exception& error) {
+        BOOST_LOG_TRIVIAL(error) << "Cannot remap stained-glass editing data: " << error.what();
+        volume.tracery_edit_data.clear();
+    }
+}
+
 void ModelVolume::update_extruder_count(size_t extruder_count)
 {
+    if (!tracery_edit_data.empty()) {
+        EnforcerBlockerStateMap mapping;
+        for (size_t i = 0; i < mapping.size(); ++i)
+            mapping[i] = i <= extruder_count ? EnforcerBlockerType(i) : EnforcerBlockerType::NONE;
+        remap_tracery_materials(*this, mapping);
+    }
     std::vector<int> used_extruders = get_extruders();
     for (int extruder_id : used_extruders) {
         if (extruder_id > extruder_count) {
@@ -2649,11 +2677,9 @@ void ModelVolume::update_extruder_count(size_t extruder_count)
                 used_extruders_str += std::to_string(used_extruders[i]);
             }
             BOOST_LOG_TRIVIAL(warning) << "ModelVolume::update_extruder_count clipping painted extruders to limit"
-                                       << " volume_name=" << this->name
-                                       << " volume_id=" << this->id().id
-                                       << " requested_limit=" << extruder_count
-                                       << " used_extruders=[" << used_extruders_str << "]";
-            mmu_segmentation_facets.set_enforcer_block_type_limit(*this, (EnforcerBlockerType)extruder_count);
+                                       << " volume_name=" << this->name << " volume_id=" << this->id().id
+                                       << " requested_limit=" << extruder_count << " used_extruders=[" << used_extruders_str << "]";
+            mmu_segmentation_facets.set_enforcer_block_type_limit(*this, (EnforcerBlockerType) extruder_count);
             break;
         }
     }
@@ -2661,16 +2687,27 @@ void ModelVolume::update_extruder_count(size_t extruder_count)
 
 void ModelVolume::update_extruder_count_when_delete_filament(size_t extruder_count, size_t filament_id, int replace_filament_id)
 {
+    if (!tracery_edit_data.empty()) {
+        EnforcerBlockerStateMap mapping;
+        const size_t            limit = std::max(extruder_count, size_t(std::max(0, replace_filament_id)));
+        for (size_t i = 0; i < mapping.size(); ++i) {
+            const size_t mapped = i == filament_id ? size_t(std::max(0, replace_filament_id)) :
+                                                     (filament_id != 0 && i > filament_id ? i - 1 : i);
+            mapping[i]          = mapped <= limit ? EnforcerBlockerType(mapped) : EnforcerBlockerType::NONE;
+        }
+        mapping[0] = EnforcerBlockerType::NONE;
+        remap_tracery_materials(*this, mapping);
+    }
     std::vector<int> used_extruders = get_extruders();
     for (int extruder_id : used_extruders) {
         if (extruder_id >= filament_id) {
             // Calculate max_ebt to accommodate both physical and mixed filament IDs
             // If replace_filament_id is a mixed filament virtual ID, it may be larger than extruder_count
             size_t max_ebt_value = extruder_count;
-            if (replace_filament_id > 0 && (size_t)replace_filament_id > extruder_count) {
+            if (replace_filament_id > 0 && (size_t) replace_filament_id > extruder_count) {
                 max_ebt_value = replace_filament_id;
             }
-            
+
             mmu_segmentation_facets.set_enforcer_block_type_limit(*this, (EnforcerBlockerType) (max_ebt_value),
                                                                   (EnforcerBlockerType) (filament_id),
                                                                   (EnforcerBlockerType) (replace_filament_id));
@@ -2679,8 +2716,16 @@ void ModelVolume::update_extruder_count_when_delete_filament(size_t extruder_cou
     }
 }
 
-void ModelVolume::remap_extruder_ids(size_t extruder_count, const EnforcerBlockerStateMap &state_map)
+void ModelVolume::remap_extruder_ids(size_t extruder_count, const EnforcerBlockerStateMap& state_map)
 {
+    if (!tracery_edit_data.empty()) {
+        auto mapping = state_map;
+        for (auto& state : mapping)
+            if (size_t(state) > extruder_count)
+                state = EnforcerBlockerType::NONE;
+        mapping[0] = EnforcerBlockerType::NONE;
+        remap_tracery_materials(*this, mapping);
+    }
     std::vector<int> used_extruders = get_extruders();
     for (int extruder_id : used_extruders) {
         if (extruder_id <= 0)
@@ -2698,6 +2743,7 @@ void ModelVolume::center_geometry_after_creation(bool update_source_offset)
     Vec3d shift = this->mesh().bounding_box().center();
     if (!shift.isApprox(Vec3d::Zero()))
     {
+        tracery_edit_data.clear();
         if (m_mesh) {
             const_cast<TriangleMesh*>(m_mesh.get())->translate(-(float)shift(0), -(float)shift(1), -(float)shift(2));
             const_cast<TriangleMesh*>(m_mesh.get())->set_init_shift(shift);
@@ -2978,6 +3024,7 @@ void ModelVolume::mirror(Axis axis)
 // This method could only be called before the meshes of this ModelVolumes are not shared!
 void ModelVolume::scale_geometry_after_creation(const Vec3f& versor)
 {
+    tracery_edit_data.clear();
 	const_cast<TriangleMesh*>(m_mesh.get())->scale(versor);
     if (m_convex_hull->empty())
         //BBS: recompute the convex hull if it is null for previous too small

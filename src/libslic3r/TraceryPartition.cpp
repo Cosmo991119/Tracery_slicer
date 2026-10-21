@@ -1,4 +1,5 @@
 #include "TraceryPartition.hpp"
+#include "TraceryRegionMapping.hpp"
 #include "TraceryPerformance.hpp"
 #include "ClipperUtils.hpp"
 #include <CGAL/Exact_predicates_exact_constructions_kernel.h>
@@ -16,7 +17,7 @@
 
 namespace Slic3r {
 namespace {
-constexpr double weld_tolerance = 0.00001;
+constexpr double weld_tolerance = TRACERY_GEOMETRY_TOLERANCE;
 using Edge                      = std::pair<int, int>;
 using States                    = std::vector<EnforcerBlockerType>;
 
@@ -142,7 +143,7 @@ void overlay_annotation(std::vector<FacetPartition>&                   facets,
         overlay_region(facets[key.first].cells, union_(polygons), channel, key.second);
 }
 
-void overlay_tracery(std::vector<FacetPartition>& facets, const TriangleSelector::Tracery2DData& regions)
+void overlay_tracery(std::vector<FacetPartition>& facets, const TriangleSelector::Tracery2DData& regions, size_t channel = 0, bool precise = false)
 {
     for (const auto& input : regions) {
         FacetPartition& facet = facets.at(input.source_facet_id);
@@ -151,15 +152,17 @@ void overlay_tracery(std::vector<FacetPartition>& facets, const TriangleSelector
         // not material boundaries and must not survive as tiny sliver regions.
         std::map<std::pair<size_t, EnforcerBlockerType>, Polygons> grouped;
         for (const auto& region : input.regions) {
-            std::vector<Vec3f> points;
-            for (const Vec2d& p : region.polygon)
-                points.push_back((input.origin + p.x() * input.axis_u + p.y() * input.axis_v).cast<float>());
-            Polygon polygon = projected_polygon(facet.frame, points);
+            Polygon polygon;
+            for (const Vec2d& p : region.polygon) {
+                const Vec3d point = input.origin + p.x() * input.axis_u + p.y() * input.axis_v;
+                polygon.points.push_back(facet.frame.project(precise ? point : point.cast<float>().cast<double>()));
+            }
+            polygon.make_counter_clockwise();
             if (!polygon.empty())
                 grouped[{region.fragment_id, region.color}].push_back(std::move(polygon));
         }
         for (auto& [key, polygons] : grouped)
-            overlay_region(facet.cells, union_(polygons), 0, key.second);
+            overlay_region(facet.cells, union_(polygons), channel, key.second);
         facet.needs_partition = facet.needs_partition || facet.cells.size() > 1;
     }
 }
@@ -195,6 +198,11 @@ void collect_edge_cuts(const indexed_triangle_set& mesh, const std::vector<Facet
             if (!inserted)
                 it->second = std::min(it->second, edge_tolerance);
         }
+        // An untouched facet has no new cuts. Projecting and lifting its
+        // existing corners can manufacture near-endpoint cuts, especially when
+        // an adjacent sliver requires a much smaller edge tolerance.
+        if (!facets[i].needs_partition)
+            continue;
         for (const Cell& cell : facets[i].cells) {
             for (const Point& point : to_points(ExPolygons{cell.polygon})) {
                 const Vec3d world = facets[i].frame.lift(point);
@@ -213,11 +221,10 @@ void collect_edge_cuts(const indexed_triangle_set& mesh, const std::vector<Facet
 void allocate_edge_vertices(const indexed_triangle_set& source, EdgeCuts& cuts, indexed_triangle_set& output)
 {
     output.vertices = source.vertices;
-    // Cuts on incident source edges may round to exactly the same float
-    // position near their common endpoint. Share their identity without
-    // welding unrelated shells or enlarging the geometric tolerance.
-    using Position = std::array<float, 3>;
-    std::map<std::pair<int, Position>, int> incident_vertices;
+    // Keep each cut attached to its original edge. Cuts on opposite sides of
+    // a sub-micron sliver may have equal float coordinates without being the
+    // same topological vertex. Collapse actual zero-length edges only after
+    // triangulation has established which vertices are connected.
     for (auto& [edge, parameters] : cuts.parameters) {
         parameters.push_back(0.);
         parameters.push_back(1.);
@@ -235,27 +242,15 @@ void allocate_edge_vertices(const indexed_triangle_set& source, EdgeCuts& cuts, 
         auto& ids  = cuts.vertices[edge];
         for (double t : parameters) {
             const Vec3f position = (a + t * delta).cast<float>();
-            const Position key{position.x(), position.y(), position.z()};
             // A nonzero double parameter may still round to an existing float
-            // endpoint. Resolve that identity before looking up incident cuts,
-            // including the far endpoint which has not been visited yet.
+            // endpoint. Resolve that identity, including the far endpoint
+            // which has not been visited yet.
             int index = position == source.vertices[edge.first] ? edge.first :
                         (position == source.vertices[edge.second] ? edge.second : -1);
             if (index < 0) {
-                for (int endpoint : {edge.first, edge.second}) {
-                    const auto found = incident_vertices.find({endpoint, key});
-                    if (found != incident_vertices.end()) {
-                        index = found->second;
-                        break;
-                    }
-                }
-                if (index < 0) {
-                    index = int(output.vertices.size());
-                    output.vertices.push_back(position);
-                }
+                index = int(output.vertices.size());
+                output.vertices.push_back(position);
             }
-            incident_vertices.emplace(std::make_pair(edge.first, key), index);
-            incident_vertices.emplace(std::make_pair(edge.second, key), index);
             if (ids.empty() || ids.back() != index)
                 ids.push_back(index);
         }
@@ -339,15 +334,8 @@ void allocate_partition_vertex(const Point& point, const FacetFrame& frame, std:
     if (vertices.count(point))
         return;
     const Vec3f position = frame.lift(point).cast<float>();
-    // Different projected points may round to the same stored mesh vertex.
-    // Reuse the shared-edge identity before applying the planar weld tolerance.
-    // Otherwise edge enforcement can split a face through its own third vertex.
-    for (const auto& [candidate, id] : vertices) {
-        if (output.vertices[id] == position) {
-            vertices[point] = id;
-            return;
-        }
-    }
+    // Planar proximity is conditioned on this facet's width. Equal float
+    // positions alone cannot identify vertices on opposite sides of a sliver.
     int    nearest  = -1;
     double distance = std::pow(frame.vertex_tolerance, 2);
     for (const auto& [candidate, id] : vertices) {
@@ -443,7 +431,7 @@ using PartitionKernel        = CGAL::Exact_predicates_exact_constructions_kernel
 using PartitionVertex        = CGAL::Triangulation_vertex_base_with_info_2<int, PartitionKernel>;
 using PartitionFace          = CGAL::Constrained_triangulation_face_base_2<PartitionKernel>;
 using PartitionData          = CGAL::Triangulation_data_structure_2<PartitionVertex, PartitionFace>;
-using PartitionTriangulation = CGAL::Constrained_Delaunay_triangulation_2<PartitionKernel, PartitionData, CGAL::Exact_predicates_tag>;
+using PartitionTriangulation = CGAL::Constrained_Delaunay_triangulation_2<PartitionKernel, PartitionData, CGAL::Exact_intersections_tag>;
 
 PartitionTriangulation triangulate_shared_boundaries(const FacetPartition& facet,
                                                      std::map<Point, int>& vertices,
@@ -467,9 +455,18 @@ PartitionTriangulation triangulate_shared_boundaries(const FacetPartition& facet
         return PartitionKernel::Point_2(scale_(delta.dot(facet.frame.u)) * facet.frame.coordinate_scale,
                                         scale_(delta.dot(facet.frame.v)) * facet.frame.coordinate_scale);
     };
-    for (const auto& [point, id] : vertices) {
-        if (handles.count(id))
-            continue;
+    // Integer clipping coordinates can alias an original corner and a nearby
+    // cut from a thin neighbour. The CDT uses exact projected coordinates, so
+    // retain all boundary identities even if the contour lookup kept only one.
+    std::set<int> vertex_ids{original[0], original[1], original[2]};
+    for (const auto& [point, id] : vertices)
+        vertex_ids.insert(id);
+    for (int e = 0; e < 3; ++e) {
+        const auto found = cuts.vertices.find(std::minmax(original[e], original[(e + 1) % 3]));
+        if (found != cuts.vertices.end())
+            vertex_ids.insert(found->second.begin(), found->second.end());
+    }
+    for (int id : vertex_ids) {
         PartitionKernel::Point_2 position = projected(id);
         if (id != original[0] && id != original[1] && id != original[2]) {
             for (int e = 0; e < 3; ++e) {
@@ -542,9 +539,13 @@ PartitionTriangulation triangulate_shared_boundaries(const FacetPartition& facet
         if (found != ids.end())
             vertex->info() = found->second;
         else {
-            const Point point(std::llround(CGAL::to_double(vertex->point().x())), std::llround(CGAL::to_double(vertex->point().y())));
-            allocate_partition_vertex(point, facet.frame, vertices, output);
-            vertex->info() = vertices.at(point);
+            // Every distinct CDT intersection keeps its own identity. Rounding
+            // back into the integer contour lookup may alias another exact
+            // intersection and fold an otherwise valid triangulation.
+            const double x = CGAL::to_double(vertex->point().x()) * SCALING_FACTOR / facet.frame.coordinate_scale;
+            const double y = CGAL::to_double(vertex->point().y()) * SCALING_FACTOR / facet.frame.coordinate_scale;
+            vertex->info() = int(output.vertices.size());
+            output.vertices.push_back((facet.frame.origin + x * facet.frame.u + y * facet.frame.v).cast<float>());
             // Keep the provenance of new constraint intersections before
             // lifting them back to float coordinates. On very narrow facets,
             // float rounding can move a boundary point farther than the
@@ -628,8 +629,9 @@ void triangulate_facet_partition(const indexed_triangle_set& source,
         const Vec3d b     = result.mesh.vertices[t[1]].cast<double>();
         const Vec3d c     = result.mesh.vertices[t[2]].cast<double>();
         const Vec3d cross = (b - a).cross(c - a);
-        if (cross.dot(normal) < 0.)
-            std::swap(t[1], t[2]);
+        // The CDT winding follows the source frame. Float storage can flip
+        // the apparent normal of a sliver; reversing that face independently
+        // would give it the same directed edge as its neighbour.
         const Point center = facet.frame.project((a + b + c) / 3.);
         try {
             states.push_back(partition_states_at(facet, center));
@@ -672,38 +674,113 @@ void build_partition_annotations(TraceryPartitionResult& result, const std::vect
     }
 }
 
-void unify_shared_vertex_ids(const indexed_triangle_set& source, EdgeCuts& cuts, TraceryPartitionResult& result)
+void unify_shared_vertex_ids(const indexed_triangle_set& source,
+                             EdgeCuts&                   cuts,
+                             TraceryPartitionResult&     result,
+                             bool                        resolve_rounded_boundary = false)
 {
     // Projection/triangulation may rediscover a canonical cut under another ID.
     // Join only identical stored positions incident to the same source edge;
     // disconnected coincident shells must not be welded together.
     using Position = std::array<float, 3>;
     std::map<std::pair<Edge, Position>, int> shared;
-    std::vector<int> parent(result.mesh.vertices.size());
+    std::vector<int>                         parent(result.mesh.vertices.size());
     std::iota(parent.begin(), parent.end(), 0);
     const auto root = [&](int id) {
         while (parent[id] != id) {
             parent[id] = parent[parent[id]];
-            id = parent[id];
+            id         = parent[id];
         }
         return id;
     };
+    // Only exact boundary provenance establishes incidence. A geometric
+    // tolerance test can assign a sliver's interior or opposite-edge point to
+    // this edge, even when its float position happens to be identical.
+    for (const auto& [edge, ids] : cuts.vertices) {
+        for (int vertex : ids) {
+            const Vec3f& position     = result.mesh.vertices[vertex];
+            const auto [it, inserted] = shared.emplace(std::make_pair(edge, Position{position.x(), position.y(), position.z()}), vertex);
+            if (!inserted) {
+                const int a = root(vertex), b = root(it->second);
+                parent[std::max(a, b)] = std::min(a, b);
+            }
+        }
+    }
+    // A constraint intersection may round exactly onto a corner of its own
+    // source facet. Retain that source identity even if the exact CDT placed
+    // the intersection just across the boundary and emitted no connecting edge.
     for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
         const auto& original = source.indices[result.source_facets[i]];
         for (int vertex : result.mesh.indices[i]) {
-            const Vec3f& position = result.mesh.vertices[vertex];
+            if (size_t(vertex) < source.vertices.size())
+                continue;
+            for (int corner : original)
+                if (result.mesh.vertices[vertex] == source.vertices[corner]) {
+                    const int a = root(vertex), b = root(corner);
+                    parent[std::max(a, b)] = std::min(a, b);
+                }
+        }
+    }
+    if (resolve_rounded_boundary) {
+        // Likewise, an interior CDT vertex may round onto a known boundary cut.
+        // Resolve only an unambiguous boundary identity within its owning source
+        // facet. Coincident cuts on opposite edges of a sliver remain distinct.
+        std::map<int, std::map<int, unsigned>> incidence;
+        for (const auto& triangle : result.mesh.indices)
             for (int e = 0; e < 3; ++e) {
-                const Edge edge = std::minmax(original[e], original[(e + 1) % 3]);
-                double parameter;
-                if (!on_segment(position.cast<double>(), source.vertices[edge.first].cast<double>(),
-                                source.vertices[edge.second].cast<double>(), parameter))
+                const int a = root(triangle[e]), b = root(triangle[(e + 1) % 3]);
+                if (a != b) {
+                    ++incidence[a][b];
+                    ++incidence[b][a];
+                }
+            }
+        std::map<int, std::map<Position, std::set<int>>> facet_boundaries;
+        for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
+            const int source_id    = result.source_facets[i];
+            auto [entry, inserted] = facet_boundaries.try_emplace(source_id);
+            auto& positions        = entry->second;
+            if (inserted) {
+                const auto& original = source.indices[source_id];
+                auto        add      = [&](int id) {
+                    const Vec3f& p = result.mesh.vertices[id];
+                    positions[{p.x(), p.y(), p.z()}].insert(root(id));
+                };
+                for (int corner : original)
+                    add(corner);
+                for (int e = 0; e < 3; ++e) {
+                    auto found = cuts.vertices.find(std::minmax(original[e], original[(e + 1) % 3]));
+                    if (found != cuts.vertices.end())
+                        for (int id : found->second)
+                            add(id);
+                }
+            }
+            for (int vertex : result.mesh.indices[i]) {
+                if (size_t(vertex) < source.vertices.size())
                     continue;
-                const auto [it, inserted] = shared.emplace(
-                    std::make_pair(edge, Position{position.x(), position.y(), position.z()}), vertex);
-                if (!inserted) {
-                    const int a = root(vertex), b = root(it->second);
-                    if (result.mesh.vertices[a] == result.mesh.vertices[b])
-                        parent[std::max(a, b)] = std::min(a, b);
+                const Vec3f& p     = result.mesh.vertices[vertex];
+                const auto   found = positions.find({p.x(), p.y(), p.z()});
+                if (found != positions.end() && found->second.size() == 1) {
+                    const int a = std::min(root(vertex), root(*found->second.begin()));
+                    const int b = std::max(root(vertex), root(*found->second.begin()));
+                    if (a == b || incidence[a].count(b))
+                        continue;
+                    bool manifold = true;
+                    for (const auto& [neighbor, owners] : incidence[b]) {
+                        const auto existing = incidence[a].find(neighbor);
+                        if (existing != incidence[a].end() && owners + existing->second > 2) {
+                            manifold = false;
+                            break;
+                        }
+                    }
+                    if (!manifold)
+                        continue;
+                    for (const auto& [neighbor, owners] : incidence[b]) {
+                        incidence[a][neighbor] += owners;
+                        incidence[neighbor][a] += owners;
+                        incidence[neighbor].erase(b);
+                    }
+                    incidence.erase(b);
+                    parent[b] = a;
                 }
             }
         }
@@ -716,21 +793,8 @@ void unify_shared_vertex_ids(const indexed_triangle_set& source, EdgeCuts& cuts,
             vertex = root(vertex);
         ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
     }
-    for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
-        const auto& original = source.indices[result.source_facets[i]];
-        for (int e = 0; e < 3; ++e) {
-            const Edge edge = std::minmax(original[e], original[(e + 1) % 3]);
-            const Vec3d a = source.vertices[edge.first].cast<double>();
-            const Vec3d b = source.vertices[edge.second].cast<double>();
-            for (int vertex : result.mesh.indices[i]) {
-                double parameter;
-                if (on_segment(result.mesh.vertices[vertex].cast<double>(), a, b, parameter, cuts.tolerances.at(edge)))
-                    cuts.vertices[edge].push_back(vertex);
-            }
-        }
-    }
     for (auto& [edge, ids] : cuts.vertices) {
-        const Vec3d a = source.vertices[edge.first].cast<double>();
+        const Vec3d a     = source.vertices[edge.first].cast<double>();
         const Vec3d delta = source.vertices[edge.second].cast<double>() - a;
         std::sort(ids.begin(), ids.end(), [&](int lhs, int rhs) {
             const double l = (result.mesh.vertices[lhs].cast<double>() - a).dot(delta);
@@ -741,19 +805,62 @@ void unify_shared_vertex_ids(const indexed_triangle_set& source, EdgeCuts& cuts,
     }
 }
 
+// Float conversion may collapse a real CDT edge. Merge only its connected
+// endpoints, then remove the repeated-index faces together with their states.
+void collapse_zero_length_edges(TraceryPartitionResult& result, EdgeCuts& cuts, std::vector<States>& states)
+{
+    std::vector<int> parent(result.mesh.vertices.size());
+    std::iota(parent.begin(), parent.end(), 0);
+    const auto root = [&](int vertex) {
+        while (parent[vertex] != vertex) {
+            parent[vertex] = parent[parent[vertex]];
+            vertex         = parent[vertex];
+        }
+        return vertex;
+    };
+    for (const auto& triangle : result.mesh.indices) {
+        for (int e = 0; e < 3; ++e) {
+            const int a = root(triangle[e]), b = root(triangle[(e + 1) % 3]);
+            if (result.mesh.vertices[a] == result.mesh.vertices[b])
+                parent[std::max(a, b)] = std::min(a, b);
+        }
+    }
+    for (auto& triangle : result.mesh.indices)
+        for (int& vertex : triangle)
+            vertex = root(vertex);
+    for (auto& [edge, ids] : cuts.vertices) {
+        for (int& vertex : ids)
+            vertex = root(vertex);
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    }
+    size_t out = 0;
+    for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
+        const Vec3i32 triangle = result.mesh.indices[i];
+        if (triangle[0] == triangle[1] || triangle[1] == triangle[2] || triangle[0] == triangle[2])
+            continue;
+        result.mesh.indices[out]  = triangle;
+        result.source_facets[out] = result.source_facets[i];
+        if (out != i)
+            states[out] = std::move(states[i]);
+        ++out;
+    }
+    result.mesh.indices.resize(out);
+    result.source_facets.resize(out);
+    states.resize(out);
+}
+
 void enforce_source_edge_cuts(const indexed_triangle_set& source,
                               const EdgeCuts&             cuts,
                               TraceryPartitionResult&     result,
                               std::vector<States>&        states)
 {
-    std::vector<Vec3i32> triangles;
-    std::vector<int>     sources;
-    std::vector<States>  colors;
+    std::vector<Vec3i32>                   triangles;
+    std::vector<int>                       sources;
+    std::vector<States>                    colors;
     std::map<std::pair<int, Edge>, size_t> edge_owners;
     for (size_t i = 0; i < result.mesh.indices.size(); ++i)
         for (int e = 0; e < 3; ++e)
-            ++edge_owners[{result.source_facets[i],
-                           std::minmax(result.mesh.indices[i][e], result.mesh.indices[i][(e + 1) % 3])}];
+            ++edge_owners[{result.source_facets[i], std::minmax(result.mesh.indices[i][e], result.mesh.indices[i][(e + 1) % 3])}];
     for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
         const auto&          original = source.indices[result.source_facets[i]];
         std::vector<Vec3i32> pieces{result.mesh.indices[i]};
@@ -766,13 +873,20 @@ void enforce_source_edge_cuts(const indexed_triangle_set& source,
             for (const Vec3i32& triangle : pieces) {
                 bool divided = false;
                 for (int side = 0; side < 3 && !divided; ++side) {
-                    const auto owners = edge_owners.find({result.source_facets[i],
-                                                         std::minmax(triangle[side], triangle[(side + 1) % 3])});
+                    const auto owners = edge_owners.find({result.source_facets[i], std::minmax(triangle[side], triangle[(side + 1) % 3])});
                     if (owners != edge_owners.end() && owners->second > 1)
                         continue;
                     const auto a = std::find(ids.begin(), ids.end(), triangle[side]);
                     const auto b = std::find(ids.begin(), ids.end(), triangle[(side + 1) % 3]);
                     if (a == ids.end() || b == ids.end() || std::abs(b - a) <= 1)
+                        continue;
+                    // Collapsing a zero-length connection can put all three
+                    // corners on this edge chain. The surviving wedge still
+                    // joins its two sides: fanning through its own opposite
+                    // corner would replace it with repeated-index faces and
+                    // leave a hole. Truly collinear wedges are handled below
+                    // by remove_collapsed_faces, which transfers their cuts.
+                    if (std::find(ids.begin(), ids.end(), triangle[(side + 2) % 3]) != ids.end())
                         continue;
                     const int step = a < b ? 1 : -1;
                     for (auto point = a; point != b; point += step)
@@ -801,7 +915,7 @@ void remove_collapsed_faces(TraceryPartitionResult& result, std::vector<States>&
     // Transfer its middle vertex to the adjacent face before removing it;
     // otherwise dropping the face leaves a T-junction in the stored mesh.
     std::map<Edge, std::vector<int>> splits;
-    std::vector<bool> collapsed(result.mesh.indices.size(), false);
+    std::vector<bool>                collapsed(result.mesh.indices.size(), false);
     for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
         const auto& t = result.mesh.indices[i];
         const Vec3d a = result.mesh.vertices[t[0]].cast<double>();
@@ -812,21 +926,21 @@ void remove_collapsed_faces(TraceryPartitionResult& result, std::vector<States>&
         collapsed[i] = true;
         if (t[0] == t[1] || t[1] == t[2] || t[2] == t[0])
             continue;
-        int longest = 0;
-        double length = 0.;
+        int    longest = 0;
+        double length  = 0.;
         for (int e = 0; e < 3; ++e) {
-            const double candidate = (result.mesh.vertices[t[e]].cast<double>() -
-                                      result.mesh.vertices[t[(e + 1) % 3]].cast<double>()).squaredNorm();
+            const double candidate = (result.mesh.vertices[t[e]].cast<double>() - result.mesh.vertices[t[(e + 1) % 3]].cast<double>())
+                                         .squaredNorm();
             if (candidate > length) {
-                length = candidate;
+                length  = candidate;
                 longest = e;
             }
         }
         splits[std::minmax(t[longest], t[(longest + 1) % 3])].push_back(t[(longest + 2) % 3]);
     }
     std::vector<Vec3i32> triangles;
-    std::vector<int> sources;
-    std::vector<States> colors;
+    std::vector<int>     sources;
+    std::vector<States>  colors;
     for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
         if (collapsed[i])
             continue;
@@ -839,9 +953,9 @@ void remove_collapsed_faces(TraceryPartitionResult& result, std::vector<States>&
                 const auto split = splits.find(std::minmax(triangle[e], triangle[(e + 1) % 3]));
                 if (split == splits.end())
                     continue;
-                const Vec3d a = result.mesh.vertices[triangle[e]].cast<double>();
-                const Vec3d delta = result.mesh.vertices[triangle[(e + 1) % 3]].cast<double>() - a;
-                auto points = split->second;
+                const Vec3d a      = result.mesh.vertices[triangle[e]].cast<double>();
+                const Vec3d delta  = result.mesh.vertices[triangle[(e + 1) % 3]].cast<double>() - a;
+                auto        points = split->second;
                 std::sort(points.begin(), points.end(), [&](int lhs, int rhs) {
                     return (result.mesh.vertices[lhs].cast<double>() - a).dot(delta) <
                            (result.mesh.vertices[rhs].cast<double>() - a).dot(delta);
@@ -865,9 +979,129 @@ void remove_collapsed_faces(TraceryPartitionResult& result, std::vector<States>&
             }
         }
     }
-    result.mesh.indices = std::move(triangles);
+    result.mesh.indices  = std::move(triangles);
     result.source_facets = std::move(sources);
-    states = std::move(colors);
+    states               = std::move(colors);
+}
+
+// Collapsing a float-degenerate strip can make two CDT faces coincide. Cancel
+// opposite orientations within the SAME source facet; never weld disconnected
+// shells or discard a single unpaired boundary face.
+void cancel_folded_faces(TraceryPartitionResult& result, std::vector<States>& states)
+{
+    using Key = std::pair<int, std::array<int, 3>>;
+    std::map<Key, std::vector<size_t>> pending;
+    std::vector<bool>                  removed(result.mesh.indices.size(), false);
+    auto                               orientation = [](const Vec3i32& t) { return ((t[0] > t[1]) + (t[0] > t[2]) + (t[1] > t[2])) % 2; };
+    for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
+        const auto&        t = result.mesh.indices[i];
+        std::array<int, 3> ids{t[0], t[1], t[2]};
+        std::sort(ids.begin(), ids.end());
+        auto& matches  = pending[{result.source_facets[i], ids}];
+        auto  opposite = std::find_if(matches.begin(), matches.end(),
+                                      [&](size_t j) { return orientation(result.mesh.indices[j]) != orientation(t); });
+        if (opposite != matches.end()) {
+            removed[i] = removed[*opposite] = true;
+            matches.erase(opposite);
+        } else {
+            matches.push_back(i);
+        }
+    }
+    size_t out = 0;
+    for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
+        if (removed[i])
+            continue;
+        result.mesh.indices[out]  = result.mesh.indices[i];
+        result.source_facets[out] = result.source_facets[i];
+        if (out != i)
+            states[out] = std::move(states[i]);
+        ++out;
+    }
+    result.mesh.indices.resize(out);
+    result.source_facets.resize(out);
+    states.resize(out);
+}
+
+// When a whole tip of a thin facet collapses, the surviving neighbours can
+// describe the same boundary as A--B and A--C--B. Match those chains using
+// existing, topologically shared endpoints only. No proximity weld is involved.
+void conform_collapsed_boundary_chains(TraceryPartitionResult& result, std::vector<States>& states)
+{
+    for (unsigned pass = 0; pass < 64; ++pass) {
+        std::map<Edge, std::pair<unsigned, size_t>> owners;
+        for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
+            const auto& t = result.mesh.indices[i];
+            for (int e = 0; e < 3; ++e) {
+                auto& owner = owners[std::minmax(t[e], t[(e + 1) % 3])];
+                ++owner.first;
+                owner.second = i;
+            }
+        }
+        std::map<int, std::vector<int>> boundary;
+        for (const auto& [edge, count] : owners)
+            if (count.first == 1) {
+                boundary[edge.first].push_back(edge.second);
+                boundary[edge.second].push_back(edge.first);
+            }
+        std::map<Edge, std::set<int>> splits;
+        for (const auto& [origin, ends] : boundary) {
+            const Vec3d a = result.mesh.vertices[origin].cast<double>();
+            for (size_t i = 0; i < ends.size(); ++i)
+                for (size_t j = i + 1; j < ends.size(); ++j) {
+                    const Vec3d u = result.mesh.vertices[ends[i]].cast<double>() - a;
+                    const Vec3d v = result.mesh.vertices[ends[j]].cast<double>() - a;
+                    if (owners.at(std::minmax(origin, ends[i])).second == owners.at(std::minmax(origin, ends[j])).second)
+                        continue;
+                    if (u.dot(v) <= 0. || u.squaredNorm() == v.squaredNorm())
+                        continue;
+                    if (u.cross(v).squaredNorm() != 0.)
+                        continue;
+                    const int near = u.squaredNorm() < v.squaredNorm() ? ends[i] : ends[j];
+                    const int far  = u.squaredNorm() < v.squaredNorm() ? ends[j] : ends[i];
+                    splits[std::minmax(origin, far)].insert(near);
+                }
+        }
+        if (splits.empty())
+            return;
+        std::vector<Vec3i32> triangles;
+        std::vector<int>     sources;
+        std::vector<States>  colours;
+        for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
+            std::vector<Vec3i32> pending{result.mesh.indices[i]};
+            while (!pending.empty()) {
+                const auto triangle = pending.back();
+                pending.pop_back();
+                bool divided = false;
+                for (int e = 0; e < 3 && !divided; ++e) {
+                    auto found = splits.find(std::minmax(triangle[e], triangle[(e + 1) % 3]));
+                    if (found == splits.end())
+                        continue;
+                    const Vec3d      a = result.mesh.vertices[triangle[e]].cast<double>();
+                    const Vec3d      d = result.mesh.vertices[triangle[(e + 1) % 3]].cast<double>() - a;
+                    std::vector<int> points(found->second.begin(), found->second.end());
+                    std::sort(points.begin(), points.end(), [&](int l, int r) {
+                        return (result.mesh.vertices[l].cast<double>() - a).dot(d) < (result.mesh.vertices[r].cast<double>() - a).dot(d);
+                    });
+                    int previous = triangle[e];
+                    for (int point : points) {
+                        pending.emplace_back(previous, point, triangle[(e + 2) % 3]);
+                        previous = point;
+                    }
+                    pending.emplace_back(previous, triangle[(e + 1) % 3], triangle[(e + 2) % 3]);
+                    divided = true;
+                }
+                if (!divided) {
+                    triangles.push_back(triangle);
+                    sources.push_back(result.source_facets[i]);
+                    colours.push_back(states[i]);
+                }
+            }
+        }
+        result.mesh.indices  = std::move(triangles);
+        result.source_facets = std::move(sources);
+        states               = std::move(colours);
+    }
+    throw std::runtime_error("Exact tracery boundary chain synchronization did not converge");
 }
 
 void validate_partition_topology(const indexed_triangle_set& source, const TraceryPartitionResult& result)
@@ -876,15 +1110,39 @@ void validate_partition_topology(const indexed_triangle_set& source, const Trace
     for (const Vec3i32& triangle : source.indices)
         for (int e = 0; e < 3; ++e)
             ++original_edges[std::minmax(triangle[e], triangle[(e + 1) % 3])];
-    std::map<Edge, std::vector<int>> edges;
+    std::map<Edge, std::vector<int>>    edges;
+    std::map<std::pair<int, Edge>, int> internal_directions;
+    std::map<std::array<int, 3>, int>   unique_faces;
     for (size_t i = 0; i < result.mesh.indices.size(); ++i) {
-        const Vec3i32& triangle = result.mesh.indices[i];
-        for (int e = 0; e < 3; ++e)
-            edges[std::minmax(triangle[e], triangle[(e + 1) % 3])].push_back(result.source_facets[i]);
+        const Vec3i32& triangle  = result.mesh.indices[i];
+        const int      source_id = result.source_facets[i];
+        const Vec3d    a         = result.mesh.vertices[triangle[0]].cast<double>();
+        const Vec3d    b         = result.mesh.vertices[triangle[1]].cast<double>();
+        const Vec3d    c         = result.mesh.vertices[triangle[2]].cast<double>();
+        const Vec3d    normal    = (b - a).cross(c - a);
+        if (normal.squaredNorm() == 0.)
+            throw std::runtime_error("Exact tracery partition produced a collapsed triangle: source_facet=" + std::to_string(source_id));
+        std::array<int, 3> face{triangle[0], triangle[1], triangle[2]};
+        std::sort(face.begin(), face.end());
+        const auto [previous, inserted] = unique_faces.emplace(face, source_id);
+        if (!inserted)
+            throw std::runtime_error(
+                "Exact tracery partition produced a duplicate triangle: source_facets=" + std::to_string(previous->second) + "," +
+                std::to_string(source_id) + " vertices=" + std::to_string(face[0]) + "," + std::to_string(face[1]) + "," +
+                std::to_string(face[2]));
+        for (int e = 0; e < 3; ++e) {
+            const int  from = triangle[e], to = triangle[(e + 1) % 3];
+            const Edge edge = std::minmax(from, to);
+            edges[edge].push_back(source_id);
+            internal_directions[{source_id, edge}] += from < to ? 1 : -1;
+        }
     }
     for (const auto& [edge, facets] : edges) {
-        if (facets.size() == 2)
+        if (facets.size() == 2) {
+            if (facets[0] == facets[1] && internal_directions.at({facets[0], edge}) != 0)
+                throw std::runtime_error("Exact tracery partition produced inconsistent internal winding");
             continue;
+        }
         bool           preserved_boundary = false;
         const Vec3i32& original           = source.indices[facets.front()];
         for (int e = 0; e < 3; ++e) {
@@ -897,10 +1155,10 @@ void validate_partition_topology(const indexed_triangle_set& source, const Trace
                 preserved_boundary = true;
         }
         if (!preserved_boundary)
-            throw std::runtime_error("Exact tracery partition introduced an unmatched mesh edge: source_facet=" +
-                                     std::to_string(facets.front()) + " edge=" + std::to_string(edge.first) + "," +
-                                     std::to_string(edge.second) + " owners=" + std::to_string(facets.size()) + " length=" +
-                                     std::to_string((result.mesh.vertices[edge.first] - result.mesh.vertices[edge.second]).norm()));
+            throw std::runtime_error(
+                "Exact tracery partition introduced an unmatched mesh edge: source_facet=" + std::to_string(facets.front()) +
+                " edge=" + std::to_string(edge.first) + "," + std::to_string(edge.second) + " owners=" + std::to_string(facets.size()) +
+                " length=" + std::to_string((result.mesh.vertices[edge.first] - result.mesh.vertices[edge.second]).norm()));
     }
 }
 } // namespace
@@ -908,7 +1166,8 @@ void validate_partition_topology(const indexed_triangle_set& source, const Trace
 TraceryPartitionResult build_exact_tracery_partition(const TriangleMesh&                                         source,
                                                      const std::vector<TriangleSelector::TriangleSplittingData>& annotations,
                                                      const TriangleSelector::Tracery2DData&                      regions,
-                                                     const std::function<void()>&                                cancel)
+                                                     const std::function<void()>&                                cancel,
+                                                     const std::vector<TriangleSelector::Tracery2DData>&         channel_regions)
 {
     TraceryPerformanceScope performance("exact_partition");
     performance.count("input_facets", source.its.indices.size());
@@ -916,7 +1175,8 @@ TraceryPartitionResult build_exact_tracery_partition(const TriangleMesh&        
     performance.count("region_source_facets", regions.size());
     if (performance.enabled()) {
         size_t count = 0;
-        for (const auto& facet : regions) count += facet.regions.size();
+        for (const auto& facet : regions)
+            count += facet.regions.size();
         performance.count("input_regions", count);
     }
     performance.stage("geometry.initialize_facets");
@@ -936,6 +1196,10 @@ TraceryPartitionResult build_exact_tracery_partition(const TriangleMesh&        
     }
     performance.stage("geometry.overlay_tracery");
     overlay_tracery(facets, regions);
+    if (channel_regions.size() > annotations.size())
+        throw std::invalid_argument("Too many stained-glass annotation channels");
+    for (size_t channel = 0; channel < channel_regions.size(); ++channel)
+        overlay_tracery(facets, channel_regions[channel], channel, true);
     if (performance.enabled()) {
         size_t partitioned = 0, cells = 0;
         for (const auto& facet : facets) {
@@ -974,8 +1238,16 @@ TraceryPartitionResult build_exact_tracery_partition(const TriangleMesh&        
     }
     performance.stage("geometry.enforce_edge_cuts");
     unify_shared_vertex_ids(source.its, cuts, result);
+    collapse_zero_length_edges(result, cuts, states);
     enforce_source_edge_cuts(source.its, cuts, result, states);
+    collapse_zero_length_edges(result, cuts, states);
     remove_collapsed_faces(result, states);
+    cancel_folded_faces(result, states);
+    unify_shared_vertex_ids(source.its, cuts, result, true);
+    collapse_zero_length_edges(result, cuts, states);
+    remove_collapsed_faces(result, states);
+    cancel_folded_faces(result, states);
+    conform_collapsed_boundary_chains(result, states);
     performance.stage("geometry.validate_topology");
     validate_partition_topology(source.its, result);
     performance.stage("geometry.rebuild_annotations");
@@ -1001,6 +1273,86 @@ std::vector<Vec3f> clip_tracery_polygon_to_facet(const indexed_triangle_set& mes
         result.push_back(frame.frame.lift(point).cast<float>());
     return result;
 }
+namespace detail {
+struct TraceryFacetClipper::Impl
+{
+    FacetPartition facet;
+    Impl(const indexed_triangle_set& mesh, int index) : facet(mesh, index, 1) {}
+};
+TraceryFacetClipper::TraceryFacetClipper(const indexed_triangle_set& mesh, int facet)
+    : m_impl(std::make_unique<Impl>(mesh, facet)) {}
+TraceryFacetClipper::~TraceryFacetClipper() = default;
+size_t TraceryFacetClipper::estimated_bytes() const
+{
+    return sizeof(Impl) + sizeof(Cell) + 3 * sizeof(Point) + sizeof(EnforcerBlockerType);
+}
+std::vector<Vec3f> TraceryFacetClipper::clip(const std::vector<Vec3f>& polygon, TraceryMappingStatistics& statistics) const
+{
+    const auto& facet = m_impl->facet;
+    const Polygon projected = projected_polygon(facet.frame, polygon);
+    if (projected.empty()) return {};
+    const auto& triangle = facet.cells.front().polygon.contour;
+    // Inclusive containment is safe only for a nondegenerate convex input.
+    // Check every supporting edge, not only successive turn signs: a self-
+    // crossing polygon must still go through the legacy clipping/validation.
+    bool convex = projected.area() > 0.;
+    for (size_t i = 0; convex && i < projected.points.size(); ++i) {
+        const Point& a = projected.points[i];
+        const Point& b = projected.points[(i + 1) % projected.points.size()];
+        for (const Point& p : projected.points)
+            if (int128::orient(a, b, p) < 0) {
+                convex = false;
+                break;
+            }
+    }
+    const auto inside = [](const Polygon& boundary, const Point& p) {
+        for (size_t i = 0; i < boundary.points.size(); ++i)
+            if (int128::orient(boundary.points[i], boundary.points[(i + 1) % boundary.points.size()], p) < 0)
+                return false;
+        return true;
+    };
+    const Polygon* inherited = nullptr;
+    if (convex && triangle.area() > 0.) {
+        const auto separated = [](const Polygon& boundary, const Polygon& other) {
+            for (size_t i = 0; i < boundary.points.size(); ++i) {
+                const auto& a = boundary.points[i];
+                const auto& b = boundary.points[(i + 1) % boundary.points.size()];
+                if (std::all_of(other.points.begin(), other.points.end(), [&](const Point& p) {
+                        return int128::orient(a, b, p) < 0;
+                    }))
+                    return true;
+            }
+            return false;
+        };
+        if (separated(triangle, projected) || separated(projected, triangle)) {
+            ++statistics.separated_candidates;
+            return {};
+        }
+        if (std::all_of(projected.points.begin(), projected.points.end(), [&](const Point& p) { return inside(triangle, p); })) {
+            inherited = &projected;
+            ++statistics.inherited_regions;
+        } else if (std::all_of(triangle.points.begin(), triangle.points.end(), [&](const Point& p) { return inside(projected, p); })) {
+            inherited = &triangle;
+            ++statistics.inherited_facets;
+        }
+    }
+    ExPolygons clipped;
+    if (!inherited) {
+        ++statistics.clip_calls;
+        clipped = intersection_ex(ExPolygons{facet.cells.front().polygon}, Polygons{projected});
+        if (clipped.empty()) return {};
+        if (clipped.size() != 1 || !clipped.front().holes.empty())
+            throw std::runtime_error("Expected a convex retained tracery fragment");
+        inherited = &clipped.front().contour;
+    }
+    std::vector<Vec3f> result;
+    result.reserve(inherited->points.size());
+    for (const Point& point : inherited->points)
+        result.push_back(facet.frame.lift(point).cast<float>());
+    return result;
+}
+} // namespace detail
+
 std::vector<unsigned int> tracery_retained_paint_materials(const TriangleMesh& source,
     const TriangleSelector::TriangleSplittingData& paint, const TriangleSelector::Tracery2DData& replacement)
 {

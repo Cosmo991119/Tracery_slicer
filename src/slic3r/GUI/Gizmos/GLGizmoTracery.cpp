@@ -11,7 +11,9 @@
 #include "slic3r/GUI/MixedFilamentColorMapPanel.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TraceryMaterialPlan.hpp"
+#include "libslic3r/TraceryDocument.hpp"
 #include "libslic3r/TraceryPerformance.hpp"
+#include "libslic3r/TraceryRegionMapping.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "slic3r/GUI/format.hpp"
@@ -1045,7 +1047,13 @@ bool GLGizmoTracery::restore_original_tracery_meshes(ModelObject& object)
                 continue;
             const auto snapshot    = m_mesh_restore_states.find(volume->id());
             auto       annotations = collect_volume_annotations(*volume);
-            if (snapshot != m_mesh_restore_states.end()) {
+            if (!volume->tracery_edit_data.empty()) {
+                auto document = TraceryDocument::decode(volume->tracery_edit_data);
+                auto channels = document.last_annotations();
+                std::copy(annotations.begin(), annotations.end(), channels.begin());
+                channels[6] = {};
+                restored.emplace_back(volume, document.rebuild(volume->mesh(), channels, {}, TraceryEdit::Regenerate));
+            } else if (snapshot != m_mesh_restore_states.end()) {
                 restored.emplace_back(volume, restore_tracery_mesh(snapshot->second, volume->mesh(), annotations));
             } else if (index < m_stained_glass_base_paint_data.size()) {
                 // Legacy/session paint without a mesh snapshot can only restore colour.
@@ -1069,6 +1077,7 @@ bool GLGizmoTracery::restore_original_tracery_meshes(ModelObject& object)
 
 void GLGizmoTracery::clear_stained_glass_editor()
 {
+    m_edit_document_hashes.clear();
     m_selection_modified = true;
     m_mask_data.clear();
     m_previous_mask_data.clear();
@@ -2942,6 +2951,28 @@ void GLGizmoTracery::generate_paint_plan()
         return;
     }
 
+    if (m_active_stroke_erases) {
+        if (m_pending_selection_mode == PaintMode::THROUGH) {
+            size_t index = 0;
+            for (const ModelVolume* volume : model_object->volumes) {
+                if (!volume->is_model_part()) continue;
+                m_generated_voronoi_regions.resize(index + 1);
+                if (index < m_previous_mask_data.size() && index < m_mask_data.size())
+                    for (const auto& facet : TraceryDocument::erased_regions(volume->mesh(), m_previous_mask_data[index], m_mask_data[index]))
+                        for (const auto& region : facet.regions) {
+                            GeneratedVoronoiRegion erased;
+                            erased.source_facet_id = facet.source_facet_id;
+                            erased.mixed_filament_id = 1; // geometry only; erase restores base paint
+                            for (const Vec2d& p : region.polygon)
+                                erased.local_polygon.push_back((facet.origin + p.x() * facet.axis_u + p.y() * facet.axis_v).cast<float>());
+                            m_generated_voronoi_regions[index].push_back(std::move(erased));
+                        }
+                ++index;
+            }
+        }
+        return;
+    }
+
     using SurfaceTriangle = GenerationInput::SurfaceTriangle;
     using ColorSource = GenerationInput::ColorSource;
     std::vector<ColorGroup> color_groups;
@@ -3268,6 +3299,10 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         for (size_t id = 1; id < paint.used_states.size(); ++id)
             if (paint.used_states[id]) plate_material_ids.insert(unsigned(id));
     };
+    for (const auto& [object_index, instances] : plate_instances)
+        for (const auto* volume : source_model.objects[object_index]->volumes)
+            if (!volume->tracery_edit_data.empty())
+                collect_paint(TraceryDocument::decode(volume->tracery_edit_data).last_annotations()[5]);
     for (const auto& paint : m_stained_glass_base_paint_data) collect_paint(paint);
     for (const auto& [volume, state] : m_mesh_restore_states) {
         if (!state.original_annotations.empty()) collect_paint(state.original_annotations.front());
@@ -4295,7 +4330,7 @@ void GLGizmoTracery::generate_through_voronoi_regions()
                 ++skipped_small_polygon;
                 continue;
             }
-            if (front.fragment_id >= m_fragment_colors.size()) {
+            if (!m_active_stroke_erases && front.fragment_id >= m_fragment_colors.size()) {
                 ++skipped_missing_color;
                 continue;
             }
@@ -4345,6 +4380,8 @@ void GLGizmoTracery::generate_through_voronoi_regions()
             }
         }
 #endif
+        if (m_active_stroke_erases)
+            for (auto& region : projected_regions) region.mixed_filament_id = 1;
         auto& output = m_generated_voronoi_regions[volume_index++];
         output.insert(output.end(), std::make_move_iterator(projected_regions.begin()),
                       std::make_move_iterator(projected_regions.end()));
@@ -4537,33 +4574,28 @@ std::vector<TriangleSelector::TriangleSplittingData> GLGizmoTracery::collect_par
 }
 
 std::vector<GLGizmoTracery::GeneratedVoronoiRegion> GLGizmoTracery::remap_partition_regions(
-    const std::vector<GeneratedVoronoiRegion>& regions, const TraceryPartitionResult& partition) const
+    const std::vector<GeneratedVoronoiRegion>& regions, TraceryRegionMapper& mapper) const
 {
     TraceryPerformanceScope performance("region_mapping");
     performance.count("input_regions", regions.size());
-    performance.stage("region_mapping.build_children_index");
-    std::map<int, std::vector<int>> children;
-    for (size_t i = 0; i < partition.source_facets.size(); ++i)
-        children[partition.source_facets[i]].push_back(int(i));
     performance.stage("region_mapping.clip_regions");
-    size_t clip_calls = 0;
+    TraceryMappingStatistics statistics;
     std::vector<GeneratedVoronoiRegion> result;
     for (const GeneratedVoronoiRegion& region : regions) {
-        const auto found = children.find(region.source_facet_id);
-        if (found == children.end())
-            throw std::runtime_error("Lost source facet while remapping stained glass");
-        for (int facet : found->second) {
-            ++clip_calls;
-            auto polygon = clip_tracery_polygon_to_facet(partition.mesh, facet, region.local_polygon);
-            if (polygon.size() < 3)
-                continue;
+        for (auto& mapped : mapper.map(region.source_facet_id, region.local_polygon, statistics)) {
             GeneratedVoronoiRegion child = region;
-            child.source_facet_id        = facet;
-            child.local_polygon          = std::move(polygon);
+            child.source_facet_id = mapped.facet;
+            child.local_polygon = std::move(mapped.polygon);
             result.push_back(std::move(child));
         }
     }
-    performance.count("clip_calls", clip_calls);
+    performance.count("candidate_pairs", statistics.candidate_pairs);
+    performance.count("spatial_candidates", statistics.spatial_candidates);
+    performance.count("clip_calls", statistics.clip_calls);
+    performance.count("separated_candidates", statistics.separated_candidates);
+    performance.count("inherited_regions", statistics.inherited_regions);
+    performance.count("inherited_facets", statistics.inherited_facets);
+    performance.count("nonempty_results", statistics.nonempty_results);
     performance.count("output_regions", result.size());
     performance.stage("region_mapping.cleanup");
     return result;
@@ -4591,8 +4623,10 @@ void GLGizmoTracery::replace_tracery_mesh(ModelVolume& volume, TraceryPartitionR
     volume.get_object()->invalidate_bounding_box();
 }
 
-GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_partition(ModelVolume& volume, size_t volume_index,
-    const EnforcerBlockerStateMap* mapping, const std::vector<unsigned int>* recipes) const
+GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_partition(ModelVolume&                     volume,
+                                                                                       size_t                           volume_index,
+                                                                                       const EnforcerBlockerStateMap*   mapping,
+                                                                                       const std::vector<unsigned int>* recipes) const
 {
     TraceryPerformanceScope performance("partition_and_remap");
     performance.count("volume_index", volume_index);
@@ -4600,24 +4634,22 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
     performance.count("history_selections", m_tracery_selections.size());
     performance.stage("partition.collect_current_annotations");
     PreparedTraceryVolume prepared;
-    prepared.volume        = &volume;
-    prepared.index         = volume_index;
-    auto current           = collect_volume_annotations(volume);
-    performance.stage("partition.copy_restore_snapshot");
-    const auto snapshot    = m_mesh_restore_states.find(volume.id());
-    prepared.restore_state = snapshot == m_mesh_restore_states.end() ? capture_tracery_restore_state(volume.mesh(), current) :
-                                                                       snapshot->second;
+    prepared.volume = &volume;
+    prepared.index  = volume_index;
+    auto current    = collect_volume_annotations(volume);
     performance.stage("partition.collect_partition_annotations");
-    auto annotations = collect_partition_annotations(volume, volume_index);
+    auto annotations            = collect_partition_annotations(volume, volume_index);
+    annotations[0]              = current[0];
+    auto initial                = annotations;
+    initial[6]                  = initial[7]; // capture the committed mask, before this stroke
+    auto       document         = volume.tracery_edit_data.empty() ? TraceryDocument::capture(volume.mesh(), initial) :
+                                                                     TraceryDocument::decode(volume.tracery_edit_data);
+    const auto previous_sources = document.source_facets();
     performance.stage("partition.build_regions");
     auto regions = build_voronoi_2d_data(volume_index, {}, recipes != nullptr);
     performance.count("region_source_facets", regions.size());
     performance.stage("partition.remap_material_ids");
     if (mapping) {
-        {
-            TraceryPerformanceScope::Sample sample(performance, "material_mapping.current_paint");
-            current[0] = tracery_remap_paint(volume.mesh(), current[0], *mapping);
-        }
         {
             TraceryPerformanceScope::Sample sample(performance, "material_mapping.partition_paint");
             annotations[0] = tracery_remap_paint(volume.mesh(), annotations[0], *mapping);
@@ -4626,15 +4658,7 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
             TraceryPerformanceScope::Sample sample(performance, "material_mapping.base_paint");
             annotations[5] = tracery_remap_paint(volume.mesh(), annotations[5], *mapping);
         }
-        auto& restore = prepared.restore_state;
-        {
-            TraceryPerformanceScope::Sample sample(performance, "material_mapping.restore_original");
-            restore.original_annotations[0] = tracery_remap_paint(restore.original_mesh, restore.original_annotations[0], *mapping);
-        }
-        {
-            TraceryPerformanceScope::Sample sample(performance, "material_mapping.restore_last");
-            restore.last_annotations[0] = tracery_remap_paint(volume.mesh(), restore.last_annotations[0], *mapping);
-        }
+        document.remap_materials(*mapping);
     }
     if (recipes) {
         for (auto& facet : regions)
@@ -4644,19 +4668,31 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
     // Source eligibility was enforced before generation. Target paint, including
     // opaque black, must not overwrite either generated or through-projected regions.
     performance.stage("partition.geometry");
-    prepared.partition = build_exact_tracery_partition(volume.mesh(), annotations, regions);
+    const TraceryEdit edit = m_active_stroke_erases ?
+                                 TraceryEdit::Erase :
+                                 (!m_incremental_generation && !regions.empty() ? TraceryEdit::Regenerate : TraceryEdit::Paint);
+    prepared.partition     = document.rebuild(volume.mesh(), annotations, regions, edit);
+    performance.count("base_facets", document.base_mesh().its.indices.size());
     performance.count("output_facets", prepared.partition.mesh.indices.size());
-    performance.stage("partition.advance_restore_state");
-    advance_tracery_restore_state(prepared.restore_state, volume.mesh(), current, prepared.partition);
+    performance.stage("partition.save_editing_data");
+    prepared.document = document.encode();
+    performance.stage("partition.build_mapping_index");
+    TraceryRegionMapper mapper(document.base_mesh().its, prepared.partition);
+    auto                remap_view = [&](const std::vector<GeneratedVoronoiRegion>& view) {
+        auto base_view = view;
+        for (auto& region : base_view)
+            region.source_facet_id = previous_sources.at(region.source_facet_id);
+        return remap_partition_regions(base_view, mapper);
+    };
     performance.stage("partition.remap_generated_regions");
     if (volume_index < m_generated_voronoi_regions.size())
-        prepared.generated = remap_partition_regions(m_generated_voronoi_regions[volume_index], prepared.partition);
+        prepared.generated = remap_view(m_generated_voronoi_regions[volume_index]);
     performance.stage("partition.remap_history_regions");
-    for (const TracerySelection& selection : m_tracery_selections) {
-        prepared.selections.push_back(volume_index < selection.regions.size() ?
-                                          remap_partition_regions(selection.regions[volume_index], prepared.partition) :
-                                          std::vector<GeneratedVoronoiRegion>{});
-    }
+    for (const TracerySelection& selection : m_tracery_selections)
+        prepared.selections.push_back(volume_index < selection.regions.size() ? remap_view(selection.regions[volume_index]) :
+                                                                                std::vector<GeneratedVoronoiRegion>{});
+    if (performance.enabled())
+        performance.count("mapping_index_estimated_bytes", mapper.estimated_bytes());
     performance.stage("partition.assign_region_materials");
     if (recipes)
         for (auto& region : prepared.generated)
@@ -4676,8 +4712,11 @@ void GLGizmoTracery::commit_tracery_mesh_update(PreparedTraceryVolume&& prepared
     const ObjectID old_id = volume.id();
     replace_tracery_mesh(volume, prepared.partition);
     m_mesh_restore_states.erase(old_id);
-    m_mesh_restore_states.emplace(volume.id(), std::move(prepared.restore_state));
-    auto store = [index](auto& destination, auto&& value) {
+    volume.tracery_edit_data = std::move(prepared.document);
+    if (m_edit_document_hashes.size() <= index)
+        m_edit_document_hashes.resize(index + 1, 0);
+    m_edit_document_hashes[index] = std::hash<std::string>{}(volume.tracery_edit_data);
+    auto store                    = [index](auto& destination, auto&& value) {
         if (destination.size() <= index)
             destination.resize(index + 1);
         destination[index] = std::move(value);
@@ -5160,9 +5199,9 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_tracery_2d_data(size_t vol
     for (const TriangleSelector::TraceryFacet2DData& facet : result)
         trace("facet_summary", 0, facet.source_facet_id, 0,
               "regions=" + std::to_string(facet.regions.size()));
-    result.erase(std::remove_if(result.begin(), result.end(), [](const TriangleSelector::TraceryFacet2DData& facet) {
-        return facet.regions.empty();
-    }), result.end());
+    result.erase(std::remove_if(result.begin(), result.end(),
+                                [](const TriangleSelector::TraceryFacet2DData& facet) { return facet.regions.empty(); }),
+                 result.end());
     return result;
 }
 
@@ -5181,13 +5220,20 @@ void GLGizmoTracery::update_from_model_object(bool)
             }
         }
     }
+    std::vector<size_t> document_hashes;
+    for (const auto* volume : model_object->volumes)
+        if (volume->is_model_part())
+            document_hashes.push_back(volume->tracery_edit_data.empty() ? 0 : std::hash<std::string>{}(volume->tracery_edit_data));
+    const bool document_changed = document_hashes != m_edit_document_hashes;
+    m_edit_document_hashes      = std::move(document_hashes);
     // Sidebar/material updates may rebuild ModelObject instances and assign a
     // new ObjectID without changing the selected project object. Preserve its
     // in-memory mask in that case; a different project object still clears it.
-    const bool restore_mask = model_object->id() == m_mask_object_id ||
-        (!m_mask_data.empty() && current_object_index >= 0 && current_object_index == m_mask_object_index);
+    const bool restore_mask = !document_changed &&
+                              (model_object->id() == m_mask_object_id ||
+                               (!m_mask_data.empty() && current_object_index >= 0 && current_object_index == m_mask_object_index));
     if (restore_mask) {
-        m_mask_object_id = model_object->id();
+        m_mask_object_id    = model_object->id();
         m_mask_object_index = current_object_index;
     }
     if (!restore_mask) {
@@ -5198,7 +5244,7 @@ void GLGizmoTracery::update_from_model_object(bool)
         m_generated_voronoi_regions.clear();
         m_tracery_selections.clear();
         m_incremental_generation = false;
-        m_mask_object_index = -1;
+        m_mask_object_index      = -1;
     }
     m_triangle_selectors.clear();
     m_fill_reference_selectors.clear();
@@ -5210,11 +5256,28 @@ void GLGizmoTracery::update_from_model_object(bool)
         if (!volume->is_model_part())
             continue;
         const size_t selector_idx = m_triangle_selectors.size();
-        const int color_idx = std::clamp(volume->extruder_id() - 1, 0, int(extruder_colors.size()) - 1);
-        std::vector<ColorRGBA> ebt_colors { extruder_colors[color_idx] };
+        // Persistent data is authoritative after undo/redo and material updates;
+        // a cached mask may describe a different derived mesh with the same ID.
+        if (!volume->tracery_edit_data.empty()) {
+            try {
+                const auto document = TraceryDocument::decode(volume->tracery_edit_data);
+                if (document.matches(volume->mesh())) {
+                    m_mask_data.resize(selector_idx + 1);
+                    m_stained_glass_base_paint_data.resize(selector_idx + 1);
+                    m_mask_data[selector_idx]                     = document.last_annotations()[6];
+                    m_stained_glass_base_paint_data[selector_idx] = document.last_annotations()[5];
+                    m_mask_object_id                              = model_object->id();
+                    m_mask_object_index                           = current_object_index;
+                }
+            } catch (const std::exception& error) {
+                BOOST_LOG_TRIVIAL(error) << "Cannot restore stained-glass editing data: " << error.what();
+            }
+        }
+        const int              color_idx = std::clamp(volume->extruder_id() - 1, 0, int(extruder_colors.size()) - 1);
+        std::vector<ColorRGBA> ebt_colors{extruder_colors[color_idx]};
         ebt_colors.insert(ebt_colors.end(), extruder_colors.begin(), extruder_colors.end());
-        auto fill_reference = std::make_unique<TriangleSelectorPatch>(volume->mesh(), ebt_colors, 0.2f);
-        const auto max_ebt = EnforcerBlockerType(std::min(extruder_colors.size(), size_t(EnforcerBlockerType::ExtruderMax)));
+        auto       fill_reference = std::make_unique<TriangleSelectorPatch>(volume->mesh(), ebt_colors, 0.2f);
+        const auto max_ebt        = EnforcerBlockerType(std::min(extruder_colors.size(), size_t(EnforcerBlockerType::ExtruderMax)));
         if (selector_idx < m_stained_glass_base_paint_data.size())
             fill_reference->deserialize(m_stained_glass_base_paint_data[selector_idx], false, max_ebt);
         else
@@ -5231,12 +5294,11 @@ void GLGizmoTracery::update_from_model_object(bool)
         m_triangle_selectors.emplace_back(std::make_unique<TriangleSelectorGUI>(volume->mesh(), 0.2f));
         TriangleSelectorGUI& effect = *m_triangle_selectors.back();
         effect.deserialize(m_fill_reference_selectors.back()->serialize(), false);
-        if (restore_mask && selector_idx < m_mask_data.size()) {
+        if (selector_idx < m_mask_data.size()) {
             TriangleSelector previous_effect(volume->mesh());
             previous_effect.deserialize(m_mask_data[selector_idx], false);
-            effect.set_leaf_states([&previous_effect](const Vec3f& point, int source_facet) {
-                return previous_effect.state_at(point, source_facet);
-            });
+            effect.set_leaf_states(
+                [&previous_effect](const Vec3f& point, int source_facet) { return previous_effect.state_at(point, source_facet); });
         } else {
             effect.set_leaf_states({});
         }

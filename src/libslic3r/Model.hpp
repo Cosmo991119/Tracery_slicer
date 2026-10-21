@@ -879,18 +879,49 @@ public:
     void                reset_from_upper()       { cut_info.reset_from_upper(); }
 
     bool                is_cut_connector() const { return cut_info.is_processed && cut_info.is_connector; }
-    void                invalidate_cut_info()    { cut_info.invalidate(); }
+    void                invalidate_cut_info() { cut_info.invalidate(); }
+
+    // Versioned stained-glass base/regions, persisted with the volume and undo.
+    std::string tracery_edit_data;
 
     // The triangular model.
-    const TriangleMesh& mesh() const { return *m_mesh.get(); }
+    const TriangleMesh&                 mesh() const { return *m_mesh.get(); }
     std::shared_ptr<const TriangleMesh> mesh_ptr() const { return m_mesh; }
-    void                set_mesh(const TriangleMesh &mesh) { m_mesh = std::make_shared<const TriangleMesh>(mesh); }
-    void                set_mesh(TriangleMesh &&mesh) { m_mesh = std::make_shared<const TriangleMesh>(std::move(mesh)); }
-    void                set_mesh(const indexed_triangle_set &mesh) { m_mesh = std::make_shared<const TriangleMesh>(mesh); }
-    void                set_mesh(indexed_triangle_set &&mesh) { m_mesh = std::make_shared<const TriangleMesh>(std::move(mesh)); }
-    void                set_mesh(std::shared_ptr<const TriangleMesh> &mesh) { m_mesh = mesh; }
-    void                set_mesh(std::unique_ptr<const TriangleMesh> &&mesh) { m_mesh = std::move(mesh); }
-	void				reset_mesh() { m_mesh = std::make_shared<const TriangleMesh>(); }
+    void                                set_mesh(const TriangleMesh& mesh)
+    {
+        tracery_edit_data.clear();
+        m_mesh = std::make_shared<const TriangleMesh>(mesh);
+    }
+    void set_mesh(TriangleMesh&& mesh)
+    {
+        tracery_edit_data.clear();
+        m_mesh = std::make_shared<const TriangleMesh>(std::move(mesh));
+    }
+    void set_mesh(const indexed_triangle_set& mesh)
+    {
+        tracery_edit_data.clear();
+        m_mesh = std::make_shared<const TriangleMesh>(mesh);
+    }
+    void set_mesh(indexed_triangle_set&& mesh)
+    {
+        tracery_edit_data.clear();
+        m_mesh = std::make_shared<const TriangleMesh>(std::move(mesh));
+    }
+    void set_mesh(std::shared_ptr<const TriangleMesh>& mesh)
+    {
+        tracery_edit_data.clear();
+        m_mesh = mesh;
+    }
+    void set_mesh(std::unique_ptr<const TriangleMesh>&& mesh)
+    {
+        tracery_edit_data.clear();
+        m_mesh = std::move(mesh);
+    }
+    void reset_mesh()
+    {
+        tracery_edit_data.clear();
+        m_mesh = std::make_shared<const TriangleMesh>();
+    }
     const std::shared_ptr<const TriangleMesh>& get_mesh_shared_ptr() const { return m_mesh; }
     // Configuration parameters specific to an object model geometry or a modifier volume, 
     // overriding the global Slic3r settings and the ModelObject settings.
@@ -1131,7 +1162,7 @@ private:
     // Copying an existing volume, therefore this volume will get a copy of the ID assigned.
     ModelVolume(ModelObject *object, const ModelVolume &other) :
         ObjectBase(other),
-        name(other.name), source(other.source), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
+        name(other.name), source(other.source), tracery_edit_data(other.tracery_edit_data), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
         fuzzy_skin_facets(other.fuzzy_skin_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
@@ -1207,7 +1238,7 @@ private:
         // BBS: add backup, check modify
         bool mesh_changed = false;
         auto tr = m_transformation;
-        ar(name, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
+        ar(name, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info, tracery_edit_data);
         mesh_changed |= !(tr == m_transformation);
         auto t = supported_facets.timestamp();
         cereal::load_by_value(ar, supported_facets);
@@ -1239,7 +1270,7 @@ private:
 	}
 	template<class Archive> void save(Archive &ar) const {
 		bool has_convex_hull = m_convex_hull.get() != nullptr;
-        ar(name, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info);
+        ar(name, source, m_mesh, m_type, m_material_id, m_transformation, m_is_splittable, has_convex_hull, cut_info, tracery_edit_data);
         cereal::save_by_value(ar, supported_facets);
         cereal::save_by_value(ar, seam_facets);
         cereal::save_by_value(ar, mmu_segmentation_facets);

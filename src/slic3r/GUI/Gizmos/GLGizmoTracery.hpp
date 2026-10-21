@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+namespace Slic3r { class TraceryRegionMapper; }
+
 namespace Slic3r::GUI {
 
 // Stained glass is an automatic multi-material paint brush. Its temporary
@@ -223,7 +225,7 @@ private:
     ModelObject* find_masked_model_object(Model& model) const;
     std::vector<TriangleSelector::TriangleSplittingData> collect_partition_annotations(const ModelVolume& volume, size_t index) const;
     std::vector<GeneratedVoronoiRegion> remap_partition_regions(
-        const std::vector<GeneratedVoronoiRegion>& regions, const TraceryPartitionResult& partition) const;
+        const std::vector<GeneratedVoronoiRegion>& regions, TraceryRegionMapper& mapper) const;
     PreparedTraceryVolume prepare_volume_tracery_partition(ModelVolume& volume, size_t index,
         const EnforcerBlockerStateMap* mapping = nullptr, const std::vector<unsigned int>* recipes = nullptr) const;
     void commit_tracery_mesh_update(PreparedTraceryVolume&& prepared);
@@ -267,7 +269,7 @@ private:
         ModelVolume* volume = nullptr;
         size_t index = 0;
         TraceryPartitionResult partition;
-        TraceryRestoreState restore_state;
+        std::string document;
         std::vector<GeneratedVoronoiRegion> generated;
         std::vector<std::vector<GeneratedVoronoiRegion>> selections;
     };
@@ -318,6 +320,8 @@ private:
     // compact representation lets reopening restore the same painted area.
     ObjectID m_mask_object_id;
     std::vector<TriangleSelector::TriangleSplittingData> m_mask_data;
+    // Transient cache identity; deliberately not restored by undo snapshots.
+    std::vector<size_t> m_edit_document_hashes;
     // Selector data before the current completed stroke. It identifies the
     // added leaves, so a later stroke does not regenerate earlier selections.
     std::vector<TriangleSelector::TriangleSplittingData> m_previous_mask_data;

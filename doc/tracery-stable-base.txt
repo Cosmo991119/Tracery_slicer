@@ -1,0 +1,41 @@
+Stable-base stained-glass editing
+
+TraceryDocument owns an immutable mesh and material/selection polygons in the
+coordinate frame of each base facet. Every successful edit rebuilds its derived
+mesh from that base. The derived-to-base facet table transports brush changes
+and ordinary paint/support/seam changes; derived triangle IDs are never used as
+the source of a later geometric subdivision.
+
+The eight channels are final MMU paint, support, seam, fuzzy skin, exterior,
+underlying ordinary paint, selection mask and committed selection mask.
+Erase restores underlying paint only within the erased area. Other material
+regions retain their polygons and colours. Adjacent same-colour regions may be
+merged: this document preserves coloured regions, not separate Voronoi seed IDs.
+The gizmo's fragment/history views are derived display/editing caches.
+
+Rendering and slicing consume one mesh with normal FacetsAnnotation paint.
+The persistent document is not a second rendered surface. It is copied with the
+volume, included in undo snapshots and saved as tracery_edit_data_v1 metadata in
+BBS project 3MF files. Exporting plain STL or generic geometry 3MF does not retain
+editable stained-glass metadata. Mesh replacement, geometry recentering/scaling
+and resetting annotations invalidate it. Instance transforms do not alter the
+local base. Material removal/reindexing also remaps hidden underlying colours.
+Legacy projects without this document capture their current mesh as the base;
+geometry already subdivided by an older build cannot be reconstructed backwards.
+
+Only a successfully validated result is committed. Zero-area faces, duplicate
+faces, new unmatched/non-manifold edges and inconsistent internal edge winding
+are rejected. Existing source boundaries are allowed. Shared source-edge cuts
+are canonical; float-degenerate connected edges and collapsed boundary chains
+are reconciled without welding unrelated coincident shells. Facets narrower
+than the existing 0.00001 mm geometry tolerance keep their dominant channel
+state instead of inserting unrepresentable internal colour cuts. Their shared
+edge cuts and authoritative editing polygons remain available. Source mesh winding
+errors are not silently repaired by this feature.
+
+Regression coverage: tracery_document and tracery_partition, including repeated
+paint/erase, ordinary paint/support preservation, material-slot changes, real
+project save/reopen, sub-micron source facets and the sanitized window fixture.
+The window fixture contains geometry and paint only, with no printer presets or
+user paths. Brush tests exercise the production circle selector, partition,
+serialization and erase at radii 1, 3 and 8 mm; they do not simulate GUI events.

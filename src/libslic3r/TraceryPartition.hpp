@@ -5,6 +5,8 @@
 
 namespace Slic3r {
 
+constexpr double TRACERY_GEOMETRY_TOLERANCE = 0.00001; // millimetres
+
 // Channel zero is MMU paint. Other channels are preserved annotations, including
 // editor masks. Every channel is rebuilt against the returned mesh atomically.
 struct TraceryPartitionResult
@@ -18,7 +20,8 @@ struct TraceryPartitionResult
 TraceryPartitionResult build_exact_tracery_partition(const TriangleMesh&                                         source,
                                                      const std::vector<TriangleSelector::TriangleSplittingData>& annotations,
                                                      const TriangleSelector::Tracery2DData&                      regions,
-                                                     const std::function<void()>&                                cancel = {});
+                                                     const std::function<void()>&                                cancel = {},
+                                                     const std::vector<TriangleSelector::Tracery2DData>&          channel_regions = {});
 
 // Clips retained editor geometry when original facet IDs are replaced.
 std::vector<Vec3f> clip_tracery_polygon_to_facet(const indexed_triangle_set& mesh, int facet, const std::vector<Vec3f>& polygon);
