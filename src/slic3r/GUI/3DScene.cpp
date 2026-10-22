@@ -1,3 +1,4 @@
+#include "TracerySurfaceRenderer.hpp"
 #include <GL/glew.h>
 
 #include "3DScene.hpp"
@@ -657,6 +658,20 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
         glFrontFace(GL_CW);
     glsafe(::glCullFace(GL_BACK));
 
+    if (!picking && printable && object_idx() < model_objects.size() &&
+        volume_idx() < model_objects[object_idx()]->volumes.size() && GUI::wxGetApp().plater()) {
+        const auto* volume = model_objects[object_idx()]->volumes[volume_idx()];
+        if (!volume->tracery_edit_data.empty()) {
+            if (!vector_surface_renderer) vector_surface_renderer = std::make_shared<GUI::TracerySurfaceRenderer>();
+            const auto& collection = GUI::wxGetApp().plater()->canvas3D()->get_volumes();
+            const auto& plane = collection.get_clipping_plane();
+            if (vector_surface_renderer->render(*volume, extruder_colors, world_matrix(), GUI::wxGetApp().plater()->get_camera(),
+                {float(plane[0]), float(plane[1]), float(plane[2]), float(plane[3])}, collection.get_z_range(), render_color.a())) {
+                if (this->is_left_handed()) glFrontFace(GL_CCW);
+                return;
+            }
+        }
+    }
     bool         color_volume = false;
     ModelObject* model_object = nullptr;
     ModelVolume* model_volume = nullptr;

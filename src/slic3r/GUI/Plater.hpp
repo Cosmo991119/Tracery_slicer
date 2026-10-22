@@ -153,7 +153,8 @@ public:
     void jump_to_option(size_t selected);
     void jump_to_option(const std::string& opt_key, Preset::Type type, const std::wstring& category);
     // BBS. Add on_filaments_change() method.
-    void on_filaments_change(size_t num_filaments, bool sync_mixed_manager = true);
+    // Deferred callers must update_color_mix_panel() after their transaction.
+    void on_filaments_change(size_t num_filaments, bool sync_mixed_manager = true, bool defer_colour_refresh = false);
     void change_filament(size_t from_id, size_t to_id);
     void merge_mixed_filament(size_t from_id, size_t to_id,
                               bool skip_update = false, bool skip_serialize = false);
@@ -170,13 +171,13 @@ public:
                                                     std::function<void(int /*current*/, int /*total*/)> on_progress = nullptr);
     void add_custom_filament(wxColour new_col);
     void add_custom_filaments(const std::vector<wxColour>& new_cols);
-    void set_stained_glass_base_filament_preset(const std::vector<unsigned int>& filament_ids);
+    void set_stained_glass_base_filament_preset(const std::vector<unsigned int>& filament_ids, bool defer_colour_refresh = false);
     void edit_filament();
 
     void on_filaments_delete(size_t filament_id);
     void init_color_mix_panel(wxWindow* parent, wxSizer* sizer);
     void update_color_mix_panel();
-    void update_mixed_filament_panel(bool sync_manager = true);
+    void update_mixed_filament_panel(bool sync_manager = true, bool defer_colour_refresh = false);
     std::vector<unsigned int> get_ui_ordered_filament_ids() const;
     // BBS
     void on_bed_type_change(BedType bed_type);

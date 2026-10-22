@@ -83,6 +83,7 @@ static inline void model_volume_list_copy_configs(ModelObject &model_object_dst,
         mv_dst.seam_facets.assign(mv_src.seam_facets);
         assert(mv_dst.mmu_segmentation_facets.id() == mv_src.mmu_segmentation_facets.id());
         mv_dst.mmu_segmentation_facets.assign(mv_src.mmu_segmentation_facets);
+        mv_dst.tracery_edit_data = mv_src.tracery_edit_data;
         assert(mv_dst.fuzzy_skin_facets.id() == mv_src.fuzzy_skin_facets.id());
         mv_dst.fuzzy_skin_facets.assign(mv_src.fuzzy_skin_facets);
         //FIXME what to do with the materials?
@@ -1852,7 +1853,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         const bool same_layer_mode_active = same_layer_pointillism_enabled(m_mixed_filament_mgr);
         if (const auto &volumes = print_object.model_object()->volumes;
             num_extruders > 1 &&
-            std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return !v->mmu_segmentation_facets.empty(); }) != volumes.end()) {
+            std::find_if(volumes.begin(), volumes.end(), [](const ModelVolume *v) { return v->is_mm_painted(); }) != volumes.end()) {
 
             std::array<bool, static_cast<size_t>(EnforcerBlockerType::ExtruderMax) + 1> used_facet_states{};
             for (const ModelVolume *volume : volumes) {
@@ -1861,6 +1862,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 assert(volume_used_facet_states.size() == used_facet_states.size());
                 for (size_t state_idx = 0; state_idx < std::min(volume_used_facet_states.size(), used_facet_states.size()); ++state_idx)
                     used_facet_states[state_idx] |= volume_used_facet_states[state_idx];
+                for (unsigned id : volume->vector_material_ids())
+                    if (id < used_facet_states.size()) used_facet_states[id] = true;
             }
 
             size_t dropped_painted_states = 0;

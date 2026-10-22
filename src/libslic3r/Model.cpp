@@ -2606,6 +2606,12 @@ bool ModelVolume::is_splittable() const
 }
 
 // BBS
+std::vector<unsigned> ModelVolume::vector_material_ids() const
+{
+    const auto doc = TraceryDocument::from_volume_snapshot(*this);
+    return doc ? doc->material_ids() : std::vector<unsigned>{};
+}
+
 std::vector<int> ModelVolume::get_extruders() const
 {
     if (m_type == ModelVolumeType::INVALID
@@ -2629,6 +2635,9 @@ std::vector<int> ModelVolume::get_extruders() const
     }
 
     std::vector<int> volume_extruders = mmuseg_extruders;
+    for (unsigned id : vector_material_ids())
+        if (std::find(volume_extruders.begin(), volume_extruders.end(), int(id)) == volume_extruders.end())
+            volume_extruders.push_back(int(id));
 
     int volume_extruder_id = this->extruder_id();
     if (volume_extruder_id > 0)
@@ -3087,6 +3096,8 @@ std::vector<size_t> ModelVolume::get_extruders_from_multi_material_painting() co
              extruders.emplace_back(state_idx - 1);
      }
 
+     for (unsigned id : vector_material_ids())
+         if (std::find(extruders.begin(), extruders.end(), size_t(id - 1)) == extruders.end()) extruders.push_back(id - 1);
      return extruders;
  }
 
@@ -3783,7 +3794,7 @@ bool model_volume_list_changed(const ModelObject &model_object_old, const ModelO
             ++ i_new;
             continue;
         }
-        if (mv_old.type() != mv_new.type() || mv_old.id() != mv_new.id())
+        if (mv_old.type() != mv_new.type() || mv_old.id() != mv_new.id() || mv_old.tracery_edit_data != mv_new.tracery_edit_data)
             return true;
         //FIXME test for the content of the mesh!
         if (! mv_old.get_matrix().isApprox(mv_new.get_matrix()))
@@ -3862,7 +3873,8 @@ bool model_mmu_segmentation_data_changed(const ModelObject& mo, const ModelObjec
     return model_property_changed(mo, mo_new,
         [](const ModelVolumeType t) { return t == ModelVolumeType::MODEL_PART; },
         [](const ModelVolume &mv_old, const ModelVolume &mv_new){
-            return mv_old.mmu_segmentation_facets.timestamp_matches(mv_new.mmu_segmentation_facets);
+            return mv_old.tracery_edit_data == mv_new.tracery_edit_data &&
+                   mv_old.mmu_segmentation_facets.timestamp_matches(mv_new.mmu_segmentation_facets);
         });
 }
 

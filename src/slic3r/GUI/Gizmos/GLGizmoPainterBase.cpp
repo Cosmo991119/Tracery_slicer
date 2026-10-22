@@ -1,3 +1,4 @@
+#include "../TracerySurfaceRenderer.hpp"
 #include "GLGizmoPainterBase.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosCommon.hpp"
@@ -124,7 +125,19 @@ void GLGizmoPainterBase::render_triangles(const Selection& selection) const
         shader->set_uniform("slope.actived", m_parent.is_using_slope());
         shader->set_uniform("slope.volume_world_normal_matrix", normal_matrix);
         shader->set_uniform("slope.normal_z", normal_z);
-        const_cast<TriangleSelectorGUI*>(get_edit_selector(mesh_id))->render(m_imgui, trafo_matrix);
+        bool vector_rendered = false;
+        if ((get_painter_type() == PainterGizmoType::MM_SEGMENTATION || get_painter_type() == PainterGizmoType::TRACERY) &&
+            !mv->tracery_edit_data.empty()) {
+            auto& renderer = m_vector_renderers[mv->id()];
+            if (!renderer) renderer = std::make_shared<TracerySurfaceRenderer>();
+            vector_rendered = renderer->render(*mv, ::get_extruders_colors(), trafo_matrix, camera,
+                                               clp_data.clp_dataf, clp_data.z_range);
+        }
+        auto* selector = const_cast<TriangleSelectorGUI*>(get_edit_selector(mesh_id));
+        if (vector_rendered) selector->render_selection_only(trafo_matrix);
+        else selector->render(m_imgui, trafo_matrix);
+        if (get_painter_type() == PainterGizmoType::TRACERY && size_t(mesh_id) < m_triangle_selectors.size())
+            m_triangle_selectors[mesh_id]->render_state_contour(trafo_matrix);
 
         if (is_left_handed)
             glsafe(::glFrontFace(GL_CCW));
@@ -1135,6 +1148,31 @@ ColorRGBA TriangleSelectorGUI::get_seed_fill_color(const ColorRGBA& base_color)
         base_color.g() * 1.25f < 1.f ? base_color.g() * 1.25f : 1.f,
         base_color.b() * 1.25f < 1.f ? base_color.b() * 1.25f : 1.f,
         1.f};
+}
+
+void TriangleSelectorGUI::render_state_contour(const Transform3d& matrix)
+{
+    std::vector<bool> selected(m_triangles.size(), false);
+    for (size_t i = 0; i < m_triangles.size(); ++i) {
+        auto& triangle = m_triangles[i];
+        if (!triangle.valid() || triangle.is_split()) continue;
+        selected[i] = triangle.is_selected_by_seed_fill();
+        if (triangle.get_state() != EnforcerBlockerType::NONE) triangle.select_by_seed_fill();
+        else triangle.unselect_by_seed_fill();
+    }
+    render_selection_only(matrix);
+    for (size_t i = 0; i < m_triangles.size(); ++i) {
+        auto& triangle = m_triangles[i];
+        if (!triangle.valid() || triangle.is_split()) continue;
+        if (selected[i]) triangle.select_by_seed_fill();
+        else triangle.unselect_by_seed_fill();
+    }
+}
+
+void TriangleSelectorGUI::render_selection_only(const Transform3d& matrix)
+{
+    update_paint_contour();
+    render_paint_contour(matrix);
 }
 
 void TriangleSelectorGUI::render(ImGuiWrapper* imgui, const Transform3d& matrix)

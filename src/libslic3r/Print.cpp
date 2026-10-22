@@ -2393,7 +2393,8 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 return false;
             if (!model_volume1.seam_facets.equals(model_volume2.seam_facets))
                 return false;
-            if (!model_volume1.mmu_segmentation_facets.equals(model_volume2.mmu_segmentation_facets))
+            if (model_volume1.tracery_edit_data != model_volume2.tracery_edit_data ||
+                !model_volume1.mmu_segmentation_facets.equals(model_volume2.mmu_segmentation_facets))
                 return false;
             if (!model_volume1.fuzzy_skin_facets.equals(model_volume2.fuzzy_skin_facets))
                 return false;

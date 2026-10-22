@@ -2,6 +2,9 @@
 #define slic3r_MultiMaterialSegmentation_hpp_
 
 #include <utility>
+#include <memory>
+#include <map>
+#include "TriangleMesh.hpp"
 #include <vector>
 
 namespace Slic3r {
@@ -34,6 +37,8 @@ struct ModelVolumeFacetsInfo {
     const bool              is_painted;
     // Indicate if the default extruder (TriangleStateType::NONE) should be replaced with the volume extruder.
     const bool              replace_default_extruder;
+    std::shared_ptr<const std::map<unsigned, indexed_triangle_set>> vector_surfaces;
+    indexed_triangle_set material_facets(const ModelVolume& volume, unsigned material, bool strict = false) const;
 };
 
 // Returns segmentation based on painting in segmentation gizmos.

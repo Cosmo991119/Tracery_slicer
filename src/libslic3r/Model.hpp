@@ -1068,7 +1068,8 @@ public:
 
     bool is_fdm_support_painted() const { return !this->supported_facets.empty(); }
     bool is_seam_painted() const { return !this->seam_facets.empty(); }
-    bool is_mm_painted() const { return !this->mmu_segmentation_facets.empty(); }
+    bool is_mm_painted() const { return !this->mmu_segmentation_facets.empty() || !tracery_edit_data.empty(); }
+    std::vector<unsigned> vector_material_ids() const;
     bool is_fuzzy_skin_painted() const { return !this->fuzzy_skin_facets.empty(); }
     
     // Orca: Implement prusa's filament shrink compensation approach

@@ -22,6 +22,7 @@ class ClippingPlane;
 struct Camera;
 class GLGizmoMmuSegmentation;
 class Selection;
+class TracerySurfaceRenderer;
 
 enum class PainterGizmoType {
     FDM_SUPPORTS,
@@ -39,6 +40,8 @@ public:
 
     virtual void render(ImGuiWrapper* imgui, const Transform3d& matrix);
     //void         render(const Transform3d& matrix) { this->render(nullptr, matrix); }
+    void render_selection_only(const Transform3d& matrix);
+    void render_state_contour(const Transform3d& matrix);
     void         set_wireframe_needed(bool need_wireframe) { m_need_wireframe = need_wireframe; }
     bool         get_wireframe_needed() { return m_need_wireframe; }
 
@@ -260,6 +263,7 @@ protected:
 
     // For each model-part volume, store status and division of the triangles.
     std::vector<std::unique_ptr<TriangleSelectorGUI>> m_triangle_selectors;
+    mutable std::map<ObjectID, std::shared_ptr<TracerySurfaceRenderer>> m_vector_renderers;
 
     TriangleSelector::CursorType m_cursor_type = TriangleSelector::SPHERE;
 

@@ -42,6 +42,7 @@ extern Slic3r::ColorRGBA              adjust_color_for_rendering(const Slic3r::C
 namespace Slic3r {
 namespace GUI {
     class Camera;
+    class TracerySurfaceRenderer;
 }
 
 class SLAPrintObject;
@@ -242,6 +243,7 @@ public:
     // raycaster used for picking
     std::unique_ptr<GUI::MeshRaycaster> mesh_raycaster;
     // BBS
+    mutable std::shared_ptr<GUI::TracerySurfaceRenderer> vector_surface_renderer;
     mutable std::vector<GUI::GLModel> mmuseg_models;
     mutable ObjectBase::Timestamp       mmuseg_ts;
 

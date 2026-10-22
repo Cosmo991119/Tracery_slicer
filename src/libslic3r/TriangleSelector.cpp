@@ -1,5 +1,6 @@
 #include "TriangleSelector.hpp"
 #include "Model.hpp"
+#include "TraceryPerformance.hpp"
 
 #include <boost/container/small_vector.hpp>
 #include <boost/log/trivial.hpp>
@@ -9,6 +10,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 #include <tbb/parallel_for.h>
 
 #ifndef NDEBUG
@@ -605,8 +607,10 @@ void TriangleSelector::apply_seed_fill_to(TriangleSelector& target, EnforcerBloc
                     return false;
             return true;
         }
-        if (source.is_selected_by_seed_fill() && !m_unselectable_states.count(source.get_state()))
+        if (source.is_selected_by_seed_fill() && !m_unselectable_states.count(source.get_state())) {
             target_triangle.set_state(new_state);
+            target.record_painted_triangle(target_idx, new_state);
+        }
         return true;
     };
 
@@ -991,15 +995,17 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
     // leaves must be visited separately even when the brush covers the root.
     if (!tr->is_split() && m_unselectable_states.count(tr->get_state()))
         return true;
-    if (num_of_inside_vertices == 3 && (m_unselectable_states.empty() || !tr->is_split())) {
+    if (num_of_inside_vertices == 3 &&
+        ((!m_preserve_subdivision && m_unselectable_states.empty()) || !tr->is_split())) {
         // dump any subdivision and select whole triangle
         undivide_triangle(facet_idx);
         tr->set_state(type);
+        record_painted_triangle(facet_idx, type);
     } else {
         // the triangle is partially inside, let's recursively divide it
         // (if not already) and try selecting its children.
 
-        if (! tr->is_split() && tr->get_state() == type) {
+        if (!m_record_painting && !tr->is_split() && tr->get_state() == type) {
             // This is leaf triangle that is already of correct type as a whole.
             // No need to split, all children would end up selected anyway.
             return true;
@@ -1007,8 +1013,10 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
 
         if (triangle_splitting)
             split_triangle(facet_idx, neighbors);
-        else if (!m_triangles[facet_idx].is_split())
+        else if (!m_triangles[facet_idx].is_split()) {
             m_triangles[facet_idx].set_state(type);
+            record_painted_triangle(facet_idx, type);
+        }
         tr = &m_triangles[facet_idx]; // might have been invalidated by split_triangle().
 
         int num_of_children = tr->number_of_split_sides() + 1;
@@ -1025,6 +1033,36 @@ bool TriangleSelector::select_triangle_recursive(int facet_idx, const Vec3i32 &n
     }
 
     return true;
+}
+
+void TriangleSelector::record_painted_triangle(int facet, EnforcerBlockerType state)
+{
+    if (!m_record_painting) return;
+    const auto& t = m_triangles[facet];
+    m_recorded_paint.push_back({{m_vertices[t.verts_idxs[0]].v, m_vertices[t.verts_idxs[1]].v,
+                                m_vertices[t.verts_idxs[2]].v}, t.source_triangle, state});
+}
+
+TriangleSelector::Tracery2DData TriangleSelector::take_recorded_paint()
+{
+    Tracery2DData result;
+    for (const auto& leaf : m_recorded_paint) {
+        TraceryFacet2DData facet;
+        facet.source_facet_id = leaf.source_facet;
+        facet.origin = leaf.vertices[0].cast<double>();
+        const Vec3d a = leaf.vertices[1].cast<double>() - facet.origin;
+        const Vec3d b = leaf.vertices[2].cast<double>() - facet.origin;
+        if (a.cross(b).squaredNorm() == 0) continue;
+        facet.axis_u = a.normalized();
+        facet.axis_v = a.cross(b).normalized().cross(facet.axis_u);
+        TraceryRegion2D region;
+        region.color = leaf.state;
+        region.polygon = {{0, 0}, {a.dot(facet.axis_u), a.dot(facet.axis_v)}, {b.dot(facet.axis_u), b.dot(facet.axis_v)}};
+        facet.regions.push_back(std::move(region));
+        result.push_back(std::move(facet));
+    }
+    m_recorded_paint.clear();
+    return result;
 }
 
 void TriangleSelector::set_facet(int facet_idx, EnforcerBlockerType state)
@@ -1873,6 +1911,8 @@ void TriangleSelector::undivide_triangle(int facet_idx)
 
 void TriangleSelector::remove_useless_children(int facet_idx)
 {
+    if (m_preserve_subdivision)
+        return;
     // Check that all children are leafs of the same type. If not, try to
     // make them (recursive call). Remove them if sucessful.
 
@@ -2190,6 +2230,57 @@ std::vector<TriangleSelector::PaintedLeaf> TriangleSelector::painted_leaves(bool
                           triangle.source_triangle,
                           triangle.get_state()});
     }
+    return leaves;
+}
+
+std::vector<TriangleSelector::PaintedLeaf> TriangleSelector::coalesced_painted_leaves(bool include_unpainted,
+                                                                                  const std::vector<int>* facets) const
+{
+    TraceryPerformanceScope performance("annotation_coalesce");
+    size_t visited_leaves = 0;
+    std::vector<PaintedLeaf> leaves;
+    auto emit = [&](const Triangle& triangle, int state) {
+        if (include_unpainted || state != int(EnforcerBlockerType::NONE))
+            leaves.push_back({{m_vertices[triangle.verts_idxs[0]].v, m_vertices[triangle.verts_idxs[1]].v,
+                               m_vertices[triangle.verts_idxs[2]].v}, triangle.source_triangle, EnforcerBlockerType(state)});
+    };
+    // Return a uniform state, or -1 for a mixed subtree. Bottom-up replacement
+    // bounds temporary output by the retained patches, rather than all leaves.
+    auto visit = [&](auto&& self, int index) -> int {
+        const Triangle& triangle = m_triangles[index];
+        if (!triangle.valid())
+            return -1;
+        if (!triangle.is_split()) {
+            ++visited_leaves;
+            const int state = int(triangle.get_state());
+            emit(triangle, state);
+            return state;
+        }
+        const size_t begin = leaves.size();
+        int state = self(self, triangle.children[0]);
+        for (int child = 1; child <= triangle.number_of_split_sides(); ++child) {
+            const int child_state = self(self, triangle.children[child]);
+            if (child_state != state)
+                state = -1;
+        }
+        if (state >= 0) {
+            leaves.resize(begin);
+            emit(triangle, state);
+        }
+        return state;
+    };
+    if (facets) {
+        for (int facet : *facets) {
+            if (facet < 0 || facet >= m_orig_size_indices)
+                throw std::out_of_range("Invalid original facet in annotation export");
+            visit(visit, facet);
+        }
+    } else {
+        for (int facet = 0; facet < m_orig_size_indices; ++facet)
+            visit(visit, facet);
+    }
+    performance.count("visited_leaves", visited_leaves);
+    performance.count("exported_patches", leaves.size());
     return leaves;
 }
 
@@ -2742,8 +2833,10 @@ void TriangleSelector::seed_fill_unselect_all_triangles()
 void TriangleSelector::seed_fill_apply_on_triangles(EnforcerBlockerType new_state)
 {
     for (Triangle &triangle : m_triangles)
-        if (!triangle.is_split() && triangle.is_selected_by_seed_fill() && !m_unselectable_states.count(triangle.get_state()))
+        if (!triangle.is_split() && triangle.is_selected_by_seed_fill() && !m_unselectable_states.count(triangle.get_state())) {
             triangle.set_state(new_state);
+            record_painted_triangle(int(&triangle - m_triangles.data()), new_state);
+        }
 
     for (Triangle &triangle : m_triangles)
         if (triangle.is_split() && triangle.valid()) {

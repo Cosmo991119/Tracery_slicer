@@ -1,3 +1,4 @@
+#include "TraceryDocument.hpp"
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
 #include "EdgeGrid.hpp"
@@ -1216,7 +1217,7 @@ static inline std::vector<std::vector<ExPolygons>> segmentation_top_and_bottom_l
                 const Transform3d volume_trafo = object_trafo * mv->get_matrix();
                 for (size_t extruder_idx = 0; extruder_idx < num_facets_states; ++extruder_idx) {
                     const ModelVolumeFacetsInfo info = extract_facets_info(*mv);
-                    const indexed_triangle_set painted = info.facets_annotation.get_facets_strict(*mv, EnforcerBlockerType(extruder_idx));
+                    const indexed_triangle_set painted = info.material_facets(*mv, unsigned(extruder_idx), true);
 #ifdef MM_SEGMENTATION_DEBUG_TOP_BOTTOM
                     {
                         static int iRun = 0;
@@ -2034,7 +2035,7 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
         tbb::parallel_for(tbb::blocked_range<size_t>(1, num_facets_states), [&mv, &print_object, &facets_info, &layers, &edge_grids, &painted_lines, &painted_lines_mutex, &input_expolygons, &throw_on_cancel_callback](const tbb::blocked_range<size_t> &range) {
             for (size_t extruder_idx = range.begin(); extruder_idx < range.end(); ++extruder_idx) {
                 throw_on_cancel_callback();
-                const indexed_triangle_set custom_facets = facets_info.facets_annotation.get_facets(*mv, EnforcerBlockerType(extruder_idx));
+                const indexed_triangle_set custom_facets = facets_info.material_facets(*mv, unsigned(extruder_idx));
                 if (!mv->is_model_part() || custom_facets.indices.empty())
                     continue;
 
@@ -2194,6 +2195,15 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
     return segmented_regions_merged;
 }
 
+indexed_triangle_set ModelVolumeFacetsInfo::material_facets(const ModelVolume& volume, unsigned material, bool strict) const
+{
+    if (!vector_surfaces)
+        return strict ? facets_annotation.get_facets_strict(volume, EnforcerBlockerType(material)) :
+                        facets_annotation.get_facets(volume, EnforcerBlockerType(material));
+    const auto found = vector_surfaces->find(material);
+    return found == vector_surfaces->end() ? indexed_triangle_set{} : found->second;
+}
+
 // Returns multi-material segmentation based on painting in multi-material segmentation gizmo
 std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback) {
     const size_t num_physical_filaments = print_object.print()->config().filament_colour.size();
@@ -2227,8 +2237,15 @@ std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(con
                                  << " total_filaments=" << num_total_filaments;
     }
 
-    const auto extract_facets_info = [](const ModelVolume &mv) -> ModelVolumeFacetsInfo {
-        return {mv.mmu_segmentation_facets, mv.is_mm_painted(), false};
+    std::map<const ModelVolume*, std::shared_ptr<const std::map<unsigned, indexed_triangle_set>>> snapshots;
+    for (const auto* volume : print_object.model_object()->volumes) {
+        if (auto doc = TraceryDocument::from_volume_snapshot(*volume))
+            snapshots.emplace(volume, std::make_shared<const std::map<unsigned, indexed_triangle_set>>(doc->material_surfaces()));
+    }
+    const auto extract_facets_info = [&snapshots](const ModelVolume &mv) -> ModelVolumeFacetsInfo {
+        auto found = snapshots.find(&mv);
+        return {mv.mmu_segmentation_facets, mv.is_mm_painted(), false,
+                found == snapshots.end() ? nullptr : found->second};
     };
 
     return segmentation_by_painting(print_object, extract_facets_info, num_facets_states, max_width, interlocking_depth, interlocking_beam, IncludeTopAndBottomLayers::Yes, throw_on_cancel_callback);

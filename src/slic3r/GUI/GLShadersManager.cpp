@@ -97,6 +97,7 @@ std::pair<bool, std::string> GLShadersManager::init()
     else
         valid &= append_shader("mm_gouraud", { prefix + "mm_gouraud.vs", prefix + "mm_gouraud.fs" });
 
+    valid &= append_shader("tracery_surface", { prefix + "tracery_surface.vs", prefix + "tracery_surface.fs" });
     return { valid, error };
 }
 

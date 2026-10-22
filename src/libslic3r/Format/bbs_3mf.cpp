@@ -1,3 +1,4 @@
+#include "libslic3r/TraceryDocument.hpp"
 #include "../libslic3r.h"
 #include "../Exception.hpp"
 #include "../Model.hpp"
@@ -4868,7 +4869,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 				//for old format
                 else if ((metadata.key == VOLUME_TYPE_KEY) || (metadata.key == PART_TYPE_KEY))
                     volume->set_type(ModelVolume::type_from_string(metadata.value));
-                else if (metadata.key == "tracery_edit_data_v1")
+                else if (metadata.key == "tracery_edit_data_v1" || metadata.key == "tracery_edit_data_v2")
                     volume->tracery_edit_data = metadata.value;
                 else if (metadata.key == SOURCE_FILE_KEY)
                     volume->source.input_file = metadata.value;
@@ -7573,7 +7574,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                                 //stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"" << NAME_KEY << "\" " << VALUE_ATTR << "=\"" << xml_escape(volume->name) << "\"/>\n";
 
                             if (!volume->tracery_edit_data.empty())
-                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"tracery_edit_data_v1\" "
+                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"tracery_edit_data_v"
+                                       << (TraceryDocument::decode(volume->tracery_edit_data).is_vector() ? 2 : 1) << "\" "
                                        << VALUE_ATTR << "=\"" << xml_escape(volume->tracery_edit_data) << "\"/>\n";
 
                             // stores volume's modifier field (legacy, to support old slicers)

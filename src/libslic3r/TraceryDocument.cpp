@@ -1,12 +1,112 @@
 #include "TraceryDocument.hpp"
+#include "Model.hpp"
 #include "ClipperUtils.hpp"
 #include "Tesselate.hpp"
 #include "TraceryPerformance.hpp"
+#include "TraceryPolygonPreparation.hpp"
 #include <nlohmann/json.hpp>
 #include <numeric>
+#include <set>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <list>
 #include <stdexcept>
 
 namespace Slic3r {
+namespace {
+struct TraceryCacheEntry {
+    size_t hash;
+    std::string data;
+    std::shared_ptr<const TraceryDocument> document;
+};
+using TraceryCacheEntryPtr = std::shared_ptr<const TraceryCacheEntry>;
+} // namespace
+
+struct TraceryDocument::ReadCacheScope::State {
+    inline static thread_local State* active = nullptr;
+    State* previous = active;
+    std::vector<TraceryCacheEntryPtr> entries;
+    size_t source_bytes = 0;
+    State() { active = this; }
+    ~State() { active = previous; }
+    void retain(const TraceryCacheEntryPtr& entry)
+    {
+        entries.push_back(entry);
+        source_bytes += entry->data.size();
+    }
+};
+
+TraceryDocument::ReadCacheScope::ReadCacheScope() : m_state(std::make_unique<State>()) {}
+TraceryDocument::ReadCacheScope::~ReadCacheScope()
+{
+    TraceryPerformanceScope performance("document_cache_release");
+    performance.count("retained_documents", m_state->entries.size());
+    performance.count("retained_source_bytes", m_state->source_bytes);
+    m_state.reset();
+}
+
+std::shared_ptr<const TraceryDocument> TraceryDocument::decode_cached(const std::string& data)
+{
+    // The bounded idle cache serves isolated readers. A commit scope retains its
+    // whole working set until all UI callbacks finish, avoiding cyclic eviction.
+    // Entries are shared, so retaining them does not copy their large strings.
+    static thread_local std::list<TraceryCacheEntryPtr> cache;
+    static thread_local size_t source_bytes = 0;
+    constexpr size_t max_source_bytes = 32 * 1024 * 1024;
+    constexpr size_t max_entries = 16;
+    TraceryPerformanceScope performance("document_cache");
+    performance.stage("document_cache.lookup");
+    performance.count("source_bytes", data.size());
+    const size_t hash = std::hash<std::string>{}(data);
+    performance.count("content_hash", hash);
+    auto* active = ReadCacheScope::State::active;
+    for (auto* scope = active; scope; scope = scope->previous) {
+        for (const auto& entry : scope->entries) {
+            if (entry->hash == hash && entry->data == data) {
+                performance.count("cache_hit", 1);
+                performance.count("scope_hit", 1);
+                return entry->document;
+            }
+        }
+    }
+    for (auto it = cache.begin(); it != cache.end(); ++it) {
+        const auto& entry = *it;
+        if (entry->hash == hash && entry->data == data) {
+            performance.count("cache_hit", 1);
+            if (active)
+                active->retain(entry);
+            auto document = entry->document;
+            cache.splice(cache.begin(), cache, it);
+            return document;
+        }
+    }
+    performance.count("cache_hit", 0);
+    performance.count("over_idle_budget", data.size() > max_source_bytes ? 1 : 0);
+    performance.stage("document_cache.decode");
+    auto document = std::make_shared<const TraceryDocument>(decode(data));
+    performance.stage("document_cache.store");
+    if (active || data.size() <= max_source_bytes) {
+        auto entry = std::make_shared<const TraceryCacheEntry>(TraceryCacheEntry{hash, data, document});
+        if (active)
+            active->retain(entry);
+        if (data.size() <= max_source_bytes) {
+            size_t evictions = 0;
+            while (!cache.empty() && (cache.size() >= max_entries || source_bytes + data.size() > max_source_bytes)) {
+                source_bytes -= cache.back()->data.size();
+                cache.pop_back();
+                ++evictions;
+            }
+            cache.push_front(std::move(entry));
+            source_bytes += data.size();
+            performance.count("idle_evictions", evictions);
+        }
+    }
+    return document;
+}
+
 namespace {
 using Regions    = TraceryDocument::Regions;
 using Annotation = TraceryDocument::Annotation;
@@ -39,12 +139,20 @@ Point project(const TriangleSelector::TraceryFacet2DData& p, const Vec3d& v)
 Regions annotation_regions(const TriangleMesh&     base,
                            const std::vector<int>& sources,
                            const TriangleMesh&     current,
-                           const Annotation&       annotation)
+                           const Annotation&       annotation,
+                           const std::vector<int>* changed_facets = nullptr)
 {
+    TraceryPerformanceScope performance("vector_annotation_regions");
+    performance.stage("annotation.deserialize");
     TriangleSelector selector(current);
     selector.deserialize(annotation, false);
+    performance.stage("annotation.extract_leaves");
+    const auto leaves = selector.coalesced_painted_leaves(true, changed_facets);
+    performance.count("exported_patches", leaves.size());
+    performance.count("requested_facets", changed_facets ? changed_facets->size() : current.its.indices.size());
+    performance.stage("annotation.project_leaves");
     Regions result;
-    for (const auto& leaf : selector.painted_leaves(true)) {
+    for (const auto& leaf : leaves) {
         const int  source = sources.at(leaf.source_facet);
         const auto frame  = plane(base, source);
         Polygon    p;
@@ -53,6 +161,8 @@ Regions annotation_regions(const TriangleMesh&     base,
         p.make_counter_clockwise();
         result[source][unsigned(leaf.state)].push_back(std::move(p));
     }
+    performance.count("source_facets", result.size());
+    performance.stage("annotation.union_polygons");
     for (auto& [id, states] : result)
         for (auto& [state, polys] : states)
             polys = union_(polys);
@@ -87,23 +197,152 @@ Regions delta(const Regions& before, const Regions& after)
         }
     return result;
 }
+
+Regions annotation_delta(const TriangleMesh& base, const std::vector<int>& sources, const TriangleMesh& current,
+                         const Annotation& before, const Annotation& after)
+{
+    TraceryPerformanceScope performance("vector_annotation_delta");
+    performance.stage("annotation_delta.compare_roots");
+    using Range = std::pair<size_t, size_t>;
+    std::map<int, std::array<Range, 2>> ranges;
+    auto collect = [&](const Annotation& annotation, size_t side) {
+        const auto& entries = annotation.triangles_to_split;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const int facet = entries[i].triangle_idx;
+            const size_t begin = size_t(entries[i].bitstream_start_idx);
+            const size_t end = i + 1 < entries.size() ? size_t(entries[i + 1].bitstream_start_idx) : annotation.bitstream.size();
+            if (facet < 0 || size_t(facet) >= current.its.indices.size() || begin > end || end > annotation.bitstream.size())
+                throw std::runtime_error("Invalid annotation facet range");
+            ranges[facet][side] = {begin, end};
+        }
+    };
+    collect(before, 0);
+    collect(after, 1);
+    std::vector<int> changed;
+    for (const auto& [facet, pair] : ranges) {
+        const auto& a = pair[0];
+        const auto& b = pair[1];
+        // Compare content, not offsets: editing one root shifts all later roots.
+        // Missing roots mean unpainted; explicit NONE trees are conservatively
+        // included and their geometric difference will be empty.
+        if (a.second - a.first != b.second - b.first ||
+            !std::equal(before.bitstream.begin() + a.first, before.bitstream.begin() + a.second,
+                        after.bitstream.begin() + b.first))
+            changed.push_back(facet);
+    }
+    performance.count("compared_facets", ranges.size());
+    performance.count("changed_facets", changed.size());
+    if (changed.empty())
+        return {};
+    performance.stage("annotation_delta.export_before");
+    const auto old_regions = annotation_regions(base, sources, current, before, &changed);
+    performance.stage("annotation_delta.export_after");
+    const auto new_regions = annotation_regions(base, sources, current, after, &changed);
+    performance.stage("annotation_delta.difference");
+    return delta(old_regions, new_regions);
+}
 Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources, const TriangleSelector::Tracery2DData& input)
 {
+    TraceryPerformanceScope performance("vector_paint_regions");
+    performance.stage("paint.project_polygons");
     Regions result;
+    size_t polygon_count = 0;
+    size_t input_vertices = 0;
+    std::map<int, TriangleSelector::TraceryFacet2DData> frames;
     for (const auto& facet : input) {
         const int  source = sources.at(facet.source_facet_id);
-        const auto frame  = plane(base, source);
+        auto [entry, inserted] = frames.try_emplace(source);
+        if (inserted)
+            entry->second = plane(base, source);
+        const auto& frame = entry->second;
         for (const auto& r : facet.regions) {
+            ++polygon_count;
+            input_vertices += r.polygon.size();
             Polygon p;
+            p.points.reserve(r.polygon.size());
             for (const Vec2d& v : r.polygon)
                 p.points.push_back(project(frame, facet.origin + v.x() * facet.axis_u + v.y() * facet.axis_v));
             p.make_counter_clockwise();
             result[source][unsigned(r.color)].push_back(std::move(p));
         }
     }
-    for (auto& [id, states] : result)
-        for (auto& [state, polys] : states)
-            polys = union_(polys);
+    performance.count("input_facets", input.size());
+    performance.count("input_polygons", polygon_count);
+    performance.count("input_vertices", input_vertices);
+    performance.stage("paint.union_and_clip");
+    size_t rejected = 0, compacted = 0, union_inputs = 0, union_vertices = 0;
+    size_t contained_groups = 0, clipped_groups = 0, output_polygons = 0, output_vertices = 0;
+    for (auto& [id, states] : result) {
+        const auto& frame = frames.at(id);
+        Polygon boundary;
+        for (int vertex : base.its.indices[id]) boundary.points.push_back(project(frame, base.its.vertices[vertex].cast<double>()));
+        boundary.make_counter_clockwise();
+        const BoundingBox bounds(boundary.points);
+        for (auto& [state, polys] : states) {
+            {
+                TraceryPerformanceScope::Sample sample(performance, "paint.filter_bounds");
+                const size_t before = polys.size();
+                polys.erase(std::remove_if(polys.begin(), polys.end(), [&](const Polygon& p) {
+                    if (p.points.size() < 3)
+                        return true;
+                    const BoundingBox box(p.points);
+                    return box.max.x() < bounds.min.x() || box.min.x() > bounds.max.x() ||
+                           box.max.y() < bounds.min.y() || box.min.y() > bounds.max.y();
+                }), polys.end());
+                rejected += before - polys.size();
+            }
+            if (polys.empty())
+                continue;
+            {
+                TraceryPerformanceScope::Sample sample(performance, "paint.cancel_shared_edges");
+                if (tracery_cancel_internal_edges(polys))
+                    ++compacted;
+            }
+            union_inputs += polys.size();
+            for (const auto& p : polys)
+                union_vertices += p.points.size();
+            {
+                TraceryPerformanceScope::Sample sample(performance, "paint.union_polygons");
+                polys = union_(polys);
+            }
+            bool contained = true;
+            {
+                TraceryPerformanceScope::Sample sample(performance, "paint.classify_containment");
+                // The source boundary is convex. Exact integer predicates avoid
+                // tolerance-dependent leaks and are needed only after union,
+                // when most of the interior vertices have already disappeared.
+                for (const auto& p : polys) {
+                    for (const auto& v : p.points)
+                        for (size_t edge = 0; edge < 3; ++edge)
+                            if (int128::orient(boundary.points[edge], boundary.points[(edge + 1) % 3], v) < 0) {
+                                contained = false;
+                                break;
+                            }
+                    if (!contained)
+                        break;
+                }
+            }
+            if (contained) {
+                ++contained_groups;
+            } else {
+                ++clipped_groups;
+                TraceryPerformanceScope::Sample sample(performance, "paint.clip_boundary");
+                polys = intersection(polys, Polygons{boundary});
+            }
+            output_polygons += polys.size();
+            for (const auto& p : polys)
+                output_vertices += p.points.size();
+        }
+    }
+    performance.count("source_facets", result.size());
+    performance.count("bounds_rejected_polygons", rejected);
+    performance.count("compacted_groups", compacted);
+    performance.count("union_input_polygons", union_inputs);
+    performance.count("union_input_vertices", union_vertices);
+    performance.count("contained_groups", contained_groups);
+    performance.count("clipped_groups", clipped_groups);
+    performance.count("output_polygons", output_polygons);
+    performance.count("output_vertices", output_vertices);
     return result;
 }
 TriangleSelector::Tracery2DData partition_regions(const TriangleMesh& base, const Regions& input, Annotation* defaults = nullptr)
@@ -112,7 +351,7 @@ TriangleSelector::Tracery2DData partition_regions(const TriangleMesh& base, cons
     TriangleSelector                selector(base);
     for (const auto& [id, states] : input) {
         auto     facet        = plane(base, id);
-        unsigned background   = 0;
+        unsigned background   = std::numeric_limits<unsigned>::max();
         double   largest_area = -1.;
         if (defaults) {
             for (const auto& [state, polys] : states) {
@@ -191,27 +430,66 @@ TraceryPartitionResult TraceryDocument::rebuild(const TriangleMesh&             
                                                 const TriangleSelector::Tracery2DData& paint,
                                                 TraceryEdit                            edit)
 {
+    if (m_vector) return apply_vector_edit(current, annotations, paint, edit);
     if (!matches(current) || annotations.size() != 8)
         throw std::runtime_error("Stained-glass base no longer matches this geometry; clear the effect before editing the changed mesh");
+    if (edit == TraceryEdit::Erase) {
+        if (const char* directory = std::getenv("TRACERY_REPLAY_DIR"); directory && *directory) {
+            static std::atomic<unsigned long long> sequence{0};
+            const auto                             timestamp = std::chrono::system_clock::now().time_since_epoch().count();
+            const std::string                      path      = std::string(directory) + "/erase-" + std::to_string(timestamp) + "-" +
+                                     std::to_string(sequence.fetch_add(1)) + ".json";
+            const std::string temporary = path + ".tmp";
+            std::ofstream     stream(temporary, std::ios::binary | std::ios::trunc);
+            stream << encode_replay(annotations, paint, edit);
+            stream.flush();
+            if (!stream)
+                throw std::runtime_error("Unable to save stained-glass diagnostic capture");
+            stream.close();
+            if (std::rename(temporary.c_str(), path.c_str()) != 0)
+                throw std::runtime_error("Unable to publish stained-glass diagnostic capture");
+        }
+    }
     TraceryPerformanceScope performance("stable_base_rebuild");
     performance.count("base_facets", m_base.its.indices.size());
     performance.count("derived_facets", current.its.indices.size());
+    auto channels = updated_channels(current, annotations, paint, edit);
+    performance.stage("stable_base.partition");
+    std::vector<TriangleSelector::Tracery2DData> regions;
+    std::vector<Annotation>                      defaults(8);
+    for (size_t channel = 0; channel < channels.size(); ++channel)
+        regions.push_back(partition_regions(m_base, channels[channel], &defaults[channel]));
+    auto result = build_exact_tracery_partition(m_base, defaults, {}, {}, regions);
+    // Publish only after geometry validation succeeded. Failed rebuilds leave
+    // both the immutable base and all authoritative editing data untouched.
+    performance.stage("stable_base.publish");
+    m_channels = std::move(channels);
+    m_derived  = result.mesh;
+    m_sources  = result.source_facets;
+    m_last     = result.annotations;
+    return result;
+}
+
+std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(
+    const TriangleMesh& current, const std::vector<Annotation>& annotations,
+    const TriangleSelector::Tracery2DData& paint, TraceryEdit edit) const
+{
+    TraceryPerformanceScope performance("vector_update_channels");
+    performance.stage("vector.copy_channels");
     auto channels = m_channels;
-    performance.stage("stable_base.annotation_deltas");
+    performance.stage("vector.annotation_deltas");
     for (size_t channel = 0; channel < 5; ++channel) {
         if (annotations[channel] == m_last[channel])
             continue;
-        const auto changes = delta(annotation_regions(m_base, m_sources, current, m_last[channel]),
-                                   annotation_regions(m_base, m_sources, current, annotations[channel]));
+        const auto changes = annotation_delta(m_base, m_sources, current, m_last[channel], annotations[channel]);
         overlay(channels[channel], changes);
         if (channel == 0)
             overlay(channels[5], changes); // ordinary paint survives erase
     }
-    performance.stage("stable_base.mask_delta");
+    performance.stage("vector.mask_delta");
     channels[7] = channels[6];
     if (annotations[6] != m_last[6]) {
-        const auto changes = delta(annotation_regions(m_base, m_sources, current, m_last[6]),
-                                   annotation_regions(m_base, m_sources, current, annotations[6]));
+        const auto changes = annotation_delta(m_base, m_sources, current, m_last[6], annotations[6]);
         overlay(channels[6], changes);
         if (edit == TraceryEdit::Erase) {
             Regions restore;
@@ -230,8 +508,11 @@ TraceryPartitionResult TraceryDocument::rebuild(const TriangleMesh&             
     }
     if (edit == TraceryEdit::Regenerate)
         channels[0] = channels[5];
-    performance.stage("stable_base.paint_regions");
+    performance.stage("vector.project_paint");
     const auto incoming = paint_regions(m_base, m_sources, paint);
+    performance.count("paint_facets", paint.size());
+    performance.count("incoming_facets", incoming.size());
+    performance.stage("vector.overlay_paint");
     if (edit == TraceryEdit::Erase) {
         // Explicit projected erase polygons also restore the back of a through
         // selection. Their display/placeholder color has no material meaning.
@@ -252,20 +533,97 @@ TraceryPartitionResult TraceryDocument::rebuild(const TriangleMesh&             
         overlay(channels[0], incoming);
     }
     channels[7] = channels[6]; // next stroke starts from the committed mask
-    performance.stage("stable_base.partition");
-    std::vector<TriangleSelector::Tracery2DData> regions;
-    std::vector<Annotation>                      defaults(8);
-    for (size_t channel = 0; channel < channels.size(); ++channel)
-        regions.push_back(partition_regions(m_base, channels[channel], &defaults[channel]));
-    auto result = build_exact_tracery_partition(m_base, defaults, {}, {}, regions);
-    // Publish only after geometry validation succeeded. Failed rebuilds leave
-    // both the immutable base and all authoritative editing data untouched.
-    performance.stage("stable_base.publish");
+    return channels;
+}
+
+TraceryPartitionResult TraceryDocument::apply_vector_edit(
+    const TriangleMesh& current, const std::vector<Annotation>& annotations,
+    const TriangleSelector::Tracery2DData& paint, TraceryEdit edit)
+{
+    TraceryPerformanceScope performance("vector_apply_edit");
+    performance.count("base_facets", m_base.its.indices.size());
+    performance.count("edit", static_cast<size_t>(edit));
+    performance.stage("vector.validate");
+    if (!matches(current) || current.its.vertices != m_base.its.vertices || current.its.indices != m_base.its.indices ||
+        annotations.size() != 8)
+        throw std::runtime_error("Vector painting requires the unchanged source mesh");
+    performance.stage("vector.update_channels");
+    auto channels = updated_channels(current, annotations, paint, edit);
+    performance.stage("vector.publish");
     m_channels = std::move(channels);
-    m_derived  = result.mesh;
-    m_sources  = result.source_facets;
-    m_last     = result.annotations;
+    m_last = annotations;
+    m_last[5] = annotations[0]; // ordinary paint remains the editable base on an unchanged mesh
+    m_vector = true;
+    return {current.its, m_last, m_sources};
+}
+
+void TraceryDocument::clear_vector_glass(const TriangleMesh& current, const std::vector<Annotation>& annotations)
+{
+    TraceryPerformanceScope performance("vector_clear_glass");
+    if (!m_vector || !matches(current) || current.its.vertices != m_base.its.vertices || current.its.indices != m_base.its.indices ||
+        annotations.size() != 8)
+        throw std::runtime_error("Vector painting requires the unchanged source mesh");
+    // Preserve ordinary edits without copying or clipping the generated glass.
+    performance.stage("clear.sync_annotations");
+    for (size_t channel = 0; channel < 5; ++channel) {
+        if (annotations[channel] == m_last[channel])
+            continue;
+        const auto changes = annotation_delta(m_base, m_sources, current, m_last[channel], annotations[channel]);
+        if (channel == 0)
+            overlay(m_channels[5], changes);
+        else
+            overlay(m_channels[channel], changes);
+    }
+    performance.stage("clear.restore_base");
+    m_channels[0] = m_channels[5];
+    m_channels[6].clear();
+    m_channels[7].clear();
+    m_selection_reference = {};
+    m_last = annotations;
+    m_last[5] = annotations[0];
+    m_last[6] = {};
+    m_last[7] = {};
+}
+
+TriangleSelector::Tracery2DData TraceryDocument::surface_regions() const
+{
+    return partition_regions(m_base, m_channels.at(0));
+}
+
+std::vector<unsigned> TraceryDocument::material_ids() const
+{
+    std::set<unsigned> ids;
+    for (const auto& [facet, states] : m_channels.at(0))
+        for (const auto& [state, polygons] : states)
+            if (state != 0 && !polygons.empty()) ids.insert(state);
+    return {ids.begin(), ids.end()};
+}
+
+std::map<unsigned, indexed_triangle_set> TraceryDocument::material_surfaces() const
+{
+    std::map<unsigned, indexed_triangle_set> result;
+    for (const auto& [id, states] : m_channels.at(0)) {
+        const auto frame = plane(m_base, id);
+        for (const auto& [state, polygons] : states) {
+            const auto points = triangulate_expolygons_2d(union_ex(polygons));
+            if (points.empty()) continue;
+            auto& mesh = result[state];
+            for (size_t i = 0; i + 2 < points.size(); i += 3) {
+                const int first = int(mesh.vertices.size());
+                for (size_t j = 0; j < 3; ++j)
+                    mesh.vertices.push_back((frame.origin + points[i+j].x() * frame.axis_u + points[i+j].y() * frame.axis_v).cast<float>());
+                mesh.indices.emplace_back(first, first + 1, first + 2);
+            }
+        }
+    }
     return result;
+}
+
+void TraceryDocument::apply_ordinary_paint(const TriangleSelector::Tracery2DData& paint)
+{
+    const auto incoming = paint_regions(m_base, m_sources, paint);
+    overlay(m_channels[0], incoming);
+    overlay(m_channels[5], incoming);
 }
 
 namespace {
@@ -321,7 +679,7 @@ TraceryDocument::Annotation read_annotation(const Json& j, size_t facets)
 std::string TraceryDocument::encode() const
 {
     Json root;
-    root["version"]  = 1;
+    root["version"]  = m_vector ? 2 : 1;
     root["base"]     = mesh_json(m_base.its);
     root["derived"]  = mesh_json(m_derived);
     root["sources"]  = m_sources;
@@ -342,6 +700,7 @@ std::string TraceryDocument::encode() const
             }
         root["channels"].push_back(std::move(entries));
     }
+    root["selection_reference"] = annotation_json(m_selection_reference);
     root["last"] = Json::array();
     for (const auto& annotation : m_last)
         root["last"].push_back(annotation_json(annotation));
@@ -350,9 +709,10 @@ std::string TraceryDocument::encode() const
 TraceryDocument TraceryDocument::decode(const std::string& data)
 {
     const Json root = Json::parse(data);
-    if (root.at("version").get<int>() != 1)
+    if (root.at("version").get<int>() != 1 && root.at("version").get<int>() != 2)
         throw std::runtime_error("Unsupported stained-glass editing data version");
     TraceryDocument result;
+    result.m_vector = root.at("version").get<int>() == 2;
     result.m_base    = TriangleMesh(read_mesh(root.at("base")));
     result.m_derived = read_mesh(root.at("derived"));
     result.m_sources = root.at("sources").get<std::vector<int>>();
@@ -381,15 +741,78 @@ TraceryDocument TraceryDocument::decode(const std::string& data)
     }
     for (const auto& a : root.at("last"))
         result.m_last.push_back(read_annotation(a, result.m_sources.size()));
+    if (root.contains("selection_reference"))
+        result.m_selection_reference = read_annotation(root.at("selection_reference"), result.m_sources.size());
     if (result.m_channels.size() != 8 || result.m_last.size() != 8)
         throw std::runtime_error("Invalid stained-glass channels");
     return result;
+}
+std::string TraceryDocument::encode_replay(const std::vector<Annotation>&         annotations,
+                                           const TriangleSelector::Tracery2DData& paint,
+                                           TraceryEdit                            edit) const
+{
+    Json root;
+    root["version"]     = 1;
+    root["document"]    = Json::parse(encode());
+    root["edit"]        = static_cast<int>(edit);
+    root["annotations"] = Json::array();
+    for (const auto& annotation : annotations)
+        root["annotations"].push_back(annotation_json(annotation));
+    root["paint"] = Json::array();
+    for (const auto& facet : paint) {
+        auto vec3 = [](const Vec3d& v) { return Json::array({v.x(), v.y(), v.z()}); };
+        Json f    = {{"source", facet.source_facet_id},
+                     {"origin", vec3(facet.origin)},
+                     {"u", vec3(facet.axis_u)},
+                     {"v", vec3(facet.axis_v)},
+                     {"regions", Json::array()}};
+        for (const auto& region : facet.regions) {
+            Json points = Json::array();
+            for (const auto& p : region.polygon)
+                points.push_back({p.x(), p.y()});
+            f["regions"].push_back({{"id", region.fragment_id}, {"color", unsigned(region.color)}, {"points", std::move(points)}});
+        }
+        root["paint"].push_back(std::move(f));
+    }
+    return root.dump();
+}
+TraceryPartitionResult TraceryDocument::replay(const std::string& data)
+{
+    const Json root = Json::parse(data);
+    if (root.at("version") != 1)
+        throw std::runtime_error("Unsupported stained-glass replay version");
+    auto                    document = decode(root.at("document").dump());
+    std::vector<Annotation> annotations;
+    for (const auto& a : root.at("annotations"))
+        annotations.push_back(read_annotation(a, document.m_derived.indices.size()));
+    TriangleSelector::Tracery2DData paint;
+    for (const auto& f : root.at("paint")) {
+        auto vec3 = [](const Json& v) { return Vec3d(v.at(0).get<double>(), v.at(1).get<double>(), v.at(2).get<double>()); };
+        TriangleSelector::TraceryFacet2DData facet;
+        facet.source_facet_id = f.at("source").get<int>();
+        facet.origin          = vec3(f.at("origin"));
+        facet.axis_u          = vec3(f.at("u"));
+        facet.axis_v          = vec3(f.at("v"));
+        for (const auto& r : f.at("regions")) {
+            TriangleSelector::TraceryRegion2D region;
+            region.fragment_id = r.at("id").get<decltype(region.fragment_id)>();
+            region.color       = EnforcerBlockerType(r.at("color").get<unsigned>());
+            for (const auto& p : r.at("points"))
+                region.polygon.emplace_back(p.at(0).get<double>(), p.at(1).get<double>());
+            facet.regions.push_back(std::move(region));
+        }
+        paint.push_back(std::move(facet));
+    }
+    const int edit = root.at("edit").get<int>();
+    if (edit < int(TraceryEdit::Paint) || edit > int(TraceryEdit::Regenerate))
+        throw std::runtime_error("Invalid stained-glass replay edit");
+    return document.rebuild(TriangleMesh(document.m_derived), annotations, paint, TraceryEdit(edit));
 }
 TriangleSelector::Tracery2DData TraceryDocument::erased_regions(const TriangleMesh& mesh, const Annotation& before, const Annotation& after)
 {
     std::vector<int> sources(mesh.its.indices.size());
     std::iota(sources.begin(), sources.end(), 0);
-    const auto changes = delta(annotation_regions(mesh, sources, mesh, before), annotation_regions(mesh, sources, mesh, after));
+    const auto changes = annotation_delta(mesh, sources, mesh, before, after);
     Regions    erased;
     for (const auto& [facet, states] : changes)
         if (auto found = states.find(0); found != states.end())
@@ -399,6 +822,10 @@ TriangleSelector::Tracery2DData TraceryDocument::erased_regions(const TriangleMe
 void TraceryDocument::remap_materials(const EnforcerBlockerStateMap& mapping)
 {
     const TriangleMesh current(m_derived);
+    TriangleSelector reference(current);
+    reference.deserialize(m_selection_reference, false);
+    reference.remap_triangle_state(mapping);
+    m_selection_reference = reference.serialize();
     for (size_t channel : {size_t(0), size_t(5)}) {
         for (auto& [facet, states] : m_channels[channel]) {
             std::map<unsigned, Polygons> mapped;
@@ -415,3 +842,42 @@ void TraceryDocument::remap_materials(const EnforcerBlockerStateMap& mapping)
     }
 }
 } // namespace Slic3r
+
+namespace Slic3r {
+std::unique_ptr<TraceryDocument> TraceryDocument::from_volume(const ModelVolume& volume)
+{
+    const auto snapshot = from_volume_snapshot(volume);
+    return snapshot ? std::make_unique<TraceryDocument>(*snapshot) : nullptr;
+}
+
+std::shared_ptr<const TraceryDocument> TraceryDocument::from_volume_snapshot(const ModelVolume& volume)
+{
+    TraceryPerformanceScope performance("vector_document_snapshot");
+    if (volume.tracery_edit_data.empty()) return {};
+    performance.stage("snapshot.decode");
+    const auto cached = decode_cached(volume.tracery_edit_data);
+    if (!cached->is_vector()) return {};
+    if (!cached->matches(volume.mesh()) || cached->base_mesh().its.vertices != volume.mesh().its.vertices ||
+        cached->base_mesh().its.indices != volume.mesh().its.indices)
+        throw std::runtime_error("Vector painting requires the unchanged source mesh");
+    performance.stage("snapshot.check_annotations");
+    const auto& last = cached->last_annotations();
+    if (last[0] == volume.mmu_segmentation_facets.get_data() && last[1] == volume.supported_facets.get_data() &&
+        last[2] == volume.seam_facets.get_data() && last[3] == volume.fuzzy_skin_facets.get_data() &&
+        last[4] == volume.exterior_facets.get_data()) {
+        performance.count("annotations_unchanged", 1);
+        return cached;
+    }
+    performance.count("annotations_unchanged", 0);
+    performance.stage("snapshot.apply_annotation_changes");
+    auto doc = std::make_shared<TraceryDocument>(*cached);
+    auto channels = doc->last_annotations();
+    channels[0] = volume.mmu_segmentation_facets.get_data();
+    channels[1] = volume.supported_facets.get_data();
+    channels[2] = volume.seam_facets.get_data();
+    channels[3] = volume.fuzzy_skin_facets.get_data();
+    channels[4] = volume.exterior_facets.get_data();
+    doc->apply_vector_edit(volume.mesh(), channels, {}, TraceryEdit::Paint);
+    return doc;
+}
+}

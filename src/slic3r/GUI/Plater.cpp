@@ -10,6 +10,7 @@
 #include "libslic3r/Config.hpp"
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/TraceryPlateMaterials.hpp"
+#include "libslic3r/TraceryPerformance.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "common_func/common_func.hpp"
 #include "slic3r/Utils/SnapLogClient.hpp"
@@ -4122,7 +4123,7 @@ void Sidebar::jump_to_option(size_t selected)
 }
 
 // BBS. Move logic from Plater::on_extruders_change() to Sidebar::on_filaments_change().
-void Sidebar::on_filaments_change(size_t num_filaments, bool sync_mixed_manager)
+void Sidebar::on_filaments_change(size_t num_filaments, bool sync_mixed_manager, bool defer_colour_refresh)
 {
     auto& choices = combos_filament();
 
@@ -4133,7 +4134,7 @@ void Sidebar::on_filaments_change(size_t num_filaments, bool sync_mixed_manager)
         p->m_skip_mixed_filament_sync_once = false;
         update_ui_from_settings();
         update_dynamic_filament_list();
-        update_mixed_filament_panel(sync_manager);
+        update_mixed_filament_panel(sync_manager, defer_colour_refresh);
 
         // Recalc scrolled filament window height (max 3 rows, matches color mix)
         if (p->m_scrolled_filaments && p->m_panel_scrolled_filament_content) {
@@ -4215,8 +4216,9 @@ void Sidebar::on_filaments_change(size_t num_filaments, bool sync_mixed_manager)
     p->m_panel_filament_title->Refresh();
     update_ui_from_settings();
     update_dynamic_filament_list();
-    update_mixed_filament_panel(sync_mixed_manager);
-    update_color_mix_panel();
+    update_mixed_filament_panel(sync_mixed_manager, defer_colour_refresh);
+    if (!defer_colour_refresh)
+        update_color_mix_panel();
 
     // Disable add buttons when combined filament limit reached
     if (PresetBundle *pb = wxGetApp().preset_bundle) {
@@ -6650,6 +6652,7 @@ void Sidebar::init_color_mix_panel(wxWindow* parent, wxSizer* sizer)
 
 void Sidebar::update_color_mix_panel()
 {
+    TraceryPerformanceScope performance("sidebar_colour_panel");
     if (!p->m_panel_color_mix_content) return;
 
     auto* co = wxGetApp().preset_bundle
@@ -7095,7 +7098,7 @@ void Sidebar::update_color_mix_panel()
     }
 }
 
-void Sidebar::update_mixed_filament_panel(bool sync_manager)
+void Sidebar::update_mixed_filament_panel(bool sync_manager, bool defer_colour_refresh)
 {
     // Check for new collapsible structure
     if (!p->m_panel_mixed_filaments_title || !p->m_panel_mixed_filaments_content)
@@ -7104,16 +7107,19 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     wxWindowUpdateLocker noUpdates_sidebar(this);
     wxWindowUpdateLocker noUpdates_mixed_panel(p->m_panel_mixed_filaments_content);
 
-    auto refresh_model_canvas_colors = []() {
+    auto refresh_model_canvas_colors = [defer_colour_refresh]() {
         Plater *plater = wxGetApp().plater();
         if (plater == nullptr)
             return;
 
-        auto refresh_canvas = [](GLCanvas3D *canvas) {
+        auto refresh_canvas = [defer_colour_refresh](GLCanvas3D *canvas) {
             if (canvas == nullptr || !canvas->is_initialized())
                 return;
             canvas->update_volumes_colors_by_extruder();
-            canvas->render();
+            if (defer_colour_refresh)
+                canvas->set_as_dirty();
+            else
+                canvas->render();
         };
 
         refresh_canvas(plater->get_view3D_canvas3D());
@@ -7560,10 +7566,12 @@ void Sidebar::update_mixed_filament_panel(bool sync_manager)
     p->m_panel_mixed_filaments_content->Hide();
     Layout();
     refresh_model_canvas_colors();
-    wxWeakRef<Sidebar> weakSelf(this);
-    wxTheApp->CallAfter([weakSelf]() {
-        if (weakSelf) weakSelf->update_color_mix_panel();
-    });
+    if (!defer_colour_refresh) {
+        wxWeakRef<Sidebar> weakSelf(this);
+        wxTheApp->CallAfter([weakSelf]() {
+            if (weakSelf) weakSelf->update_color_mix_panel();
+        });
+    }
     return;
 
 #if 0 // DEAD CODE — Mixed Filaments panel UI, disabled. DO NOT add or modify code here.
@@ -9056,7 +9064,7 @@ void Sidebar::add_custom_filaments(const std::vector<wxColour>& new_cols)
     auto_calc_flushing_volumes(int(new_count - 1));
 }
 
-void Sidebar::set_stained_glass_base_filament_preset(const std::vector<unsigned int>& filament_ids)
+void Sidebar::set_stained_glass_base_filament_preset(const std::vector<unsigned int>& filament_ids, bool defer_colour_refresh)
 {
     PresetBundle* pb = wxGetApp().preset_bundle;
     if (pb == nullptr ||
@@ -9083,7 +9091,8 @@ void Sidebar::set_stained_glass_base_filament_preset(const std::vector<unsigned 
                                 << " to physical slot " << id;
     }
     update_dynamic_filament_list();
-    update_color_mix_panel();
+    if (!defer_colour_refresh)
+        update_color_mix_panel();
     wxGetApp().plater()->update_project_dirty_from_presets();
     pb->export_selections(*wxGetApp().app_config);
 }

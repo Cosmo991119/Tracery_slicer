@@ -18239,3 +18239,21 @@ msgstr ""
 
 #~ msgid ", ver: "
 #~ msgstr "，版本"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoTracery.cpp
+msgid "Generate stained glass"
+msgstr "生成花窗"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoTracery.cpp
+msgid "Clear selection"
+msgstr "清除選區"
+
+#: src/slic3r/GUI/Gizmos/GLGizmoTracery.cpp
+msgid "Clear stained glass"
+msgstr "清除花窗"
+
+msgid "Stained glass is generated when you finish painting."
+msgstr "結束塗抹後自動產生花窗。"
+
+msgid "Randomize stained glass"
+msgstr "重新隨機"

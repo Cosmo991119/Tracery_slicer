@@ -394,6 +394,14 @@ public:
         EnforcerBlockerType state;
     };
     std::vector<PaintedLeaf> painted_leaves(bool include_unpainted = false) const;
+    // Read-only export: replace a uniformly coloured subtree with its parent
+    // triangle. Optional original facet IDs restrict work to changed roots.
+    std::vector<PaintedLeaf> coalesced_painted_leaves(bool include_unpainted = false,
+                                                    const std::vector<int>* facets = nullptr) const;
+    void record_painting(bool enabled) { m_record_painting = enabled; m_recorded_paint.clear(); }
+    // Keep a shared selection mask's boundaries even when material states match.
+    void preserve_subdivision(bool enabled) { m_preserve_subdivision = enabled; }
+    Tracery2DData take_recorded_paint();
     // Get edges around the selected area by seed fill.
     std::vector<Vec2i32> get_seed_fill_contour() const;
 
@@ -547,6 +555,10 @@ protected:
     int m_orig_size_vertices = 0;
     int m_orig_size_indices = 0;
 
+    bool m_record_painting = false;
+    bool m_preserve_subdivision = false;
+    std::vector<PaintedLeaf> m_recorded_paint;
+    void record_painted_triangle(int facet, EnforcerBlockerType state);
     std::unique_ptr<Cursor> m_cursor;
     // Zero indicates an uninitialized state.
     float m_old_cursor_radius_sqr = 0;

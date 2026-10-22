@@ -18,6 +18,7 @@
 #include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace Slic3r { class TraceryRegionMapper; }
@@ -66,7 +67,6 @@ protected:
     ColorRGBA get_cursor_sphere_right_button_color() const override { return { 0.0f, 0.59f, 0.53f, 0.15f }; }
 
 private:
-    bool m_convert_plate_on_open = false;
     void commit_material_selection();
     void refresh_source_selection_policy(bool filter_masks = false);
     std::vector<std::set<EnforcerBlockerType>> m_source_selection_policy;
@@ -75,12 +75,13 @@ private:
     void update_from_model_object(bool first_update) override;
     void on_opening() override
     {
-        m_convert_plate_on_open = true;
         m_selection_modified = false;
         m_regeneration_requested = false;
         m_palette_update_requested = false;
         m_opening_fragment_density = m_fragment_density;
         m_opening_refraction_strength = m_refraction_strength;
+        m_density_input = m_fragment_density;
+        m_refraction_input = m_refraction_strength;
         m_paint_mode = PaintMode::SURFACE;
     }
     void on_shutdown() override;
@@ -88,7 +89,9 @@ private:
     void on_save(cereal::BinaryOutputArchive& ar) const override;
     PainterGizmoType get_painter_type() const override;
 
-    void capture_mask_and_generate();
+    void capture_selection_mask();
+    void regenerate_stained_glass(bool randomize);
+    void save_selection_mask();
     void erase_all_stained_glass();
     void generate_paint_plan();
     struct GenerationInput;
@@ -231,7 +234,7 @@ private:
     void commit_tracery_mesh_update(PreparedTraceryVolume&& prepared);
     static std::vector<TriangleSelector::TriangleSplittingData> collect_volume_annotations(const ModelVolume& volume);
     static void replace_tracery_mesh(ModelVolume& volume, TraceryPartitionResult& partition);
-    bool restore_original_tracery_meshes(ModelObject& object);
+    bool restore_original_tracery_meshes(ModelObject& object, bool& mesh_changed);
     void clear_stained_glass_editor();
     bool bake_exact_tracery_partitions(ModelObject& object);
     void notify_mmu_paint_changed(const ModelObject& object) const;
@@ -312,6 +315,8 @@ private:
 #endif
     float   m_fragment_density = 0.5f;
     float   m_refraction_strength = 0.5f;
+    float   m_density_input = 0.5f;
+    float   m_refraction_input = 0.5f;
     float   m_opening_fragment_density = 0.5f;
     float   m_opening_refraction_strength = 0.5f;
     size_t  m_regeneration_version = 0;
@@ -322,6 +327,13 @@ private:
     std::vector<TriangleSelector::TriangleSplittingData> m_mask_data;
     // Transient cache identity; deliberately not restored by undo snapshots.
     std::vector<size_t> m_edit_document_hashes;
+    // Only reused during one synchronous commit. Pointer identity alone is not
+    // enough: document bytes, paint timestamps, geometry and colours must match.
+    using SelectorVolumeKey = std::tuple<ObjectID, std::shared_ptr<const TriangleMesh>, int,
+                                         std::array<uint64_t, 5>, std::string>;
+    using SelectorRefreshKey = std::tuple<const ModelObject*, ObjectID, std::vector<SelectorVolumeKey>, std::vector<ColorRGBA>>;
+    bool m_commit_refresh_active = false;
+    std::optional<SelectorRefreshKey> m_commit_selector_key;
     // Selector data before the current completed stroke. It identifies the
     // added leaves, so a later stroke does not regenerate earlier selections.
     std::vector<TriangleSelector::TriangleSplittingData> m_previous_mask_data;

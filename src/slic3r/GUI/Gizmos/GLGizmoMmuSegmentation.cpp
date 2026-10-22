@@ -1,3 +1,4 @@
+#include "libslic3r/TraceryDocument.hpp"
 #include "GLGizmoMmuSegmentation.hpp"
 
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -969,6 +970,13 @@ void GLGizmoMmuSegmentation::update_model_object()
             continue;
         ++idx;
         updated |= mv->mmu_segmentation_facets.set(*m_triangle_selectors[idx].get());
+        const auto paint = m_triangle_selectors[idx]->take_recorded_paint();
+        if (auto doc = TraceryDocument::from_volume(*mv)) {
+            doc->apply_ordinary_paint(paint);
+            const auto data = doc->encode();
+            updated |= data != mv->tracery_edit_data;
+            mv->tracery_edit_data = data;
+        }
     }
 
     if (updated) {
@@ -1034,6 +1042,7 @@ void GLGizmoMmuSegmentation::init_model_triangle_selectors()
         // Reset of TriangleSelector is done inside TriangleSelectorMmGUI's constructor, so we don't need it to perform it again in deserialize().
         EnforcerBlockerType max_ebt = (EnforcerBlockerType)std::min(m_extruders_colors.size(), (size_t)EnforcerBlockerType::ExtruderMax);
         m_triangle_selectors.back()->deserialize(mv->mmu_segmentation_facets.get_data(), false, max_ebt);
+        m_triangle_selectors.back()->record_painting(bool(TraceryDocument::from_volume(*mv)));
         m_triangle_selectors.back()->request_update_render_data();
         m_triangle_selectors.back()->set_wireframe_needed(true);
         m_volumes_extruder_idxs.push_back(mv->extruder_id());

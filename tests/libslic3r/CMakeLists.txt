@@ -129,3 +129,5 @@ if(WIN32)
     target_link_libraries(tracery_document_tests PRIVATE bcrypt.lib crypt32.lib)
 endif()
 add_test(NAME tracery_document COMMAND tracery_document_tests "[TraceryDocument]")
+
+add_test(NAME tracery_vector COMMAND tracery_document_tests "[TraceryVector]")
