@@ -63,15 +63,6 @@ Tracery Slicer 是一个生成花窗特殊效果FDM 切片工具，通过涂选�
 
 点击图片可查看原图。图中为切片预览，实际打印效果以耗材、模型及打印参数为准。
 
-### 案例演示：建筑模型花窗
-
-建筑模型添加花窗前后的效果对照，展示窗户区域的彩色碎片图案。
-
-| 原始效果 | 添加花窗后 |
-| :---: | :---: |
-| [![建筑模型添加花窗前的原始效果](doc/images/tracery-building-before.png)](doc/images/tracery-building-before.png) | [![建筑模型窗户区域添加彩色花窗后的效果](doc/images/tracery-building-after.png)](doc/images/tracery-building-after.png) |
-
-点击图片可查看原图。
 
 ## 基本使用流程
 

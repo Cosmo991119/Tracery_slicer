@@ -16,6 +16,7 @@
 #include <fstream>
 #include <cstdlib>
 #include <chrono>
+#include <random>
 using namespace Slic3r;
 
 TEST_CASE("Restoring ordinary paint does not replace the mesh or other annotations", "[TraceryRestore]")
@@ -41,7 +42,7 @@ TEST_CASE("Restoring ordinary paint does not replace the mesh or other annotatio
     CHECK_FALSE(restore_tracery_base_paint(*volume, paint));
 }
 
-TEST_CASE("Exact edge reduction preserves winding and falls back at ambiguous junctions", "[TraceryVector][TraceryPrepare]")
+TEST_CASE("Exact edge reduction preserves winding around ambiguous junctions", "[TraceryVector][TraceryPrepare]")
 {
     const int variant = GENERATE(0, 1, 2, 3);
     Polygons original;
@@ -70,7 +71,7 @@ TEST_CASE("Exact edge reduction preserves winding and falls back at ambiguous ju
         CHECK(reduced.size() == 2); // contour and clockwise hole
     }
     if (variant == 1 || variant == 2)
-        CHECK_FALSE(compacted);
+        CHECK(compacted);
     const auto actual = union_(reduced);
     CHECK(diff(expected, actual).empty());
     CHECK(diff(actual, expected).empty());
@@ -90,11 +91,72 @@ TEST_CASE("One ambiguous edge does not prevent reduction of neighbouring patches
     for (int i = 0; i < 64; ++i)
         polygons.push_back(Polygon{{Point(50, 0), Point(51, 0), Point(50, 1)}});
     const auto expected = union_(polygons);
-    REQUIRE(tracery_cancel_internal_edges(polygons));
+    TraceryReductionStatistics statistics;
+    REQUIRE(tracery_cancel_internal_edges(polygons, &statistics));
+    CHECK(statistics.group_failures[size_t(TraceryReductionFailure::Multiplicity)] == 1);
+    CHECK(statistics.local_compacted_components > 0);
+    CHECK(statistics.recovered_input_polygons > 1900);
+    CHECK(statistics.quarantined_polygons >= 66);
     CHECK(polygons.size() < 100);
     const auto actual = union_(polygons);
     CHECK(diff(expected, actual).empty());
     CHECK(diff(actual, expected).empty());
+}
+
+TEST_CASE("Local reductions preserve holes overlaps and shuffled connected patches", "[TraceryVector][TraceryLocalReduction]")
+{
+    std::mt19937 random(47291);
+    for (int trial = 0; trial < 12; ++trial) {
+        CAPTURE(trial);
+        Polygons polygons;
+        auto point = [&](int x, int y) {
+            return Point(100 * x + 7 * y + (y * y + trial) % 13 - 2400,
+                         100 * y - 11 * x + (x * x + trial) % 17 - 1800);
+        };
+        for (int y = 0; y < 48; ++y)
+            for (int x = 0; x < 48; ++x) {
+                if ((x > 8 && x < 18 && y > 9 && y < 19) || (x > 28 && x < 34 && y > 24 && y < 31))
+                    continue;
+                polygons.push_back(Polygon{{point(x, y), point(x + 1, y), point(x + 1, y + 1)}});
+                polygons.push_back(Polygon{{point(x, y), point(x + 1, y + 1), point(x, y + 1)}});
+            }
+        // Defects at different places and an overlapping, non-edge-connected
+        // component must preserve the same final union after local reduction.
+        for (int i = 0; i <= trial; ++i)
+            polygons.push_back(polygons[random() % polygons.size()]);
+        polygons.push_back(Polygon{{Point(-2600, -100), Point(3100, -100), Point(3100, 100), Point(-2600, 100)}});
+        std::shuffle(polygons.begin(), polygons.end(), random);
+        const auto original = polygons;
+        const auto expected = union_(polygons);
+        const bool changed = tracery_cancel_internal_edges(polygons);
+        const auto actual = union_(polygons);
+        CHECK(diff(expected, actual).empty());
+        CHECK(diff(actual, expected).empty());
+        if (!changed) {
+            REQUIRE(polygons.size() == original.size());
+            for (size_t i = 0; i < polygons.size(); ++i)
+                CHECK(polygons[i].points == original[i].points);
+        }
+    }
+}
+
+TEST_CASE("Edge reduction reports size and exact-edge limits without altering input", "[TraceryVector][TraceryLocalReduction]")
+{
+    Polygons polygons;
+    for (int i = 0; i < 64; ++i)
+        polygons.push_back(Polygon{{Point(3 * i, 0), Point(3 * i + 1, 0), Point(3 * i, 1)}});
+    TraceryReductionStatistics statistics;
+    CHECK_FALSE(tracery_cancel_internal_edges(polygons, &statistics));
+    CHECK(statistics.group_failures[size_t(TraceryReductionFailure::FewSharedEdges)] == 1);
+    CHECK(statistics.group_input_polygons[size_t(TraceryReductionFailure::FewSharedEdges)] == 64);
+    CHECK(statistics.retained_polygons == 64);
+    CHECK(statistics.local_components == 0);
+    // An oversized input must stop before building either edge index.
+    polygons.front().points.resize(2000001, Point(0, 0));
+    CHECK_FALSE(tracery_cancel_internal_edges(polygons, &statistics));
+    CHECK(statistics.group_failures[size_t(TraceryReductionFailure::EdgeBudget)] == 1);
+    CHECK(statistics.local_components == 0);
+    CHECK(polygons.front().points.size() == 2000001);
 }
 
 TEST_CASE("Vector preparation preserves fragmented colours and holes", "[TraceryVector][TraceryPrepare]")

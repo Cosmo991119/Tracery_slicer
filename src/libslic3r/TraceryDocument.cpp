@@ -272,6 +272,7 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
     performance.stage("paint.union_and_clip");
     size_t rejected = 0, compacted = 0, union_inputs = 0, union_vertices = 0;
     size_t contained_groups = 0, clipped_groups = 0, output_polygons = 0, output_vertices = 0;
+    TraceryReductionStatistics reduction;
     for (auto& [id, states] : result) {
         const auto& frame = frames.at(id);
         Polygon boundary;
@@ -295,7 +296,7 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
                 continue;
             {
                 TraceryPerformanceScope::Sample sample(performance, "paint.cancel_shared_edges");
-                if (tracery_cancel_internal_edges(polys))
+                if (tracery_cancel_internal_edges(polys, &reduction))
                     ++compacted;
             }
             union_inputs += polys.size();
@@ -346,6 +347,26 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
     performance.count("clipped_groups", clipped_groups);
     performance.count("output_polygons", output_polygons);
     performance.count("output_vertices", output_vertices);
+    performance.count("reduction_local_components", reduction.local_components);
+    performance.count("reduction_local_compacted_components", reduction.local_compacted_components);
+    performance.count("reduction_recovered_input_polygons", reduction.recovered_input_polygons);
+    performance.count("reduction_recovered_output_polygons", reduction.recovered_output_polygons);
+    performance.count("reduction_quarantined_polygons", reduction.quarantined_polygons);
+    performance.count("reduction_retained_polygons", reduction.retained_polygons);
+    if (performance.enabled()) {
+        constexpr std::array<const char*, TraceryReductionStatistics::reason_count> reasons{
+            "small_batch", "edge_budget", "multiplicity", "few_shared_edges", "branch_vertex",
+            "missing_endpoint", "incoming_conflict", "invalid_cycle"};
+        // Whole-group failures are diagnostic triggers, not final fallbacks:
+        // recovered_input_polygons counts the portion rescued by local reduction.
+        for (size_t i = 0; i < reasons.size(); ++i) {
+            const std::string prefix = std::string("reduction_") + reasons[i];
+            performance.count((prefix + "_group_failures").c_str(), reduction.group_failures[i]);
+            performance.count((prefix + "_group_polygons").c_str(), reduction.group_input_polygons[i]);
+            performance.count((prefix + "_local_failures").c_str(), reduction.local_failures[i]);
+            performance.count((prefix + "_local_polygons").c_str(), reduction.local_input_polygons[i]);
+        }
+    }
     return result;
 }
 TriangleSelector::Tracery2DData partition_regions(const TriangleMesh& base, const Regions& input, Annotation* defaults = nullptr)

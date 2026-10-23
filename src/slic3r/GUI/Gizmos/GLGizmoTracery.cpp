@@ -16,6 +16,7 @@
 #include "libslic3r/TraceryDisjointSet.hpp"
 #include "libslic3r/TraceryPreviousFacetIndex.hpp"
 #include "libslic3r/TraceryPerformance.hpp"
+#include "libslic3r/TraceryVoronoi.hpp"
 #include "libslic3r/TraceryRegionMapping.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/NotificationManager.hpp"
@@ -1658,57 +1659,10 @@ std::vector<Vec3f> GLGizmoTracery::sample_region_seed_candidates(
 
 namespace {
 
-struct TraceryVoronoiVertex {
-    Vec3f local;
-    Vec3f world;
-    Vec3f warped;
-};
-
 Vec3f tracery_warp_position(const Vec3f& point, float /* target_edge */)
 {
     // A planar Voronoi bisector must remain a straight shared edge.
     return point;
-}
-
-std::vector<TraceryVoronoiVertex> clip_tracery_half_plane(const std::vector<TraceryVoronoiVertex>& polygon,
-                                                          const Vec3d&                             direction,
-                                                          double                                   limit)
-{
-    std::vector<TraceryVoronoiVertex> output;
-    if (polygon.empty())
-        return output;
-    output.reserve(polygon.size() + 1);
-    for (size_t index = 0; index < polygon.size(); ++index) {
-        const auto&  first        = polygon[index];
-        const auto&  second       = polygon[(index + 1) % polygon.size()];
-        const double first_value  = first.warped.cast<double>().dot(direction) - limit;
-        const double second_value = second.warped.cast<double>().dot(direction) - limit;
-        if (first_value <= 0.0f)
-            output.emplace_back(first);
-        if ((first_value <= 0.0f) != (second_value <= 0.0f)) {
-            const float fraction = float(std::clamp(first_value / (first_value - second_value), 0.0, 1.0));
-            output.push_back({first.local + fraction * (second.local - first.local), first.world + fraction * (second.world - first.world),
-                              first.warped + fraction * (second.warped - first.warped)});
-        }
-    }
-    return output;
-}
-
-using TraceryBisectors = std::map<std::pair<size_t, size_t>, std::pair<Vec3d, double>>;
-
-TraceryBisectors build_tracery_bisectors(const std::vector<Vec3f>& seeds, const std::vector<size_t>& indices)
-{
-    TraceryBisectors result;
-    for (size_t a = 0; a < indices.size(); ++a) {
-        for (size_t b = a + 1; b < indices.size(); ++b) {
-            const auto  key       = std::minmax(indices[a], indices[b]);
-            const Vec3d first     = seeds[key.first].cast<double>();
-            const Vec3d second    = seeds[key.second].cast<double>();
-            const Vec3d direction = second - first;
-            result.emplace(key, std::make_pair(direction, direction.dot((first + second) * 0.5)));
-        }
-    }
-    return result;
 }
 
 std::optional<TriangleSelector::TraceryFacet2DData> make_tracery_facet_plane(
@@ -1740,44 +1694,69 @@ void GLGizmoTracery::generate_voronoi_regions(
     const std::vector<FragmentSeed>& seeds,
     std::vector<std::vector<GeneratedVoronoiRegion>>& output) const
 {
+    TraceryPerformanceScope performance("voronoi_detail");
+    performance.stage("voronoi.prepare_seeds");
     output.assign(m_triangle_selectors.size(), {});
     const float target_edge = 6.5f - 4.0f * m_fragment_density;
     std::vector<Vec3f> warped_seeds;
     warped_seeds.reserve(seeds.size());
     for (const FragmentSeed& seed : seeds)
         warped_seeds.emplace_back(tracery_warp_position(seed.position, target_edge));
+    constexpr size_t BATCH_SIZE = 4096;
+    std::vector<TraceryVoronoiTriangle> triangles;
+    std::vector<size_t> face_indices;
+    triangles.reserve(BATCH_SIZE);
+    face_indices.reserve(BATCH_SIZE);
+    TraceryVoronoiStatistics statistics;
+    performance.stage("voronoi.process_regions");
     for (const VoronoiColorRegion& region : regions) {
         std::vector<size_t> region_seeds;
         for (size_t index = 0; index < seeds.size(); ++index)
             if (seeds[index].color_group == region.color_group)
                 region_seeds.emplace_back(index);
-        const TraceryBisectors bisectors = build_tracery_bisectors(warped_seeds, region_seeds);
-        for (size_t face_index : region.face_indices) {
-            const auto& face = input.surface_triangles[face_index];
-            if (face.mesh_idx >= output.size())
-                continue;
-            const std::array<TraceryVoronoiVertex, 3> source = {{{ face.a, face.world_a, tracery_warp_position(face.world_a, target_edge) },
-                                                                    { face.b, face.world_b, tracery_warp_position(face.world_b, target_edge) },
-                                                                    { face.c, face.world_c, tracery_warp_position(face.world_c, target_edge) }}};
-            for (size_t seed : region_seeds) {
-                std::vector<TraceryVoronoiVertex> polygon(source.begin(), source.end());
-                for (size_t other : region_seeds) {
-                    if (other == seed || polygon.empty())
+        auto clipper = [&] {
+            TraceryPerformanceScope::Sample sample(performance, "voronoi.build_cells");
+            return TraceryVoronoiClipper(warped_seeds, region_seeds);
+        }();
+        for (size_t start = 0; start < region.face_indices.size(); start += BATCH_SIZE) {
+            {
+                TraceryPerformanceScope::Sample sample(performance, "voronoi.prepare_triangles");
+                triangles.clear();
+                face_indices.clear();
+                const size_t end = std::min(start + BATCH_SIZE, region.face_indices.size());
+                for (size_t i = start; i < end; ++i) {
+                    const size_t index = region.face_indices[i];
+                    const auto& face = input.surface_triangles[index];
+                    if (face.mesh_idx >= output.size())
                         continue;
-                    const auto& boundary = bisectors.at(std::minmax(seed, other));
-                    const double side = seed < other ? 1. : -1.;
-                    polygon = clip_tracery_half_plane(polygon, side * boundary.first, side * boundary.second);
+                    triangles.push_back({{{face.a, face.world_a, tracery_warp_position(face.world_a, target_edge)},
+                                          {face.b, face.world_b, tracery_warp_position(face.world_b, target_edge)},
+                                          {face.c, face.world_c, tracery_warp_position(face.world_c, target_edge)}}});
+                    face_indices.push_back(index);
                 }
-                if (polygon.size() < 3)
-                    continue;
-                GeneratedVoronoiRegion generated{ seed, face.original_facet_id, {} };
-                generated.local_polygon.reserve(polygon.size());
-                for (const TraceryVoronoiVertex& vertex : polygon)
-                    generated.local_polygon.emplace_back(vertex.local);
-                output[face.mesh_idx].emplace_back(std::move(generated));
             }
+            clipper.generate_batch(triangles, [&](size_t index, size_t seed, const auto& polygon) {
+                const auto& face = input.surface_triangles[face_indices[index]];
+                GeneratedVoronoiRegion generated{seed, face.original_facet_id, {}};
+                generated.local_polygon.reserve(polygon.size());
+                for (const auto& vertex : polygon)
+                    generated.local_polygon.push_back(vertex.local);
+                output[face.mesh_idx].push_back(std::move(generated));
+            }, statistics, performance);
         }
     }
+    performance.count("voronoi_triangles", statistics.triangles);
+    performance.count("voronoi_potential_cells", statistics.potential_cells);
+    performance.count("voronoi_contained_triangles", statistics.contained_triangles);
+    performance.count("voronoi_boundary_triangles", statistics.boundary_triangles);
+    performance.count("voronoi_containment_planes", statistics.containment_planes);
+    performance.count("voronoi_candidate_cells", statistics.candidate_cells);
+    performance.count("voronoi_tested_halfplanes", statistics.tested_halfplanes);
+    performance.count("voronoi_inside_planes", statistics.inside_planes);
+    performance.count("voronoi_rejected_cells", statistics.rejected_cells);
+    performance.count("voronoi_clip_calls", statistics.clip_calls);
+    performance.count("voronoi_output_polygons", statistics.output_polygons);
+    performance.count("voronoi_output_vertices", statistics.output_vertices);
 }
 
 void GLGizmoTracery::build_fragment_topology(
