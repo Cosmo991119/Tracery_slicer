@@ -1034,12 +1034,14 @@ void GLGizmoTracery::erase_all_stained_glass()
     m_seed_fill_last_mesh_id = -1;
     performance.stage("clear.notify");
     notify_mmu_paint_changed(*object);
+    performance.stage("clear.geometry_refresh");
     if (mesh_changed) {
         const auto& objects = wxGetApp().model().objects;
         const auto  found   = std::find(objects.begin(), objects.end(), object);
         if (found != objects.end())
             wxGetApp().plater()->changed_mesh(int(found - objects.begin()));
     }
+    performance.stage("clear.mark_dirty");
     m_parent.set_as_dirty();
 }
 
@@ -1048,6 +1050,7 @@ bool GLGizmoTracery::restore_original_tracery_meshes(ModelObject& object, bool& 
     TraceryPerformanceScope performance("clear_all_stained_glass");
     std::vector<std::pair<ModelVolume*, TraceryPartitionResult>> restored;
     std::vector<std::pair<ModelVolume*, std::string>> vector_clears;
+    std::vector<std::pair<ModelVolume*, TriangleSelector::TriangleSplittingData>> paint_restores;
     try {
         performance.stage("clear.prepare");
         size_t index = 0;
@@ -1055,22 +1058,35 @@ bool GLGizmoTracery::restore_original_tracery_meshes(ModelObject& object, bool& 
             if (!volume->is_model_part())
                 continue;
             const auto snapshot    = m_mesh_restore_states.find(volume->id());
-            auto       annotations = collect_volume_annotations(*volume);
+            auto annotations = [&] {
+                TraceryPerformanceScope::Sample sample(performance, "clear.collect_annotations");
+                return collect_volume_annotations(*volume);
+            }();
             if (!volume->tracery_edit_data.empty()) {
-                auto document = TraceryDocument::decode(volume->tracery_edit_data);
+                auto document = [&] {
+                    TraceryPerformanceScope::Sample sample(performance, "clear.decode_document");
+                    return TraceryDocument::decode(volume->tracery_edit_data);
+                }();
                 auto channels = document.last_annotations();
                 std::copy(annotations.begin(), annotations.end(), channels.begin());
                 channels[6] = {};
                 if (!document.is_vector())
                     throw std::runtime_error("Legacy stained-glass mesh editing is disabled. Open an unmodified model to use vector stained glass.");
-                document.clear_vector_glass(volume->mesh(), channels);
-                vector_clears.emplace_back(volume, document.encode());
+                {
+                    TraceryPerformanceScope::Sample sample(performance, "clear.clear_document");
+                    document.clear_vector_glass(volume->mesh(), channels);
+                }
+                auto data = [&] {
+                    TraceryPerformanceScope::Sample sample(performance, "clear.encode_document");
+                    return document.encode();
+                }();
+                vector_clears.emplace_back(volume, std::move(data));
             } else if (snapshot != m_mesh_restore_states.end()) {
                 restored.emplace_back(volume, restore_tracery_mesh(snapshot->second, volume->mesh(), annotations));
             } else if (index < m_stained_glass_base_paint_data.size()) {
                 // Legacy/session paint without a mesh snapshot can only restore colour.
-                annotations[0] = m_stained_glass_base_paint_data[index];
-                restored.emplace_back(volume, TraceryPartitionResult{volume->mesh().its, std::move(annotations), {}});
+                if (annotations[0] != m_stained_glass_base_paint_data[index])
+                    paint_restores.emplace_back(volume, m_stained_glass_base_paint_data[index]);
             }
             ++index;
         }
@@ -1083,6 +1099,8 @@ bool GLGizmoTracery::restore_original_tracery_meshes(ModelObject& object, bool& 
     performance.stage("clear.commit");
     for (auto& [volume, data] : vector_clears)
         volume->tracery_edit_data = std::move(data);
+    for (auto& [volume, paint] : paint_restores)
+        restore_tracery_base_paint(*volume, paint);
     for (auto& [volume, partition] : restored) {
         mesh_changed = true;
         const ObjectID old_id = volume->id();
@@ -4934,6 +4952,7 @@ void GLGizmoTracery::notify_mmu_paint_changed(const ModelObject& object) const
     wxGetApp().plater()->get_partplate_list().notify_instance_update(object_index, 0);
     performance.stage("notify.schedule_slice");
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    performance.stage("notify.filament_usage");
     wxGetApp().plater()->notify_filament_usage_changed();
 }
 

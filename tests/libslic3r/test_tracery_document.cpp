@@ -3,8 +3,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include "libslic3r/TraceryDocument.hpp"
+#include "libslic3r/TraceryRestore.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/TraceryPerformance.hpp"
+#include "libslic3r/TraceryPolygonPreparation.hpp"
 #include "libslic3r/TraceryBasePaint.hpp"
 #include "libslic3r/TraceryDisjointSet.hpp"
 #include "libslic3r/TraceryPreviousFacetIndex.hpp"
@@ -16,8 +18,88 @@
 #include <chrono>
 using namespace Slic3r;
 
+TEST_CASE("Restoring ordinary paint does not replace the mesh or other annotations", "[TraceryRestore]")
+{
+    Model model;
+    auto* object = model.add_object();
+    auto* volume = object->add_volume(make_cube(10, 10, 1));
+    const auto mesh = volume->mesh().its;
+    const auto id = volume->id();
+    TriangleSelector original(volume->mesh());
+    original.set_facet(0, EnforcerBlockerType(2));
+    const auto paint = original.serialize();
+    TriangleSelector support(volume->mesh());
+    support.set_facet(1, EnforcerBlockerType::ENFORCER);
+    volume->supported_facets.set(support);
+    const auto old_support = volume->supported_facets.get_data();
+    CHECK(restore_tracery_base_paint(*volume, paint));
+    CHECK(volume->mmu_segmentation_facets.get_data() == paint);
+    CHECK(volume->supported_facets.get_data() == old_support);
+    CHECK(volume->mesh().its.vertices == mesh.vertices);
+    CHECK(volume->mesh().its.indices == mesh.indices);
+    CHECK(volume->id() == id);
+    CHECK_FALSE(restore_tracery_base_paint(*volume, paint));
+}
+
+TEST_CASE("Exact edge reduction preserves winding and falls back at ambiguous junctions", "[TraceryVector][TraceryPrepare]")
+{
+    const int variant = GENERATE(0, 1, 2, 3);
+    Polygons original;
+    for (int y = 0; y < 16; ++y)
+        for (int x = 0; x < 16; ++x) {
+            if (x >= 5 && x < 11 && y >= 5 && y < 11)
+                continue;
+            // An oblique integer grid, including negative coordinates.
+            auto point = [](int u, int v) { return Point(100 * u + 17 * v - 800, 100 * v - 9 * u - 400); };
+            original.push_back(Polygon{{point(x, y), point(x + 1, y), point(x + 1, y + 1)}});
+            original.push_back(Polygon{{point(x, y), point(x + 1, y + 1), point(x, y + 1)}});
+        }
+    if (variant == 1)
+        original.push_back(original.front()); // same-direction multiplicity
+    if (variant == 2) {
+        const Point corner = original.back().points[1];
+        original.push_back(Polygon{{corner, Point(corner.x() + 100, corner.y()), Point(corner.x(), corner.y() + 100)}});
+    }
+    if (variant == 3)
+        original.push_back(Polygon{{Point(-1000, 0), Point(2000, 0), Point(2000, 100), Point(-1000, 100)}});
+    const Polygons expected = union_(original);
+    Polygons reduced = original;
+    const bool compacted = tracery_cancel_internal_edges(reduced);
+    if (variant == 0) {
+        CHECK(compacted);
+        CHECK(reduced.size() == 2); // contour and clockwise hole
+    }
+    if (variant == 1 || variant == 2)
+        CHECK_FALSE(compacted);
+    const auto actual = union_(reduced);
+    CHECK(diff(expected, actual).empty());
+    CHECK(diff(actual, expected).empty());
+}
+
+TEST_CASE("One ambiguous edge does not prevent reduction of neighbouring patches", "[TraceryVector][TraceryLocalReduction]")
+{
+    Polygons polygons;
+    for (int y = 0; y < 32; ++y)
+        for (int x = 0; x < 32; ++x) {
+            polygons.push_back(Polygon{{Point(x, y), Point(x + 1, y), Point(x + 1, y + 1)}});
+            polygons.push_back(Polygon{{Point(x, y), Point(x + 1, y + 1), Point(x, y + 1)}});
+        }
+    // Duplicate one triangle, and add a separate ambiguous island. Neither may
+    // disable compression of the rest of the connected, same-material surface.
+    polygons.push_back(polygons.front());
+    for (int i = 0; i < 64; ++i)
+        polygons.push_back(Polygon{{Point(50, 0), Point(51, 0), Point(50, 1)}});
+    const auto expected = union_(polygons);
+    REQUIRE(tracery_cancel_internal_edges(polygons));
+    CHECK(polygons.size() < 100);
+    const auto actual = union_(polygons);
+    CHECK(diff(expected, actual).empty());
+    CHECK(diff(actual, expected).empty());
+}
+
 TEST_CASE("Vector preparation preserves fragmented colours and holes", "[TraceryVector][TraceryPrepare]")
 {
+    const bool duplicate = GENERATE(false, true);
     // Raise the grid size for a repeatable performance run without changing the
     // geometry, colours, source facet or final expected regions.
     const char* setting = std::getenv("TRACERY_PREP_BENCH_SIZE");
@@ -44,10 +126,13 @@ TEST_CASE("Vector preparation preserves fragmented colours and holes", "[Tracery
                 facet.regions.push_back(std::move(region));
             }
         }
+    if (duplicate)
+        facet.regions.push_back(facet.regions.front());
     const auto begin = std::chrono::steady_clock::now();
     const auto result = document.apply_vector_edit(mesh, annotations, {facet}, TraceryEdit::Paint);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
-    std::fprintf(stderr, "TRACERY_PREP_BENCH grid=%d polygons=%zu elapsed_ms=%.3f\n", n, facet.regions.size(), ms);
+    std::fprintf(stderr, "TRACERY_PREP_BENCH grid=%d duplicate=%d polygons=%zu elapsed_ms=%.3f\n",
+                 n, int(duplicate), facet.regions.size(), ms);
     CHECK(result.mesh.vertices == its.vertices);
     CHECK(result.mesh.indices == its.indices);
     auto rectangle = [](double x0, double y0, double x1, double y1) {
@@ -99,6 +184,54 @@ TEST_CASE("Vector preparation preserves fragmented colours and holes", "[Tracery
     auto restored = TraceryDocument::decode(snapshot);
     restored.apply_vector_edit(mesh, annotations, {facet}, TraceryEdit::Erase);
     verify(restored, expected);
+}
+
+TEST_CASE("Vector projection clips crossing regions and rejects distant regions", "[TraceryVector][TraceryPrepare]")
+{
+    indexed_triangle_set its;
+    its.vertices = {{0, 0, 0}, {32, 0, 0}, {0, 32, 0}};
+    its.indices = {{0, 1, 2}};
+    const TriangleMesh mesh(its);
+    std::vector<TraceryDocument::Annotation> annotations(8);
+    auto document = TraceryDocument::capture(mesh, annotations);
+    TriangleSelector::TraceryFacet2DData facet;
+    facet.source_facet_id = 0;
+    facet.origin = Vec3d(16, 8, 0);
+    facet.axis_u = Vec3d(0, 2, 0);
+    facet.axis_v = Vec3d(-3, 0, 0);
+    Polygons reference;
+    for (int y = -12; y < 12; ++y)
+        for (int x = -12; x < 12; ++x) {
+            TriangleSelector::TraceryRegion2D region;
+            region.color = EnforcerBlockerType(7);
+            region.polygon = {{double(x), double(y)}, {double(x + 1), double(y)}, {double(x), double(y + 1)}};
+            Polygon projected;
+            for (const auto& p : region.polygon) {
+                const Vec3d v = facet.origin + p.x() * facet.axis_u + p.y() * facet.axis_v;
+                projected.points.emplace_back(scale_(v.x()), scale_(v.y()));
+            }
+            projected.make_counter_clockwise();
+            reference.push_back(std::move(projected));
+            facet.regions.push_back(std::move(region));
+        }
+    // The established union-then-clip result is the oracle, including clipping
+    // at the diagonal, outside candidates and a differently scaled input frame.
+    const Polygons boundary{Polygon{{Point(0, 0), Point(scale_(32.), 0.), Point(0., scale_(32.))}}};
+    reference = intersection(union_(reference), boundary);
+    const auto result = document.apply_vector_edit(mesh, annotations, {facet}, TraceryEdit::Paint);
+    Polygons actual;
+    for (const auto& surface : document.surface_regions())
+        for (const auto& region : surface.regions)
+            if (region.color == EnforcerBlockerType(7)) {
+                Polygon p;
+                for (const auto& v : region.polygon)
+                    p.points.emplace_back(scale_(v.x()), scale_(v.y()));
+                actual.push_back(std::move(p));
+            }
+    CHECK(diff(reference, actual).empty());
+    CHECK(diff(actual, reference).empty());
+    CHECK(result.mesh.vertices == its.vertices);
+    CHECK(result.mesh.indices == its.indices);
 }
 
 namespace {

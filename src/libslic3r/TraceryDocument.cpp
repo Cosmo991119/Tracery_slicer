@@ -305,21 +305,24 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
                 TraceryPerformanceScope::Sample sample(performance, "paint.union_polygons");
                 polys = union_(polys);
             }
-            bool contained = true;
+            bool contained = int128::orient(boundary.points[0], boundary.points[1], boundary.points[2]) > 0;
             {
                 TraceryPerformanceScope::Sample sample(performance, "paint.classify_containment");
                 // The source boundary is convex. Exact integer predicates avoid
                 // tolerance-dependent leaks and are needed only after union,
                 // when most of the interior vertices have already disappeared.
                 for (const auto& p : polys) {
-                    for (const auto& v : p.points)
+                    if (!contained)
+                        break;
+                    for (const auto& v : p.points) {
                         for (size_t edge = 0; edge < 3; ++edge)
                             if (int128::orient(boundary.points[edge], boundary.points[(edge + 1) % 3], v) < 0) {
                                 contained = false;
                                 break;
                             }
-                    if (!contained)
-                        break;
+                        if (!contained)
+                            break;
+                    }
                 }
             }
             if (contained) {

@@ -21,6 +21,7 @@
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Tesselate.hpp"
+#include "libslic3r/TraceryPerformance.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -4326,6 +4327,7 @@ int PartPlateList::find_instance_belongs(int obj_id, int instance_id)
 //newly added or modified
 int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_new)
 {
+	TraceryPerformanceScope performance("plate_instance_update");
 	int ret = 0, index;
 	PartPlate* plate = NULL;
 	ModelObject* object = NULL;
@@ -4348,15 +4350,18 @@ int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_n
     else
 		return -1;
 
+	performance.stage("plate.bounding_box");
 	BoundingBoxf3 boundingbox = object->instance_convex_hull_bounding_box(instance_id);
 
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": obj_id %1%, instance_id %2%") % obj_id % instance_id;
+	performance.stage("plate.find_instance");
 	index = find_instance(obj_id, instance_id);
 	if (index != -1)
 	{
 		//found it added before
 		BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": found it in previous plate %1%") % index;
 		plate = m_plate_list[index];
+		performance.stage("plate.intersect_instance");
 		if (!plate->intersect_instance(obj_id, instance_id, &boundingbox))
 		{
 			//not include anymore, remove it from original plate
@@ -4366,8 +4371,11 @@ int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_n
 		else
 		{
 			BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": still in original plate %1%, no need to be updated") % index;
+			performance.stage("plate.exclude_status");
 			plate->update_instance_exclude_status(obj_id, instance_id, &boundingbox);
+			performance.stage("plate.update_states");
 			plate->update_states();
+			performance.stage("plate.invalidate_slice");
 			plate->update_slice_result_valid_state();
 			plate->thumbnail_data.reset();
             plate->no_light_thumbnail_data.reset();

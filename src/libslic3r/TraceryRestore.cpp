@@ -1,11 +1,22 @@
 #include "TraceryRestore.hpp"
 #include "ClipperUtils.hpp"
 #include "Tesselate.hpp"
+#include "Model.hpp"
 #include <map>
 #include <numeric>
 #include <stdexcept>
 
 namespace Slic3r {
+
+bool restore_tracery_base_paint(ModelVolume& volume, const TriangleSelector::TriangleSplittingData& paint)
+{
+    if (volume.mmu_segmentation_facets.get_data() == paint)
+        return false;
+    TriangleSelector selector(volume.mesh());
+    selector.deserialize(paint, false);
+    return volume.mmu_segmentation_facets.set(selector);
+}
+
 namespace {
 using Annotation     = TriangleSelector::TriangleSplittingData;
 using RegionKey      = std::pair<int, EnforcerBlockerType>;

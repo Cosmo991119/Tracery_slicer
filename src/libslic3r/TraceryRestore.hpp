@@ -5,6 +5,11 @@
 
 namespace Slic3r {
 
+class ModelVolume;
+
+// Restores only ordinary colour annotations, leaving the source mesh untouched.
+bool restore_tracery_base_paint(ModelVolume& volume, const TriangleSelector::TriangleSplittingData& paint);
+
 struct TraceryRestoreState
 {
     TriangleMesh                                         original_mesh;
