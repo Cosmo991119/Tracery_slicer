@@ -23,6 +23,10 @@ struct TraceryCacheEntry {
     std::shared_ptr<const TraceryDocument> document;
 };
 using TraceryCacheEntryPtr = std::shared_ptr<const TraceryCacheEntry>;
+thread_local std::list<TraceryCacheEntryPtr> document_cache;
+thread_local size_t document_cache_bytes = 0;
+constexpr size_t max_source_bytes = 32 * 1024 * 1024;
+constexpr size_t max_entries = 16;
 } // namespace
 
 struct TraceryDocument::ReadCacheScope::State {
@@ -53,10 +57,7 @@ std::shared_ptr<const TraceryDocument> TraceryDocument::decode_cached(const std:
     // The bounded idle cache serves isolated readers. A commit scope retains its
     // whole working set until all UI callbacks finish, avoiding cyclic eviction.
     // Entries are shared, so retaining them does not copy their large strings.
-    static thread_local std::list<TraceryCacheEntryPtr> cache;
-    static thread_local size_t source_bytes = 0;
-    constexpr size_t max_source_bytes = 32 * 1024 * 1024;
-    constexpr size_t max_entries = 16;
+    auto& cache = document_cache;
     TraceryPerformanceScope performance("document_cache");
     performance.stage("document_cache.lookup");
     performance.count("source_bytes", data.size());
@@ -88,23 +89,77 @@ std::shared_ptr<const TraceryDocument> TraceryDocument::decode_cached(const std:
     performance.stage("document_cache.decode");
     auto document = std::make_shared<const TraceryDocument>(decode(data));
     performance.stage("document_cache.store");
-    if (active || data.size() <= max_source_bytes) {
-        auto entry = std::make_shared<const TraceryCacheEntry>(TraceryCacheEntry{hash, data, document});
-        if (active)
-            active->retain(entry);
-        if (data.size() <= max_source_bytes) {
-            size_t evictions = 0;
-            while (!cache.empty() && (cache.size() >= max_entries || source_bytes + data.size() > max_source_bytes)) {
-                source_bytes -= cache.back()->data.size();
-                cache.pop_back();
-                ++evictions;
-            }
-            cache.push_front(std::move(entry));
-            source_bytes += data.size();
-            performance.count("idle_evictions", evictions);
-        }
-    }
+    cache_document(data, document);
     return document;
+}
+
+void TraceryDocument::cache_document(const std::string& data, std::shared_ptr<const TraceryDocument> document)
+{
+    auto* active = ReadCacheScope::State::active;
+    if (!active && data.size() > max_source_bytes)
+        return;
+    auto entry = std::make_shared<const TraceryCacheEntry>(TraceryCacheEntry{
+        std::hash<std::string>{}(data), data, std::move(document)});
+    if (active)
+        active->retain(entry);
+    if (data.size() <= max_source_bytes) {
+        while (!document_cache.empty() &&
+               (document_cache.size() >= max_entries || document_cache_bytes + data.size() > max_source_bytes)) {
+            document_cache_bytes -= document_cache.back()->data.size();
+            document_cache.pop_back();
+        }
+        document_cache.push_front(std::move(entry));
+        document_cache_bytes += data.size();
+    }
+}
+
+std::string TraceryDocument::encode_cached() &&
+{
+    TraceryPerformanceScope performance("document_publish_snapshot");
+    performance.stage("document_publish.validate");
+    // Publishing a live snapshot skips decode(), but must retain its structural
+    // checks. Inspect the native data directly without parsing another JSON tree.
+    const auto validate_mesh = [](const indexed_triangle_set& mesh) {
+        for (const auto& vertex : mesh.vertices)
+            if (!vertex.allFinite())
+                throw std::runtime_error("Invalid stained-glass vertex");
+        for (const auto& face : mesh.indices)
+            for (int vertex : face)
+                if (vertex < 0 || size_t(vertex) >= mesh.vertices.size())
+                    throw std::runtime_error("Invalid stained-glass face");
+    };
+    validate_mesh(m_base.its);
+    validate_mesh(m_derived);
+    if (m_sources.size() != m_derived.indices.size())
+        throw std::runtime_error("Invalid stained-glass lineage");
+    for (int id : m_sources)
+        if (id < 0 || size_t(id) >= m_base.its.indices.size())
+            throw std::runtime_error("Invalid stained-glass source facet");
+    if (m_channels.size() != 8 || m_last.size() != 8)
+        throw std::runtime_error("Invalid stained-glass channels");
+    for (const auto& channel : m_channels)
+        for (const auto& [facet, states] : channel)
+            for (const auto& [state, polygons] : states) {
+                if (facet < 0 || size_t(facet) >= m_base.its.indices.size() || state > unsigned(EnforcerBlockerType::ExtruderMax))
+                    throw std::runtime_error("Invalid stained-glass region");
+                for (const auto& polygon : polygons)
+                    if (polygon.points.size() < 3)
+                        throw std::runtime_error("Invalid stained-glass polygon");
+            }
+    const auto validate_annotation = [&](const Annotation& annotation) {
+        for (const auto& triangle : annotation.triangles_to_split)
+            if (triangle.triangle_idx < 0 || size_t(triangle.triangle_idx) >= m_sources.size() ||
+                triangle.bitstream_start_idx < 0 || size_t(triangle.bitstream_start_idx) >= annotation.bitstream.size())
+                throw std::runtime_error("Invalid stained-glass annotation");
+    };
+    for (const auto& annotation : m_last)
+        validate_annotation(annotation);
+    validate_annotation(m_selection_reference);
+    performance.stage("document_publish.encode");
+    auto data = encode();
+    performance.stage("document_publish.retain");
+    cache_document(data, std::make_shared<const TraceryDocument>(std::move(*this)));
+    return data;
 }
 
 namespace {
@@ -272,6 +327,7 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
     performance.stage("paint.union_and_clip");
     size_t rejected = 0, compacted = 0, union_inputs = 0, union_vertices = 0;
     size_t contained_groups = 0, clipped_groups = 0, output_polygons = 0, output_vertices = 0;
+    TraceryReductionStatistics reduction;
     for (auto& [id, states] : result) {
         const auto& frame = frames.at(id);
         Polygon boundary;
@@ -295,7 +351,7 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
                 continue;
             {
                 TraceryPerformanceScope::Sample sample(performance, "paint.cancel_shared_edges");
-                if (tracery_cancel_internal_edges(polys))
+                if (tracery_cancel_internal_edges(polys, &reduction))
                     ++compacted;
             }
             union_inputs += polys.size();
@@ -346,6 +402,26 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
     performance.count("clipped_groups", clipped_groups);
     performance.count("output_polygons", output_polygons);
     performance.count("output_vertices", output_vertices);
+    performance.count("reduction_local_components", reduction.local_components);
+    performance.count("reduction_local_compacted_components", reduction.local_compacted_components);
+    performance.count("reduction_recovered_input_polygons", reduction.recovered_input_polygons);
+    performance.count("reduction_recovered_output_polygons", reduction.recovered_output_polygons);
+    performance.count("reduction_quarantined_polygons", reduction.quarantined_polygons);
+    performance.count("reduction_retained_polygons", reduction.retained_polygons);
+    if (performance.enabled()) {
+        constexpr std::array<const char*, TraceryReductionStatistics::reason_count> reasons{
+            "small_batch", "edge_budget", "multiplicity", "few_shared_edges", "branch_vertex",
+            "missing_endpoint", "incoming_conflict", "invalid_cycle"};
+        // Whole-group failures are diagnostic triggers, not final fallbacks:
+        // recovered_input_polygons counts the portion rescued by local reduction.
+        for (size_t i = 0; i < reasons.size(); ++i) {
+            const std::string prefix = std::string("reduction_") + reasons[i];
+            performance.count((prefix + "_group_failures").c_str(), reduction.group_failures[i]);
+            performance.count((prefix + "_group_polygons").c_str(), reduction.group_input_polygons[i]);
+            performance.count((prefix + "_local_failures").c_str(), reduction.local_failures[i]);
+            performance.count((prefix + "_local_polygons").c_str(), reduction.local_input_polygons[i]);
+        }
+    }
     return result;
 }
 TriangleSelector::Tracery2DData partition_regions(const TriangleMesh& base, const Regions& input, Annotation* defaults = nullptr)

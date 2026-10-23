@@ -2,6 +2,7 @@
 #include "TraceryPlateMaterials.hpp"
 #include "PresetBundle.hpp"
 #include "Color.hpp"
+#include <algorithm>
 #include <stdexcept>
 
 namespace Slic3r {
@@ -168,8 +169,15 @@ void tracery_filter_source_selection(TriangleSelector& selection, const Triangle
                                      const std::set<EnforcerBlockerType>& blocked)
 {
     if (blocked.empty()) return;
-    selection.set_leaf_states([&](const Vec3f& point, int facet) {
-        return blocked.count(source.state_at(point, facet)) ? EnforcerBlockerType::NONE : selection.state_at(point, facet);
+    // Most selected parts do not use the plate's opaque-black material. Avoid
+    // point queries for every fine mask leaf when no source leaf can be blocked.
+    if (std::none_of(blocked.begin(), blocked.end(), [&](EnforcerBlockerType state) { return source.has_facets(state); })) {
+        selection.seed_fill_unselect_all_triangles();
+        return;
+    }
+    selection.transform_leaf_states([&](EnforcerBlockerType state, const Vec3f& point, int facet) {
+        return state == EnforcerBlockerType::NONE || blocked.count(source.state_at(point, facet)) ?
+            EnforcerBlockerType::NONE : state;
     });
 }
 

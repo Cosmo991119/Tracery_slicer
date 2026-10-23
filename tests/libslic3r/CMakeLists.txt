@@ -123,7 +123,7 @@ add_test(NAME tracery_mapping COMMAND tracery_mapping_tests "[TraceryMapping]")
 add_test(NAME tracery_mapping_performance COMMAND tracery_mapping_tests "[TraceryMappingPerformance]")
 set_tests_properties(tracery_mapping_performance PROPERTIES LABELS "performance" RUN_SERIAL TRUE TIMEOUT 180)
 
-add_executable(tracery_document_tests test_tracery_document.cpp test_tracery_document_window.cpp)
+add_executable(tracery_document_tests test_tracery_document.cpp test_tracery_document_window.cpp test_tracery_voronoi.cpp)
 target_link_libraries(tracery_document_tests PRIVATE ${TEST_LINK_LIBS})
 if(WIN32)
     target_link_libraries(tracery_document_tests PRIVATE bcrypt.lib crypt32.lib)
@@ -131,3 +131,4 @@ endif()
 add_test(NAME tracery_document COMMAND tracery_document_tests "[TraceryDocument]")
 
 add_test(NAME tracery_vector COMMAND tracery_document_tests "[TraceryVector]")
+add_test(NAME tracery_voronoi COMMAND tracery_document_tests "[TraceryVoronoi]")

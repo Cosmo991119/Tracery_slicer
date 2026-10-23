@@ -8,6 +8,7 @@
 #include "libslic3r/TraceryPerformance.hpp"
 #include "libslic3r/TraceryPolygonPreparation.hpp"
 #include "libslic3r/TraceryBasePaint.hpp"
+#include "libslic3r/TraceryPlateMaterials.hpp"
 #include "libslic3r/TraceryDisjointSet.hpp"
 #include "libslic3r/TraceryPreviousFacetIndex.hpp"
 #include "libslic3r/Model.hpp"
@@ -16,6 +17,8 @@
 #include <fstream>
 #include <cstdlib>
 #include <chrono>
+#include <cstdio>
+#include <random>
 using namespace Slic3r;
 
 TEST_CASE("Restoring ordinary paint does not replace the mesh or other annotations", "[TraceryRestore]")
@@ -41,7 +44,7 @@ TEST_CASE("Restoring ordinary paint does not replace the mesh or other annotatio
     CHECK_FALSE(restore_tracery_base_paint(*volume, paint));
 }
 
-TEST_CASE("Exact edge reduction preserves winding and falls back at ambiguous junctions", "[TraceryVector][TraceryPrepare]")
+TEST_CASE("Exact edge reduction preserves winding around ambiguous junctions", "[TraceryVector][TraceryPrepare]")
 {
     const int variant = GENERATE(0, 1, 2, 3);
     Polygons original;
@@ -70,7 +73,7 @@ TEST_CASE("Exact edge reduction preserves winding and falls back at ambiguous ju
         CHECK(reduced.size() == 2); // contour and clockwise hole
     }
     if (variant == 1 || variant == 2)
-        CHECK_FALSE(compacted);
+        CHECK(compacted);
     const auto actual = union_(reduced);
     CHECK(diff(expected, actual).empty());
     CHECK(diff(actual, expected).empty());
@@ -90,11 +93,72 @@ TEST_CASE("One ambiguous edge does not prevent reduction of neighbouring patches
     for (int i = 0; i < 64; ++i)
         polygons.push_back(Polygon{{Point(50, 0), Point(51, 0), Point(50, 1)}});
     const auto expected = union_(polygons);
-    REQUIRE(tracery_cancel_internal_edges(polygons));
+    TraceryReductionStatistics statistics;
+    REQUIRE(tracery_cancel_internal_edges(polygons, &statistics));
+    CHECK(statistics.group_failures[size_t(TraceryReductionFailure::Multiplicity)] == 1);
+    CHECK(statistics.local_compacted_components > 0);
+    CHECK(statistics.recovered_input_polygons > 1900);
+    CHECK(statistics.quarantined_polygons >= 66);
     CHECK(polygons.size() < 100);
     const auto actual = union_(polygons);
     CHECK(diff(expected, actual).empty());
     CHECK(diff(actual, expected).empty());
+}
+
+TEST_CASE("Local reductions preserve holes overlaps and shuffled connected patches", "[TraceryVector][TraceryLocalReduction]")
+{
+    std::mt19937 random(47291);
+    for (int trial = 0; trial < 12; ++trial) {
+        CAPTURE(trial);
+        Polygons polygons;
+        auto point = [&](int x, int y) {
+            return Point(100 * x + 7 * y + (y * y + trial) % 13 - 2400,
+                         100 * y - 11 * x + (x * x + trial) % 17 - 1800);
+        };
+        for (int y = 0; y < 48; ++y)
+            for (int x = 0; x < 48; ++x) {
+                if ((x > 8 && x < 18 && y > 9 && y < 19) || (x > 28 && x < 34 && y > 24 && y < 31))
+                    continue;
+                polygons.push_back(Polygon{{point(x, y), point(x + 1, y), point(x + 1, y + 1)}});
+                polygons.push_back(Polygon{{point(x, y), point(x + 1, y + 1), point(x, y + 1)}});
+            }
+        // Defects at different places and an overlapping, non-edge-connected
+        // component must preserve the same final union after local reduction.
+        for (int i = 0; i <= trial; ++i)
+            polygons.push_back(polygons[random() % polygons.size()]);
+        polygons.push_back(Polygon{{Point(-2600, -100), Point(3100, -100), Point(3100, 100), Point(-2600, 100)}});
+        std::shuffle(polygons.begin(), polygons.end(), random);
+        const auto original = polygons;
+        const auto expected = union_(polygons);
+        const bool changed = tracery_cancel_internal_edges(polygons);
+        const auto actual = union_(polygons);
+        CHECK(diff(expected, actual).empty());
+        CHECK(diff(actual, expected).empty());
+        if (!changed) {
+            REQUIRE(polygons.size() == original.size());
+            for (size_t i = 0; i < polygons.size(); ++i)
+                CHECK(polygons[i].points == original[i].points);
+        }
+    }
+}
+
+TEST_CASE("Edge reduction reports size and exact-edge limits without altering input", "[TraceryVector][TraceryLocalReduction]")
+{
+    Polygons polygons;
+    for (int i = 0; i < 64; ++i)
+        polygons.push_back(Polygon{{Point(3 * i, 0), Point(3 * i + 1, 0), Point(3 * i, 1)}});
+    TraceryReductionStatistics statistics;
+    CHECK_FALSE(tracery_cancel_internal_edges(polygons, &statistics));
+    CHECK(statistics.group_failures[size_t(TraceryReductionFailure::FewSharedEdges)] == 1);
+    CHECK(statistics.group_input_polygons[size_t(TraceryReductionFailure::FewSharedEdges)] == 64);
+    CHECK(statistics.retained_polygons == 64);
+    CHECK(statistics.local_components == 0);
+    // An oversized input must stop before building either edge index.
+    polygons.front().points.resize(2000001, Point(0, 0));
+    CHECK_FALSE(tracery_cancel_internal_edges(polygons, &statistics));
+    CHECK(statistics.group_failures[size_t(TraceryReductionFailure::EdgeBudget)] == 1);
+    CHECK(statistics.local_components == 0);
+    CHECK(polygons.front().points.size() == 2000001);
 }
 
 TEST_CASE("Vector preparation preserves fragmented colours and holes", "[TraceryVector][TraceryPrepare]")
@@ -271,6 +335,105 @@ TEST_CASE("Uniform selection subtrees export once without changing the brush tre
     CHECK(selector.serialize() == original);
     const std::vector<int> no_changes;
     CHECK(selector.coalesced_painted_leaves(true, &no_changes).empty());
+}
+
+TEST_CASE("Direct leaf transforms preserve brush and erase results without self queries", "[TraceryVector][TraceryLeafTransform]")
+{
+    indexed_triangle_set its;
+    its.vertices = {{0,0,0},{16,0,0},{0,16,0}};
+    its.indices = {{0,1,2}};
+    const TriangleMesh mesh(its);
+    TriangleSelector reference(mesh), optimized(mesh);
+    reference.deserialize(uniform_annotation_tree(6));
+    reference.set_leaf_states([](const Vec3f& p, int) {
+        return p.x() > 8 ? EnforcerBlockerType::ExtruderMax : EnforcerBlockerType(2);
+    });
+    optimized.deserialize(reference.serialize());
+    for (bool erase : {false, true}) {
+        reference.set_leaf_states([&](const Vec3f& p, int facet) {
+            const auto state = reference.state_at(p, facet);
+            return state == EnforcerBlockerType::ExtruderMax || (erase && p.y() < 3) ? EnforcerBlockerType::NONE : state;
+        });
+        optimized.transform_leaf_states([&](EnforcerBlockerType state, const Vec3f& p, int) {
+            return state == EnforcerBlockerType::ExtruderMax || (erase && p.y() < 3) ? EnforcerBlockerType::NONE : state;
+        });
+        CHECK(optimized.serialize() == reference.serialize());
+    }
+    optimized.transform_leaf_states({});
+    CHECK_FALSE(optimized.has_facets(EnforcerBlockerType(2)));
+    CHECK(optimized.painted_leaves(true).size() == 4096);
+}
+
+TEST_CASE("Source facet queries recover subdivided paint without searching other surfaces", "[TraceryVector][TracerySourcePaint]")
+{
+    indexed_triangle_set its;
+    its.vertices = {{0,0,0}, {16,0,0}, {0,16,0}, {0,0,0.00001f}, {16,0,0.00001f}, {0,16,0.00001f}};
+    its.indices = {{0,1,2}, {3,4,5}};
+    const TriangleMesh mesh(its);
+    TriangleSelector source(mesh);
+    source.deserialize(uniform_annotation_tree(6));
+    source.set_leaf_states([](const Vec3f& p, int facet) {
+        return EnforcerBlockerType(facet == 1 ? 4 : (p.x() < 5 ? 1 : (p.y() < 5 ? 2 : 0)));
+    });
+    for (unsigned state : {0u, 1u, 2u, 4u}) {
+        const auto exported = source.get_facets_strict_with_sources(EnforcerBlockerType(state));
+        for (size_t i = 0; i < exported.facets.indices.size(); ++i) {
+            const auto& face = exported.facets.indices[i];
+            const auto& vertices = exported.facets.vertices;
+            const Vec3f center = (vertices[face[0]] + vertices[face[1]] + vertices[face[2]]) / 3.f;
+            CHECK(unsigned(source.state_at(center, exported.source_facet_ids[i])) == state);
+        }
+    }
+}
+
+TEST_CASE("Measure direct brush leaf transforms against self queries", "[TraceryLeafTransformBenchmark][.benchmark]")
+{
+    indexed_triangle_set its;
+    its.vertices = {{0,0,0}, {16,0,0}, {0,16,0}};
+    its.indices = {{0,1,2}};
+    const TriangleMesh mesh(its);
+    TriangleSelector reference(mesh), optimized(mesh);
+    reference.deserialize(uniform_annotation_tree(9));
+    reference.set_leaf_states([](const Vec3f& point, int) {
+        return point.x() > 8 ? EnforcerBlockerType::ExtruderMax : EnforcerBlockerType(2);
+    });
+    const auto initial = reference.serialize();
+    using Clock = std::chrono::steady_clock;
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        reference.deserialize(initial);
+        optimized.deserialize(initial);
+        const auto begin = Clock::now();
+        reference.set_leaf_states([&](const Vec3f& point, int facet) {
+            const auto state = reference.state_at(point, facet);
+            return state == EnforcerBlockerType::ExtruderMax ? EnforcerBlockerType::NONE : state;
+        });
+        const auto middle = Clock::now();
+        optimized.transform_leaf_states([](EnforcerBlockerType state, const Vec3f&, int) {
+            return state == EnforcerBlockerType::ExtruderMax ? EnforcerBlockerType::NONE : state;
+        });
+        const auto end = Clock::now();
+        CHECK(optimized.serialize() == reference.serialize());
+        std::printf("TRACERY_LEAF_BENCH repeat=%d leaves=262144 lookup_ms=%.3f direct_ms=%.3f\n", repeat,
+            std::chrono::duration<double, std::milli>(middle - begin).count(),
+            std::chrono::duration<double, std::milli>(end - middle).count());
+    }
+}
+
+TEST_CASE("Source filtering preserves selection when blocked materials are absent", "[TraceryVector][TracerySourcePaint]")
+{
+    const TriangleMesh mesh = make_cube(5,5,1);
+    TriangleSelector source(mesh), selected(mesh);
+    source.set_facet(0, EnforcerBlockerType(2));
+    selected.set_facet(0, EnforcerBlockerType::ENFORCER);
+    selected.set_facet(1, EnforcerBlockerType::ENFORCER);
+    const auto before = selected.serialize();
+    tracery_filter_source_selection(selected, source, {EnforcerBlockerType(3)});
+    CHECK(selected.serialize() == before);
+    tracery_filter_source_selection(selected, source, {EnforcerBlockerType(2)});
+    CHECK_FALSE(selected.has_facets(EnforcerBlockerType(2)));
+    CHECK(selected.num_facets(EnforcerBlockerType::ENFORCER) == 1);
+    tracery_filter_source_selection(selected, source, {EnforcerBlockerType::NONE});
+    CHECK_FALSE(selected.has_facets(EnforcerBlockerType::ENFORCER));
 }
 
 TEST_CASE("Coalesced annotation export preserves colours holes and original facets", "[TraceryVector][TraceryCoalesce]")
@@ -452,6 +615,37 @@ TEST_CASE("Vector document snapshots reuse identical data without sharing mutabl
     editable.apply_vector_edit(mesh, annotations, {}, TraceryEdit::Regenerate);
     REQUIRE(after->material_ids() == std::vector<unsigned>{7});
     REQUIRE(editable.material_ids().empty());
+}
+
+TEST_CASE("Publishing a document reuses its immutable snapshot across nested refreshes", "[TraceryVector][TraceryCache]")
+{
+    const TriangleMesh mesh = make_cube(3, 4, 5);
+    std::vector<TraceryDocument::Annotation> annotations(8);
+    auto document = TraceryDocument::capture(mesh, annotations);
+    document.apply_vector_edit(mesh, annotations, {}, TraceryEdit::Paint);
+    const auto expected = document.encode();
+    const auto* vertices = document.base_mesh().its.vertices.data();
+    TraceryDocument::ReadCacheScope transaction;
+    const auto encoded = std::move(document).encode_cached();
+    REQUIRE(encoded == expected);
+    const auto snapshot = TraceryDocument::decode_cached(encoded);
+    // Moving the prepared document into the cache avoids a JSON round trip.
+    CHECK(snapshot->base_mesh().its.vertices.data() == vertices);
+    {
+        TraceryDocument::ReadCacheScope refresh;
+        CHECK(TraceryDocument::decode_cached(encoded) == snapshot);
+        auto editable = *snapshot;
+        editable.set_selection_reference(annotations[0]);
+        CHECK(editable.encode() == expected);
+    }
+    CHECK(TraceryDocument::decode(encoded).encode() == expected);
+    REQUIRE_THROWS(TraceryDocument::decode_cached("{broken-published-document}"));
+    auto invalid = *snapshot;
+    auto bad_reference = annotations[0];
+    bad_reference.bitstream.push_back(false);
+    bad_reference.triangles_to_split.emplace_back(int(mesh.its.indices.size()), 0);
+    invalid.set_selection_reference(std::move(bad_reference));
+    REQUIRE_THROWS(std::move(invalid).encode_cached());
 }
 
 TEST_CASE("Previous selection candidates preserve the original scan order", "[TraceryVector][TracerySelectionIndex]")

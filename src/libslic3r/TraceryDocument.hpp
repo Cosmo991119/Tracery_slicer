@@ -54,6 +54,9 @@ public:
     const std::vector<Annotation>&         last_annotations() const { return m_last; }
     bool                                   matches(const TriangleMesh& mesh) const;
     std::string                            encode() const;
+    // Consume a prepared document and publish the exact immutable snapshot to
+    // readers. Use a ReadCacheScope across preparation and commit for large data.
+    std::string                            encode_cached() &&;
     std::string                            encode_replay(const std::vector<Annotation>&         annotations,
                                                          const TriangleSelector::Tracery2DData& paint,
                                                          TraceryEdit                            edit) const;
@@ -63,6 +66,7 @@ public:
     void                                   remap_materials(const EnforcerBlockerStateMap& mapping);
 
 private:
+    static void cache_document(const std::string& data, std::shared_ptr<const TraceryDocument> document);
     std::vector<Regions> updated_channels(const TriangleMesh& current, const std::vector<Annotation>& annotations,
                                           const TriangleSelector::Tracery2DData& paint, TraceryEdit edit) const;
     Annotation m_selection_reference;
