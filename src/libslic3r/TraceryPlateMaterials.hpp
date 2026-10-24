@@ -40,6 +40,10 @@ TraceryPlateConversion prepare_tracery_plate_conversion(const Model& source, con
     const DynamicPrintConfig& inherited, const EnforcerBlockerStateMap& reindex,
     const EnforcerBlockerStateMap& conversion, int plate_index);
 
+// Whether a prepared material conversion can retain the object-list hierarchy.
+// Geometry is unchanged by prepare_tracery_plate_conversion; config values may change.
+bool tracery_material_conversion_preserves_list(const Model& before, const Model& after);
+
 // Palette state travels with undo snapshots because model references alone
 // cannot restore virtual colours after physical slots have been appended.
 struct TraceryPaletteSnapshot {

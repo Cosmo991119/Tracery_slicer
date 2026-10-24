@@ -50,6 +50,7 @@ using EnforcerBlockerStateMap = std::array<EnforcerBlockerType, (size_t)Enforcer
 // to recursively subdivide the triangles and make the selection finer.
 class TriangleSelector
 {
+    friend class TraceryVectorFill;
 protected:
     class Triangle;
     struct Vertex;
@@ -158,6 +159,7 @@ public:
         explicit SinglePointCursor(const Vec3f &center_, const Vec3f &source_, float radius_world, const Transform3d &trafo_, const ClippingPlane &clipping_plane_);
 
         Vec3f center;
+        friend class TriangleSelector;
     };
 
     class DoublePointCursor : public Cursor
@@ -182,6 +184,7 @@ public:
 
         Vec3f first_center;
         Vec3f second_center;
+        friend class TriangleSelector;
     };
 
     class Sphere : public SinglePointCursor
@@ -322,6 +325,9 @@ public:
     // Set a limit to the edge length, below which the edge will not be split by select_patch().
     // Called by select_patch() internally. Made public for debugging purposes, see TriangleSelectorGUI::render_debug().
     void set_edge_limit(float edge_limit);
+    // Read-only geometric brush export. Does not allocate subdivision nodes.
+    Tracery2DData project_cursor(int start_facet, const Cursor& cursor, const Transform3d& transform, float angle) const;
+    Tracery2DData seed_fill_regions() const;
 
     // Optional source-material restriction for interactive brushes and fill.
     // Generated paint and ordinary selectors (empty set) are unaffected.

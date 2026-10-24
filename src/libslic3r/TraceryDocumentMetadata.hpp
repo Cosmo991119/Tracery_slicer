@@ -54,7 +54,8 @@ inline int tracery_document_version(const std::string& data)
         {
             if (depth == 0) return false;
             if (version_key) {
-                if (value != 1 && value != 2 && value != 3) return false;
+                if (value != 1 && value != 2 && value != 3 && value != 4)
+                    return false;
                 version = int(value);
                 version_key = false;
             }

@@ -5,6 +5,8 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TraceryPartition.hpp"
 #include "libslic3r/TraceryRestore.hpp"
+#include "libslic3r/TraceryVectorSelection.hpp"
+#include "libslic3r/TraceryVectorFill.hpp"
 #include "libslic3r/TraceryPlateMaterials.hpp"
 
 #include "slic3r/GUI/I18N.hpp"
@@ -62,12 +64,29 @@ protected:
     TriangleSelectorGUI* get_edit_selector(size_t mesh_idx) override;
     const TriangleSelectorGUI* get_edit_selector(size_t mesh_idx) const override;
     size_t get_edit_selector_count() const override;
+    void                       apply_cursor_to_edit_selector(size_t                                    mesh_idx,
+                                                             int                                       facet,
+                                                             std::unique_ptr<TriangleSelector::Cursor> cursor,
+                                                             EnforcerBlockerType                       state,
+                                                             const Transform3d&                        transform,
+                                                             bool                                      split,
+                                                             float                                     angle) override;
     void apply_seed_fill_to_edit_selector(size_t mesh_idx, EnforcerBlockerType new_state) override;
+    bool select_vector_fill(size_t mesh_idx, const Vec3f& hit, int facet,
+                            const TriangleSelector::ClippingPlane& clip, bool apply) override;
+    void clear_fill_preview(size_t mesh_idx) override;
     ColorRGBA get_cursor_sphere_left_button_color() const override { return { 0.0f, 0.59f, 0.53f, 0.25f }; }
     ColorRGBA get_cursor_sphere_right_button_color() const override { return { 0.0f, 0.59f, 0.53f, 0.15f }; }
 
 private:
     void commit_material_selection();
+    void                                  apply_vector_stroke(size_t mesh_idx, const TriangleSelector::Tracery2DData& footprint);
+    std::vector<TraceryVectorSelection>   m_vector_masks, m_previous_vector_masks, m_pending_vector_masks;
+    bool                                  m_vector_stroke_pending = false;
+    void                                  render_vector_selection();
+    std::vector<std::shared_ptr<GLModel>> m_vector_selection_preview;
+    void                                  update_vector_selection_preview(size_t mesh_idx);
+
     void refresh_source_selection_policy(bool filter_masks = false);
     std::vector<std::set<EnforcerBlockerType>> m_source_selection_policy;
     bool on_init() override;
@@ -351,6 +370,9 @@ private:
     // selection. m_triangle_selectors stores only the stained-glass effect
     // flag, on the exact same leaf topology.
     std::vector<std::unique_ptr<TriangleSelectorPatch>> m_fill_reference_selectors;
+    // Destroy before the immutable selectors they reference.
+    std::vector<std::unique_ptr<TraceryVectorFill>> m_vector_fills;
+    std::optional<std::tuple<size_t, size_t, bool>> m_last_vector_fill_stroke;
     std::vector<std::vector<GeneratedFragment>> m_generated_fragments;
     std::vector<std::vector<GeneratedVoronoiRegion>> m_generated_voronoi_regions;
     std::vector<TracerySelection> m_tracery_selections;

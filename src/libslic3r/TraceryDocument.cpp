@@ -737,6 +737,26 @@ TriangleSelector::Tracery2DData TraceryDocument::surface_regions() const
     return partition_regions(m_base, m_channels.at(0));
 }
 
+TriangleSelector::Tracery2DData TraceryDocument::selection_regions() const
+{
+    Regions selected;
+    for (const auto& [facet, states] : m_channels.at(6))
+        for (const auto& [state, paths] : states)
+            if (state != 0)
+                append(selected[facet][1], paths);
+    return partition_regions(m_base, selected);
+}
+
+void TraceryDocument::set_vector_selection(const TriangleSelector::Tracery2DData& selection)
+{
+    m_channels[6]         = paint_regions(m_base, m_sources, selection);
+    m_channels[7]         = m_channels[6];
+    m_last[6]             = {};
+    m_last[7]             = {};
+    m_selection_reference = {};
+    m_vector_selection    = true;
+}
+
 std::vector<unsigned> TraceryDocument::material_ids() const
 {
     std::set<unsigned> ids;
@@ -877,10 +897,12 @@ std::string TraceryDocument::encode() const
 TraceryDocument TraceryDocument::decode(const std::string& data)
 {
     const Json root = Json::parse(data);
-    if (root.at("version").get<int>() != 1 && root.at("version").get<int>() != 2 && root.at("version").get<int>() != 3)
+    if (root.at("version").get<int>() != 1 && root.at("version").get<int>() != 2 && root.at("version").get<int>() != 3 &&
+        root.at("version").get<int>() != 4)
         throw std::runtime_error("Unsupported stained-glass editing data version");
     TraceryDocument result;
     result.m_vector  = root.at("version").get<int>() >= 2;
+    result.m_vector_selection = root.at("version").get<int>() == 4;
     result.m_base    = TriangleMesh(read_mesh(root.at("base")));
     result.m_derived = read_mesh(root.at("derived"));
     result.m_sources = root.at("sources").get<std::vector<int>>();
@@ -911,7 +933,7 @@ TraceryDocument TraceryDocument::decode(const std::string& data)
         result.m_last.push_back(read_annotation(a, result.m_sources.size()));
     if (root.contains("selection_reference"))
         result.m_selection_reference = read_annotation(root.at("selection_reference"), result.m_sources.size());
-    if (root.at("version").get<int>() == 3) {
+    if (root.at("version").get<int>() == 3 || (root.at("version").get<int>() == 4 && root.contains("through"))) {
         if (result.m_channels.size() != 9)
             throw std::runtime_error("Invalid through surface channels");
         result.m_slice_regions = std::move(result.m_channels.back());

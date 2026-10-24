@@ -158,3 +158,100 @@ TEST_CASE("Dense window partitions preserve closed mesh topology", "[TraceryDocu
     const auto result   = document.rebuild(mesh, annotations, regions, TraceryEdit::Paint);
     require_closed_partition(result);
 }
+
+#include "libslic3r/TraceryVectorSelection.hpp"
+#include <chrono>
+#include <cstdio>
+
+TEST_CASE("Window vector strokes keep the base mesh and avoid selection subdivision", "[TraceryVectorSelection][WindowVector]")
+{
+    Model model;
+    load_window(model);
+    const auto&      volume = *model.objects.front()->volumes.front();
+    const auto&      mesh   = volume.mesh();
+    TriangleSelector selector(mesh);
+    const auto       before   = selector.serialize();
+    const auto&      triangle = mesh.its.indices[4044];
+    const Vec3f      center   = (mesh.its.vertices[triangle[0]] + mesh.its.vertices[triangle[1]] + mesh.its.vertices[triangle[2]]) / 3.f;
+    TraceryVectorSelection                   mask;
+    std::vector<TraceryDocument::Annotation> annotations(8);
+    annotations[0] = annotations[5] = volume.mmu_segmentation_facets.get_data();
+    auto document                   = TraceryDocument::capture(mesh, annotations);
+    for (int stroke = 0; stroke < 4; ++stroke) {
+        const bool  erase     = stroke % 2 != 0;
+        const float radius    = erase ? 3.f : 8.f;
+        const auto  start     = std::chrono::steady_clock::now();
+        auto        cursor    = TriangleSelector::SinglePointCursor::cursor_factory(center, center + Vec3f(0, 0, 100), radius,
+                                                                                    TriangleSelector::CursorType::CIRCLE, Transform3d::Identity(),
+                                                                                    {});
+        const auto  footprint = TraceryVectorSelection::from_data(mesh, selector.project_cursor(4044, *cursor, Transform3d::Identity(), 0));
+        const auto  old       = mask;
+        mask.apply(footprint, erase);
+        const auto   delta   = erase ? old.difference(mask) : mask.difference(old);
+        const auto   data    = delta.colored(mesh, annotations[0]);
+        const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        size_t       count   = 0;
+        for (const auto& f : data)
+            count += f.regions.size();
+        std::fprintf(
+            stderr,
+            "VECTOR_SELECTION_BENCH stroke=%d erase=%d source_facets=%zu touched_facets=%zu temporary_triangles=%zu elapsed_ms=%.3f\n",
+            stroke, int(erase), mesh.its.indices.size(), delta.regions().size(), count, elapsed);
+        CHECK(selector.serialize() == before);
+        REQUIRE_FALSE(delta.empty());
+        CHECK(count < 100000);
+        auto paint = delta.triangulated(mesh);
+        for (auto& f : paint)
+            for (auto& r : f.regions)
+                r.color = EnforcerBlockerType(3);
+        const auto result = document.apply_vector_edit(mesh, annotations, paint, erase ? TraceryEdit::Erase : TraceryEdit::Paint);
+        document.set_vector_selection(mask.triangulated(mesh));
+        document = TraceryDocument::decode(document.encode());
+        CHECK(result.mesh.vertices == mesh.its.vertices);
+        CHECK(result.mesh.indices == mesh.its.indices);
+        CHECK(std::abs(TraceryVectorSelection::from_data(mesh, document.selection_regions()).area() - mask.area()) < .05);
+    }
+}
+
+#include "libslic3r/TraceryVectorFill.hpp"
+#include <iostream>
+TEST_CASE("Window vector bucket matches source colour regions without changing the mesh", "[TraceryVectorFill][WindowVector][TraceryFillBenchmark]")
+{
+    Model model;
+    load_window(model);
+    const auto& volume = *model.objects.front()->volumes.front();
+    const auto& mesh = volume.mesh();
+    TriangleSelector source(mesh);
+    source.deserialize(volume.mmu_segmentation_facets.get_data(), false);
+    const auto before = source.serialize();
+    TraceryVectorFill fill(source);
+    auto timed = [](auto&& fn) {
+        const auto start = std::chrono::steady_clock::now();
+        fn();
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    };
+    for (int facet : {4044, 903, 126}) {
+        const auto& t = mesh.its.indices[facet];
+        const Vec3f hit = (mesh.its.vertices[t[0]] + mesh.its.vertices[t[1]] + mesh.its.vertices[t[2]]) / 3.f;
+        TriangleSelector reference(mesh);
+        reference.deserialize(before, false);
+        TriangleSelector::Tracery2DData old;
+        const double legacy = timed([&] {
+            reference.bucket_fill_select_triangles(hit, facet, {}, 30, true, true);
+            old = reference.seed_fill_regions();
+        });
+        const double query = timed([&] { fill.select(hit, facet, {}, 30, true); });
+        const auto expected = TraceryVectorSelection::from_data(mesh, old);
+        const auto actual = TraceryVectorSelection::from_data(mesh, fill.regions());
+        CHECK(actual.difference(expected).area() < 1e-5);
+        CHECK(expected.difference(actual).area() < 1e-5);
+        const double repeat = timed([&] {
+            for (int i = 0; i < 100; ++i)
+                fill.select(hit, facet, {}, 30, true);
+        }) / 100.;
+        std::cout << "TRACERY_FILL_WINDOW facet=" << facet << " legacy_ms=" << legacy
+                  << " vector_query_ms=" << query << " vector_cached_ms=" << repeat
+                  << " regions=" << fill.regions().size() << '\n';
+    }
+    CHECK(source.serialize() == before);
+}

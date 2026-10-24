@@ -451,6 +451,7 @@ public:
     void on_plate_added(PartPlate* part_plate);
     void on_plate_deleted(int plate_index);
     void reload_all_plates(bool notify_partplate = false);
+    bool refresh_after_tracery_material_conversion(const Model& previous);
     void on_plate_selected(int plate_index);
     void notify_instance_updated(int obj_idx);
     void object_config_options_changed(const ObjectVolumeID& ov_id);

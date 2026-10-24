@@ -633,9 +633,12 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                     const Transform3d   trafo_matrix = m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView ?
                         mi->get_assemble_transformation().get_matrix() * mo->volumes[m_rr.mesh_id]->get_matrix() :
                         mi->get_transformation().get_matrix() * mo->volumes[m_rr.mesh_id]->get_matrix();
-                    get_edit_selector(m_rr.mesh_id)->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), trafo_matrix_not_translate, this->get_clipping_plane_in_volume_coordinates(trafo_matrix), m_smart_fill_angle,
-                                                                                   m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, true);
-                    get_edit_selector(m_rr.mesh_id)->request_update_render_data();
+                    const auto& clip = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
+                    if (!select_vector_fill(m_rr.mesh_id, m_rr.hit, int(m_rr.facet), clip, false)) {
+                        get_edit_selector(m_rr.mesh_id)->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), trafo_matrix_not_translate, clip, m_smart_fill_angle,
+                                                                                       m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, true);
+                        get_edit_selector(m_rr.mesh_id)->request_update_render_data();
+                    }
                     m_seed_fill_last_mesh_id = m_rr.mesh_id;
                 }
                 return true;
@@ -742,8 +745,9 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
                 std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::SinglePointCursor::cursor_factory(phr.z_world,
                     camera_pos, m_cursor_height, trafo_matrix, clp);
-                get_edit_selector(mesh_idx)->select_patch(int(phr.first_facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate,
-                    m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
+                apply_cursor_to_edit_selector(mesh_idx, int(phr.first_facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate,
+                                              m_triangle_splitting_enabled,
+                                              m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
 
                 get_edit_selector(mesh_idx)->request_update_render_data(true);
                 m_last_mouse_click = _mouse_position;
@@ -787,11 +791,17 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
             assert(mesh_idx < int(get_edit_selector_count()));
             const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
+            bool vector_fill_handled = false;
             if (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL || (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)) {
                 for(const ProjectedMousePosition &projected_mouse_position : projected_mouse_positions) {
                     assert(projected_mouse_position.mesh_idx == mesh_idx);
                     const Vec3f mesh_hit = projected_mouse_position.mesh_hit;
                     const int facet_idx = int(projected_mouse_position.facet_idx);
+                    if (select_vector_fill(mesh_idx, mesh_hit, facet_idx, clp, true)) {
+                        vector_fill_handled = true;
+                        m_seed_fill_last_mesh_id = int(mesh_idx);
+                        continue;
+                    }
                     apply_seed_fill_to_edit_selector(mesh_idx, new_state);
                     if (m_tool_type == ToolType::SMART_FILL)
                         get_edit_selector(mesh_idx)->seed_fill_select_triangles(mesh_hit, facet_idx, trafo_matrix_not_translate, clp, m_smart_fill_angle,
@@ -813,18 +823,22 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                     std::unique_ptr<TriangleSelector::Cursor> cursor         = TriangleSelector::SinglePointCursor::cursor_factory(first_position.mesh_hit,
                                                                                                                                    camera_pos, m_cursor_radius,
                                                                                                                                    m_cursor_type, trafo_matrix, clp);
-                    get_edit_selector(mesh_idx)->select_patch(int(first_position.facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate,
-                                                                 m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
+                    apply_cursor_to_edit_selector(mesh_idx, int(first_position.facet_idx), std::move(cursor), new_state,
+                                                  trafo_matrix_not_translate, m_triangle_splitting_enabled,
+                                                  m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
                 } else {
                     for (auto first_position_it = projected_mouse_positions.cbegin(); first_position_it != projected_mouse_positions.cend() - 1; ++first_position_it) {
                         auto second_position_it = first_position_it + 1;
                         std::unique_ptr<TriangleSelector::Cursor> cursor = TriangleSelector::DoublePointCursor::cursor_factory(first_position_it->mesh_hit, second_position_it->mesh_hit, camera_pos, m_cursor_radius, m_cursor_type, trafo_matrix, clp);
-                        get_edit_selector(mesh_idx)->select_patch(int(first_position_it->facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate, m_triangle_splitting_enabled, m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
+                        apply_cursor_to_edit_selector(mesh_idx, int(first_position_it->facet_idx), std::move(cursor), new_state,
+                                                      trafo_matrix_not_translate, m_triangle_splitting_enabled,
+                                                      m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);
                     }
                 }
             }
 
-            get_edit_selector(mesh_idx)->request_update_render_data(true);
+            if (!vector_fill_handled)
+                get_edit_selector(mesh_idx)->request_update_render_data(true);
 
             m_last_mouse_click = _mouse_position;
         }
@@ -868,9 +882,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
         auto seed_fill_unselect_all = [this]() {
             for (size_t mesh_idx = 0; mesh_idx < get_edit_selector_count(); ++mesh_idx) {
-                TriangleSelectorGUI* triangle_selector = get_edit_selector(mesh_idx);
-                triangle_selector->seed_fill_unselect_all_triangles();
-                triangle_selector->request_update_render_data();
+                clear_fill_preview(mesh_idx);
             }
         };
 
@@ -892,6 +904,10 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
         assert(m_rr.mesh_id < int(get_edit_selector_count()));
         const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
+        if (select_vector_fill(m_rr.mesh_id, m_rr.hit, int(m_rr.facet), clp, false)) {
+            m_seed_fill_last_mesh_id = m_rr.mesh_id;
+            return true;
+        }
         if (m_tool_type == ToolType::SMART_FILL)
             get_edit_selector(m_rr.mesh_id)->seed_fill_select_triangles(m_rr.hit, int(m_rr.facet), trafo_matrix_not_translate, clp, m_smart_fill_angle,
                                                                            m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f);

@@ -467,3 +467,60 @@ TEST_CASE("Previewing a full palette leaves shared recipes and stable identities
     REQUIRE(fresh.mixed_filaments().size() == 1);
     CHECK(preview == fresh.mixed_filaments().front().display_color);
 }
+
+TEST_CASE("Material-only plate conversion preserves the object list hierarchy", "[TraceryPlate][TraceryListRefresh]")
+{
+    Model model;
+    auto* object = model.add_object("painted", "", TriangleMesh(its_make_cube(10., 10., 1.)));
+    object->add_instance();
+    object->config.set_key_value("extruder", new ConfigOptionInt(2));
+    object->volumes[0]->config.set_key_value("extruder", new ConfigOptionInt(2));
+    object->layer_config_ranges[{0., 1.}].set_key_value("extruder", new ConfigOptionInt(2));
+    auto* outside = model.add_object("other plate", "", TriangleMesh(its_make_cube(5., 5., 1.)));
+    outside->add_instance();
+    outside->config.set_key_value("extruder", new ConfigOptionInt(3));
+    auto mapping = tracery_identity_material_map();
+    mapping[2] = EnforcerBlockerType(8);
+    auto reindex = tracery_identity_material_map();
+    reindex[3] = EnforcerBlockerType(9);
+    auto plan = prepare_tracery_plate_conversion(model, {{0, {0}}}, DynamicPrintConfig{}, reindex, mapping, 0);
+    REQUIRE(tracery_material_conversion_preserves_list(model, *plan.model));
+    CHECK(plan.model->objects[0]->config.extruder() == 8);
+    CHECK(plan.model->objects[1]->config.extruder() == 9);
+    CHECK(plan.model->objects[0]->volumes[0]->config.extruder() == 8);
+    CHECK(plan.model->objects[0]->layer_config_ranges.begin()->second.extruder() == 8);
+    CHECK(model.objects[0] != plan.model->objects[0]); // UI pointers still need rebinding.
+}
+
+TEST_CASE("Structural plate conversions require a full object list refresh", "[TraceryPlate][TraceryListRefresh]")
+{
+    Model before;
+    auto* object = before.add_object("shared", "", TriangleMesh(its_make_cube(10., 10., 1.)));
+    object->add_instance();
+    object->add_instance()->set_offset(Vec3d(20., 0., 0.));
+    object->add_volume(TriangleMesh(its_make_cube(2., 2., 1.)));
+    Model after(before);
+    REQUIRE(tracery_material_conversion_preserves_list(before, after));
+    SECTION("Isolation moves one instance to an independent object") {
+        after.isolate_instances(0, {0});
+    }
+    SECTION("Reordered volumes have identical counts but different identities") {
+        std::swap(after.objects[0]->volumes[0], after.objects[0]->volumes[1]);
+    }
+    SECTION("Reordered instances have identical counts but different identities") {
+        std::swap(after.objects[0]->instances[0], after.objects[0]->instances[1]);
+    }
+    SECTION("Inherited settings add a new settings category") {
+        after.objects[0]->config.set_key_value("support_filament", new ConfigOptionInt(2));
+    }
+    SECTION("Added layer ranges need new tree nodes") {
+        after.objects[0]->layer_config_ranges[{0., 1.}].set_key_value("extruder", new ConfigOptionInt(2));
+    }
+    SECTION("Moved instances may belong to a different plate") {
+        after.objects[0]->instances[0]->set_offset(Vec3d(300., 0., 0.));
+    }
+    SECTION("Changed mesh needs refreshed mesh warnings") {
+        after.objects[0]->volumes[0]->set_mesh(TriangleMesh(its_make_cube(12., 12., 1.)));
+    }
+    CHECK_FALSE(tracery_material_conversion_preserves_list(before, after));
+}

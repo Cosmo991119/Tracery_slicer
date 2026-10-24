@@ -248,8 +248,33 @@ protected:
     virtual TriangleSelectorGUI* get_edit_selector(size_t mesh_idx) { return m_triangle_selectors[mesh_idx].get(); }
     virtual const TriangleSelectorGUI* get_edit_selector(size_t mesh_idx) const { return m_triangle_selectors[mesh_idx].get(); }
     virtual size_t get_edit_selector_count() const { return m_triangle_selectors.size(); }
+    void                               cancel_paint_stroke()
+    {
+        m_button_down      = Button::None;
+        m_last_mouse_click = Vec2d::Zero();
+    }
+    virtual void apply_cursor_to_edit_selector(size_t                                    mesh_idx,
+                                               int                                       facet,
+                                               std::unique_ptr<TriangleSelector::Cursor> cursor,
+                                               EnforcerBlockerType                       state,
+                                               const Transform3d&                        transform,
+                                               bool                                      split,
+                                               float                                     angle)
+    {
+        get_edit_selector(mesh_idx)->select_patch(facet, std::move(cursor), state, transform, split, angle);
+    }
     virtual void apply_seed_fill_to_edit_selector(size_t mesh_idx, EnforcerBlockerType new_state)
     { get_edit_selector(mesh_idx)->seed_fill_apply_on_triangles(new_state); }
+
+    // Vector-based effects can handle both hover and click without touching
+    // the ordinary painter's seed-fill implementation or selection tree.
+    virtual bool select_vector_fill(size_t mesh_idx, const Vec3f& hit, int facet,
+                                    const TriangleSelector::ClippingPlane& clip, bool apply) { return false; }
+    virtual void clear_fill_preview(size_t mesh_idx)
+    {
+        get_edit_selector(mesh_idx)->seed_fill_unselect_all_triangles();
+        get_edit_selector(mesh_idx)->request_update_render_data();
+    }
 
     float m_cursor_radius = 1.f;
     // BBS

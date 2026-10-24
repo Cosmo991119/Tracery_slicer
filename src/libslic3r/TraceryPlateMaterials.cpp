@@ -225,6 +225,38 @@ TraceryPlateConversion prepare_tracery_plate_conversion(const Model& source, con
                 item.extruder = int(mapped_id(unsigned(item.extruder), plate == plate_index ? conversion : reindex));
     return result;
 }
+bool tracery_material_conversion_preserves_list(const Model& before, const Model& after)
+{
+    if (before.objects.size() != after.objects.size())
+        return false;
+    for (size_t i = 0; i < before.objects.size(); ++i) {
+        const ModelObject& a = *before.objects[i];
+        const ModelObject& b = *after.objects[i];
+        if (a.id() != b.id() || a.name != b.name || a.printable != b.printable || a.config.keys() != b.config.keys() ||
+            a.volumes.size() != b.volumes.size() || a.instances.size() != b.instances.size() ||
+            a.layer_config_ranges.size() != b.layer_config_ranges.size())
+            return false;
+        for (size_t v = 0; v < a.volumes.size(); ++v) {
+            const ModelVolume& av = *a.volumes[v];
+            const ModelVolume& bv = *b.volumes[v];
+            if (av.id() != bv.id() || av.name != bv.name || av.type() != bv.type() || av.mesh_ptr() != bv.mesh_ptr() ||
+                av.config.keys() != bv.config.keys() || av.get_matrix().matrix() != bv.get_matrix().matrix())
+                return false;
+        }
+        for (size_t j = 0; j < a.instances.size(); ++j)
+            if (a.instances[j]->id() != b.instances[j]->id() || a.instances[j]->printable != b.instances[j]->printable ||
+                a.instances[j]->get_matrix().matrix() != b.instances[j]->get_matrix().matrix())
+                return false;
+        auto br = b.layer_config_ranges.begin();
+        for (const auto& ar : a.layer_config_ranges) {
+            if (ar.first != br->first || ar.second.keys() != br->second.keys())
+                return false;
+            ++br;
+        }
+    }
+    return true;
+}
+
 std::shared_ptr<const TraceryPaletteSnapshot> capture_tracery_palette(const DynamicPrintConfig& config,
     const std::vector<std::string>& presets, const MixedFilamentManager& manager, const DynamicPrintConfig* print_config)
 {

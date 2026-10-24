@@ -5,6 +5,7 @@
 #include "slic3r/GUI/GUI_App.hpp"
 #include "slic3r/GUI/ImGuiWrapper.hpp"
 #include "slic3r/GUI/Camera.hpp"
+#include "slic3r/GUI/OpenGLManager.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/3DScene.hpp"
 #include "slic3r/GUI/MixedColorMatchHelpers.hpp"
@@ -14,6 +15,7 @@
 #include "libslic3r/TraceryDocument.hpp"
 #include "libslic3r/TraceryBasePaint.hpp"
 #include "libslic3r/TraceryDisjointSet.hpp"
+#include "libslic3r/TracerySurfaceSampling.hpp"
 #include "libslic3r/TraceryPreviousFacetIndex.hpp"
 #include "libslic3r/TraceryPerformance.hpp"
 #include "libslic3r/TraceryInteractionTiming.hpp"
@@ -461,7 +463,9 @@ struct GLGizmoTracery::PreparedGeneration
 };
 
 struct GLGizmoTracery::GenerationCache : TraceryGenerationCache<PreparedGeneration>
-{};
+{
+    std::vector<TraceryVectorSelection> masks;
+};
 
 struct GLGizmoTracery::ColorRegionIntegrity {
     size_t immutable_hash = 0;
@@ -538,6 +542,7 @@ bool GLGizmoTracery::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_po
 {
     refresh_source_selection_policy();
     if (action == SLAGizmoEventType::LeftDown || action == SLAGizmoEventType::RightDown) {
+        m_last_vector_fill_stroke.reset();
         // Holding Shift has the same effect as clearing the selection in the
         // painter base. Remember the operation for the commit that runs on
         // mouse-up, when the base class has already applied the stroke.
@@ -545,7 +550,19 @@ bool GLGizmoTracery::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_po
             (action == SLAGizmoEventType::LeftDown ? m_eraser_mode : !m_eraser_mode);
     }
 
-    const bool handled = GLGizmoPainterBase::gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+    bool handled = false;
+    try {
+        handled = GLGizmoPainterBase::gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+    } catch (const std::exception& error) {
+        m_pending_vector_masks.clear();
+        m_vector_selection_preview.clear();
+        m_vector_stroke_pending = false;
+        m_active_stroke_erases  = false;
+        cancel_paint_stroke();
+        m_parent.set_as_dirty();
+        wxMessageBox(from_u8(error.what()), _L("Stained glass"), wxOK | wxICON_ERROR);
+        return true;
+    }
 
     if (action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::RightUp)
         m_active_stroke_erases = false;
@@ -561,13 +578,12 @@ std::string GLGizmoTracery::on_get_name() const
 void GLGizmoTracery::render_painter_gizmo()
 {
     refresh_source_selection_policy();
-    // This is an editing overlay only. The final stained-glass colours still
-    // come exclusively from ordinary MMU paint; no generated fragment is
-    // rendered here.
+    // The document renderer owns final colours; the pending brush only adds an outline.
     const Selection& selection = m_parent.get_selection();
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glEnable(GL_DEPTH_TEST));
     render_triangles(selection);
+    render_vector_selection();
     m_c->object_clipper()->render_cut();
     m_c->instances_hider()->render_cut();
     render_cursor();
@@ -600,17 +616,168 @@ size_t GLGizmoTracery::get_edit_selector_count() const
     return m_fill_reference_selectors.size();
 }
 
-void GLGizmoTracery::apply_seed_fill_to_edit_selector(size_t mesh_idx, EnforcerBlockerType new_state)
+void GLGizmoTracery::apply_cursor_to_edit_selector(size_t                                    mesh_idx,
+                                                   int                                       facet,
+                                                   std::unique_ptr<TriangleSelector::Cursor> cursor,
+                                                   EnforcerBlockerType,
+                                                   const Transform3d& transform,
+                                                   bool,
+                                                   float angle)
 {
-    if (mesh_idx < m_fill_reference_selectors.size() && mesh_idx < m_triangle_selectors.size()) {
-        // Preserve the material selector verbatim. Only its transient seed
-        // selection is copied into the companion stained-glass flag layer.
-        m_fill_reference_selectors[mesh_idx]->apply_seed_fill_to(*m_triangle_selectors[mesh_idx],
-            m_active_stroke_erases ? EnforcerBlockerType::NONE : EnforcerBlockerType::ENFORCER);
-        m_triangle_selectors[mesh_idx]->request_update_render_data(true);
-        return;
+    apply_vector_stroke(mesh_idx, get_edit_selector(mesh_idx)->project_cursor(facet, *cursor, transform, angle));
+}
+
+void GLGizmoTracery::apply_seed_fill_to_edit_selector(size_t mesh_idx, EnforcerBlockerType)
+{
+    apply_vector_stroke(mesh_idx, get_edit_selector(mesh_idx)->seed_fill_regions());
+}
+
+bool GLGizmoTracery::select_vector_fill(size_t mesh_idx, const Vec3f& hit, int facet,
+                                       const TriangleSelector::ClippingPlane& clip, bool apply)
+{
+    const bool connected = m_tool_type == ToolType::BUCKET_FILL;
+    if (!connected && !(m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER))
+        return false;
+    TraceryPerformanceScope perf(apply ? "vector_fill.click" : "vector_fill.hover");
+    perf.count("connected", connected);
+    perf.count("erase", apply && m_active_stroke_erases);
+    auto& fill = *m_vector_fills.at(mesh_idx);
+    perf.stage("fill.select");
+    const auto& regions = fill.select(hit, facet, clip, connected ? m_smart_fill_angle : -1.f, connected);
+    perf.stage("fill.preview");
+    if (fill.show_preview())
+        get_edit_selector(mesh_idx)->request_update_render_data();
+    if (apply) {
+        const auto key = std::make_tuple(mesh_idx, fill.revision(), m_active_stroke_erases);
+        const bool duplicate = m_last_vector_fill_stroke && *m_last_vector_fill_stroke == key;
+        perf.count("duplicate_selection_skipped", duplicate);
+        if (!duplicate) {
+            perf.stage("fill.apply_vector_stroke");
+            apply_vector_stroke(mesh_idx, regions);
+            m_last_vector_fill_stroke = key;
+        }
     }
-    GLGizmoPainterBase::apply_seed_fill_to_edit_selector(mesh_idx, new_state);
+    return true;
+}
+
+void GLGizmoTracery::clear_fill_preview(size_t mesh_idx)
+{
+    if (mesh_idx < m_vector_fills.size() && m_vector_fills[mesh_idx]->clear_preview())
+        get_edit_selector(mesh_idx)->request_update_render_data();
+}
+
+void GLGizmoTracery::apply_vector_stroke(size_t mesh_idx, const TriangleSelector::Tracery2DData& footprint)
+{
+    if (footprint.empty())
+        return;
+    TraceryPerformanceScope performance("vector_brush_update");
+    const auto*             object = m_c->selection_info()->model_object();
+    size_t                  index  = 0;
+    for (const auto* volume : object->volumes) {
+        if (!volume->is_model_part())
+            continue;
+        if (index++ != mesh_idx)
+            continue;
+        if (!m_vector_stroke_pending) {
+            m_pending_vector_masks = m_vector_masks;
+            m_pending_vector_masks.resize(m_triangle_selectors.size());
+            m_vector_stroke_pending = true;
+        }
+        auto stroke = TraceryVectorSelection::from_data(volume->mesh(), footprint);
+        if (mesh_idx < m_source_selection_policy.size() && !m_source_selection_policy[mesh_idx].empty()) {
+            const auto& base = mesh_idx < m_stained_glass_base_paint_data.size() ? m_stained_glass_base_paint_data[mesh_idx] :
+                                                                                   volume->mmu_segmentation_facets.get_data();
+            stroke           = TraceryVectorSelection::from_data(volume->mesh(),
+                                                                 stroke.colored(volume->mesh(), base, m_source_selection_policy[mesh_idx]));
+        }
+        m_pending_vector_masks[mesh_idx].apply(stroke, m_active_stroke_erases);
+        update_vector_selection_preview(mesh_idx);
+        break;
+    }
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoTracery::update_vector_selection_preview(size_t mesh_idx)
+{
+    const auto* object = m_c->selection_info()->model_object();
+    m_vector_selection_preview.resize(m_pending_vector_masks.size());
+    size_t index = 0;
+    for (const auto* volume : object->volumes) {
+        if (!volume->is_model_part())
+            continue;
+        if (index++ != mesh_idx)
+            continue;
+        GLModel::Geometry data;
+        data.format = {GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3};
+        data.color  = ColorRGBA::WHITE();
+        TraceryPerformanceScope         performance("vector_selection_preview");
+        std::vector<TracerySurfaceEdge> edges;
+        for (const auto& [facet, paths] : m_pending_vector_masks[mesh_idx].regions()) {
+            const auto frame = TraceryVectorSelection::frame(volume->mesh(), facet);
+            for (const auto& path : paths)
+                for (size_t i = 0; i < path.points.size(); ++i) {
+                    const auto point = [&](size_t j) -> Vec3d {
+                        const auto& p = path.points[j];
+                        return frame.origin + unscale<double>(p.x()) * frame.axis_u + unscale<double>(p.y()) * frame.axis_v;
+                    };
+                    edges.push_back({mesh_idx, edges.size(), point(i), point((i + 1) % path.points.size())});
+                }
+        }
+        unsigned   count    = 0;
+        const auto boundary = tracery_exposed_edges(edges);
+        performance.count("outline_edges", boundary.size());
+        for (const auto& edge : boundary) {
+            const Vec3f a = edge.first.cast<float>(), b = edge.second.cast<float>();
+            data.add_vertex(a);
+            data.add_vertex(b);
+            data.add_line(count, count + 1);
+            count += 2;
+        }
+        auto preview = std::make_shared<GLModel>();
+        if (!data.is_empty())
+            preview->init_from(std::move(data));
+        m_vector_selection_preview[mesh_idx] = std::move(preview);
+        break;
+    }
+}
+
+void GLGizmoTracery::render_vector_selection()
+{
+    if (!m_vector_stroke_pending)
+        return;
+    auto* shader = wxGetApp().get_shader("mm_contour");
+    if (!shader)
+        return;
+    auto* previous = wxGetApp().get_current_shader();
+    if (previous)
+        previous->stop_using();
+    shader->start_using();
+    ScopeGuard restore([&] {
+        shader->stop_using();
+        if (previous)
+            previous->start_using();
+    });
+    shader->set_uniform("offset", OpenGLManager::get_gl_info().is_mesa() ? 0.0005 : 0.00001);
+    const Camera& camera = wxGetApp().plater()->get_camera();
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+    const auto* object   = m_c->selection_info()->model_object();
+    const auto* instance = object->instances[m_parent.get_selection().get_instance_idx()];
+    size_t      index    = 0;
+    for (const auto* volume : object->volumes) {
+        if (!volume->is_model_part())
+            continue;
+        const size_t current = index++;
+        if (current >= m_vector_selection_preview.size() || !m_vector_selection_preview[current])
+            continue;
+        Transform3d transform = instance->get_transformation().get_matrix() * volume->get_matrix();
+        if (m_parent.get_canvas_type() == GLCanvas3D::CanvasAssembleView) {
+            transform = instance->get_assemble_transformation().get_matrix() * volume->get_matrix();
+            transform.translate(volume->get_transformation().get_offset() * (GLVolume::explosion_ratio - 1.0) +
+                                instance->get_offset_to_assembly() * (GLVolume::explosion_ratio - 1.0));
+        }
+        shader->set_uniform("view_model_matrix", camera.get_view_matrix() * transform);
+        m_vector_selection_preview[current]->render();
+    }
 }
 
 #ifndef NDEBUG
@@ -916,8 +1083,11 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
         const std::wstring label(1, display_icons[i]);
         const bool selected = m_current_tool == tool_ids[i];
         push_tool_style(selected);
-        if (ImGui::Button(into_u8(label).c_str()))
+        if (ImGui::Button(into_u8(label).c_str()) && m_current_tool != tool_ids[i]) {
+            for (size_t mesh_idx = 0; mesh_idx < m_vector_fills.size(); ++mesh_idx)
+                clear_fill_preview(mesh_idx);
             m_current_tool = tool_ids[i];
+        }
         pop_tool_style();
         if (ImGui::IsItemHovered())
             m_imgui->tooltip(tool_tips[i], ImGui::GetFontSize() * 20.0f);
@@ -957,18 +1127,14 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
             const bool angle_changed = m_imgui->bbl_slider_float_style("##tracery_smart_fill_angle", &m_smart_fill_angle,
                 SmartFillAngleMin, SmartFillAngleMax, "%.0f", 1.0f, true);
             if (edge_detection_changed || angle_changed) {
-                for (const auto& selector : m_fill_reference_selectors) {
-                    selector->seed_fill_unselect_all_triangles();
-                    selector->request_update_render_data();
-                }
+                for (size_t mesh_idx = 0; mesh_idx < m_vector_fills.size(); ++mesh_idx)
+                    clear_fill_preview(mesh_idx);
             }
         } else {
             m_smart_fill_angle = -1.f;
             if (edge_detection_changed) {
-                for (const auto& selector : m_fill_reference_selectors) {
-                    selector->seed_fill_unselect_all_triangles();
-                    selector->request_update_render_data();
-                }
+                for (size_t mesh_idx = 0; mesh_idx < m_vector_fills.size(); ++mesh_idx)
+                    clear_fill_preview(mesh_idx);
             }
         }
     }
@@ -1011,8 +1177,8 @@ void GLGizmoTracery::regenerate_stained_glass(bool randomize)
 {
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Regenerate stained glass", UndoRedo::SnapshotType::GizmoAction);
     m_fragment_density       = m_density_input;
-    const bool has_selection = std::any_of(m_triangle_selectors.begin(), m_triangle_selectors.end(),
-        [](const auto& selector) { return selector->has_facets(EnforcerBlockerType::ENFORCER); });
+    const bool has_selection = std::any_of(m_vector_masks.begin(), m_vector_masks.end(),
+        [](const auto& mask) { return !mask.empty(); });
     if (has_selection) {
         m_active_stroke_erases = false;
         m_regeneration_requested = true;
@@ -1121,6 +1287,10 @@ void GLGizmoTracery::clear_stained_glass_editor()
     m_selection_modified = true;
     m_mask_data.clear();
     m_previous_mask_data.clear();
+    m_vector_masks.clear();
+    m_previous_vector_masks.clear();
+    m_pending_vector_masks.clear();
+    m_vector_stroke_pending = false;
     m_stained_glass_base_paint_data.clear();
     m_tracery_selections.clear();
     m_generated_fragments.clear();
@@ -1137,16 +1307,26 @@ void GLGizmoTracery::clear_stained_glass_editor()
 void GLGizmoTracery::update_model_object()
 {
     TraceryPerformanceScope performance("stroke");
+    // 0: surface brush, 1: volume brush, 2: face, 3: connected fill.
+    performance.count("selection_tool", m_tool_type == ToolType::BUCKET_FILL ? 3 :
+        (m_cursor_type == TriangleSelector::CursorType::POINTER ? 2 :
+         (m_cursor_type == TriangleSelector::CursorType::SPHERE ? 1 : 0)));
+    performance.count("erase", m_active_stroke_erases);
     TraceryInteractionTiming::Stroke interaction(&m_parent, performance.id());
+    ScopeGuard                       clear_vector_stroke([this]() {
+        m_vector_stroke_pending = false;
+        m_pending_vector_masks.clear();
+        m_vector_selection_preview.clear();
+    });
     performance.stage("stroke.checkpoint");
-    // The selectors already contain the brush preview, but m_mask_data still
-    // describes the last committed stroke. Keep the complete editor checkpoint
+    // Pending vector masks contain the preview; committed masks still describe
+    // the previous stroke. Keep the complete editor checkpoint
     // until every volume's generated result has been prepared.
-    auto state      = std::tie(m_mask_object_id, m_mask_object_index, m_mask_data, m_previous_mask_data, m_stained_glass_base_paint_data,
-                               m_tracery_selections, m_generated_fragments, m_generated_voronoi_regions, m_fragment_colors,
-                               m_fragment_mixed_filament_ids, m_transition_recipe_targets, m_pending_selection_fragment_count,
-                               m_pending_selection_mode, m_pending_full_through, m_incremental_generation, m_selection_modified,
-                               m_generation_integrity_valid, m_regeneration_requested, m_regeneration_version);
+    auto state = std::tie(m_vector_masks, m_previous_vector_masks, m_mask_object_id, m_mask_object_index, m_mask_data, m_previous_mask_data,
+                          m_stained_glass_base_paint_data, m_tracery_selections, m_generated_fragments, m_generated_voronoi_regions,
+                          m_fragment_colors, m_fragment_mixed_filament_ids, m_transition_recipe_targets, m_pending_selection_fragment_count,
+                          m_pending_selection_mode, m_pending_full_through, m_incremental_generation, m_selection_modified,
+                          m_generation_integrity_valid, m_regeneration_requested, m_regeneration_version);
     auto checkpoint = std::apply([](const auto&... values) { return std::make_tuple(values...); }, state);
     bool restored = false;
     const std::function<void()> rollback = [&] {
@@ -1210,16 +1390,15 @@ void GLGizmoTracery::refresh_source_selection_policy(bool filter_masks)
             m_source_selection_policy.resize(index + 1);
         m_source_selection_policy[index] = blocked;
         m_fill_reference_selectors[index]->set_unselectable_states(blocked);
-        if (changed)
+        if (changed) {
+            clear_fill_preview(index);
             m_fill_reference_selectors[index]->request_update_render_data();
-        if ((filter_masks || changed) && !blocked.empty()) {
-            TriangleSelector source(volume->mesh());
-            source.deserialize(index < m_stained_glass_base_paint_data.size() ?
-                m_stained_glass_base_paint_data[index] : volume->mmu_segmentation_facets.get_data(), false);
-            tracery_filter_source_selection(*m_triangle_selectors[index], source, blocked);
-            m_triangle_selectors[index]->request_update_render_data(true);
-            if (index < m_mask_data.size())
-                m_mask_data[index] = m_triangle_selectors[index]->serialize();
+        }
+        if ((filter_masks || changed) && !blocked.empty() && index < m_vector_masks.size()) {
+            const auto& base      = index < m_stained_glass_base_paint_data.size() ? m_stained_glass_base_paint_data[index] :
+                                                                                     volume->mmu_segmentation_facets.get_data();
+            m_vector_masks[index] = TraceryVectorSelection::from_data(volume->mesh(),
+                                                                      m_vector_masks[index].colored(volume->mesh(), base, blocked));
         }
         ++index;
     }
@@ -1227,38 +1406,10 @@ void GLGizmoTracery::refresh_source_selection_policy(bool filter_masks)
 
 void GLGizmoTracery::commit_material_selection()
 {
-    constexpr auto marker = EnforcerBlockerType::ExtruderMax;
-    const ModelObject* object = m_c->selection_info()->model_object();
-    if (object == nullptr)
-        return;
-    size_t mesh_idx = 0;
-    for (const ModelVolume* volume : object->volumes) {
-        if (!volume->is_model_part())
-            continue;
-        TriangleSelectorPatch& material = *m_fill_reference_selectors[mesh_idx];
-        TriangleSelectorGUI& mask = *m_triangle_selectors[mesh_idx];
-        if (!material.has_facets(marker)) {
-            ++mesh_idx;
-            continue;
-        }
-        TriangleSelector previous_mask(volume->mesh());
-        previous_mask.deserialize(mask.serialize(), false);
-        mask.deserialize(material.serialize(), false);
-        mask.transform_leaf_states([&](EnforcerBlockerType state, const Vec3f& point, int facet) {
-            return state == marker ?
-                (m_active_stroke_erases ? EnforcerBlockerType::NONE : EnforcerBlockerType::ENFORCER) :
-                previous_mask.state_at(point, facet);
-        });
-        TriangleSelector base_paint(volume->mesh());
-        const auto& base = mesh_idx < m_stained_glass_base_paint_data.size() ?
-            m_stained_glass_base_paint_data[mesh_idx] : volume->mmu_segmentation_facets.get_data();
-        base_paint.deserialize(base, false);
-        material.transform_leaf_states([&](EnforcerBlockerType state, const Vec3f& point, int facet) {
-            return state == marker ? base_paint.state_at(point, facet) : state;
-        });
-        material.request_update_render_data(true);
-        ++mesh_idx;
-    }
+    m_previous_vector_masks = m_vector_masks;
+    if (m_vector_stroke_pending)
+        m_vector_masks = m_pending_vector_masks;
+    m_generation_cache.reset();
 }
 
 void GLGizmoTracery::capture_selection_mask()
@@ -1292,8 +1443,7 @@ void GLGizmoTracery::capture_selection_mask()
     m_previous_mask_data = m_mask_data;
     m_mask_data.clear();
     m_mask_data.reserve(m_triangle_selectors.size());
-    for (const std::unique_ptr<TriangleSelectorGUI>& selector : m_triangle_selectors)
-        m_mask_data.emplace_back(selector->serialize());
+    m_mask_data.resize(m_triangle_selectors.size());
     m_incremental_generation = false;
     m_pending_selection_mode = m_paint_mode;
     m_pending_full_through   = m_paint_mode == PaintMode::THROUGH && m_full_through;
@@ -1311,7 +1461,7 @@ void GLGizmoTracery::save_selection_mask()
                                                      TraceryDocument::decode(volume->tracery_edit_data);
         if (doc.base_mesh().its.vertices == volume->mesh().its.vertices && doc.base_mesh().its.indices == volume->mesh().its.indices) {
             doc.apply_vector_edit(volume->mesh(), channels, {}, TraceryEdit::Paint);
-            doc.set_selection_reference(m_fill_reference_selectors.at(index - 1)->serialize());
+            doc.set_vector_selection(m_vector_masks.at(index - 1).triangulated(volume->mesh()));
             updates.emplace_back(volume, doc.encode());
         }
     }
@@ -1364,7 +1514,7 @@ std::shared_ptr<GLGizmoTracery::PreparedGeneration> GLGizmoTracery::prepare_gene
             key.emplace_back(volume->mesh_ptr(), matrix, volume->extruder_id(), m_triangle_selectors[index++]->serialize(), base,
                              std::move(source_colors));
         }
-        if (m_generation_cache)
+        if (m_generation_cache && m_generation_cache->masks == m_vector_masks)
             if (auto cached = m_generation_cache->find(key)) {
                 performance.count("cache_hit", 1);
                 return cached;
@@ -1385,6 +1535,7 @@ std::shared_ptr<GLGizmoTracery::PreparedGeneration> GLGizmoTracery::prepare_gene
         if (!m_generation_cache)
             m_generation_cache = std::make_shared<GenerationCache>();
         m_generation_cache->store(std::move(key), prepared);
+        m_generation_cache->masks = m_vector_masks;
     } else {
         m_generation_cache.reset();
     }
@@ -1422,114 +1573,48 @@ void GLGizmoTracery::collect_volume_generation_input(
     performance.count("incremental", m_incremental_generation ? 1 : 0);
     performance.stage("selection_input.extract_current");
     const ModelVolume* volume = input.model_object->volumes[volume_idx];
-    if (m_incremental_generation && mesh_idx < m_previous_mask_data.size() &&
-        m_triangle_selectors[mesh_idx]->serialize() == m_previous_mask_data[mesh_idx]) {
-        // Keep transform indices aligned with the other model parts.
+    performance.count("unchanged_selection", 0);
+    if (mesh_idx >= m_vector_masks.size()) {
         input.volume_transforms.emplace_back(volume->get_matrix());
-        performance.count("unchanged_selection", 1);
         return;
     }
-    performance.count("unchanged_selection", 0);
-    const auto selected = m_triangle_selectors[mesh_idx]->get_facets_strict_with_sources(EnforcerBlockerType::ENFORCER);
-    assert(selected.facets.indices.size() == selected.source_facet_ids.size());
-    performance.count("selected_facets", selected.facets.indices.size());
-    struct PreviousFacet {
-        int source_facet_id = -1;
-        Vec3f a = Vec3f::Zero();
-        Vec3f b = Vec3f::Zero();
-        Vec3f c = Vec3f::Zero();
-    };
-    std::vector<PreviousFacet> previous_facets;
-    TraceryPreviousFacetIndex previous_index_by_source;
-    performance.stage("selection_input.prepare_previous");
-    if (m_incremental_generation && mesh_idx < m_previous_mask_data.size()) {
-        TriangleSelector previous_selector(volume->mesh());
-        previous_selector.deserialize(m_previous_mask_data[mesh_idx], false);
-        const auto previous = previous_selector.get_facets_strict_with_sources(EnforcerBlockerType::ENFORCER);
-        previous_facets.reserve(previous.facets.indices.size());
-        for (size_t index = 0; index < previous.facets.indices.size() && index < previous.source_facet_ids.size(); ++index) {
-            const stl_triangle_vertex_indices& face = previous.facets.indices[index];
-            if (face[0] < 0 || face[1] < 0 || face[2] < 0 ||
-                size_t(face[0]) >= previous.facets.vertices.size() ||
-                size_t(face[1]) >= previous.facets.vertices.size() || size_t(face[2]) >= previous.facets.vertices.size())
-                continue;
-            previous_facets.push_back({ previous.source_facet_ids[index], previous.facets.vertices[size_t(face[0])],
-                previous.facets.vertices[size_t(face[1])], previous.facets.vertices[size_t(face[2])] });
-            previous_index_by_source.add(previous.source_facet_ids[index], previous_facets.size() - 1);
-        }
-    }
-    performance.count("previous_facets", previous_facets.size());
-    size_t scanned_previous = 0;
-    const auto already_selected = [&previous_facets, &previous_index_by_source, &performance, &scanned_previous](int source_facet_id, const Vec3f& point) {
-        const auto& candidates = previous_index_by_source.candidates(source_facet_id);
-        for (size_t candidate_index = 0; candidate_index < candidates.size(); ++candidate_index) {
-            const PreviousFacet& previous = previous_facets[candidates[candidate_index]];
-            const Vec3f normal = (previous.b - previous.a).cross(previous.c - previous.a);
-            const float normal_length = normal.norm();
-            if (normal_length <= 1e-12f || std::abs(normal.dot(point - previous.a)) > normal_length * 1e-5f)
-                continue;
-            const float first = normal.dot((previous.b - previous.a).cross(point - previous.a));
-            const float second = normal.dot((previous.c - previous.b).cross(point - previous.b));
-            const float third = normal.dot((previous.a - previous.c).cross(point - previous.c));
-            constexpr float tolerance = 1e-7f;
-            if ((first >= -tolerance && second >= -tolerance && third >= -tolerance) ||
-                (first <= tolerance && second <= tolerance && third <= tolerance)) {
-                if (performance.enabled()) scanned_previous += candidate_index + 1;
-                return true;
-            }
-        }
-        if (performance.enabled()) scanned_previous += candidates.size();
-        return false;
-    };
-    performance.stage("selection_input.prepare_colors");
+    auto selected = m_vector_masks[mesh_idx];
+    if (m_incremental_generation && mesh_idx < m_previous_vector_masks.size())
+        selected = selected.difference(m_previous_vector_masks[mesh_idx]);
+    const auto&        base      = mesh_idx < m_stained_glass_base_paint_data.size() ? m_stained_glass_base_paint_data[mesh_idx] :
+                                                                                       volume->mmu_segmentation_facets.get_data();
+    const auto         colored   = selected.colored(volume->mesh(), base,
+                                          mesh_idx < m_source_selection_policy.size() ? m_source_selection_policy[mesh_idx] :
+                                                                                                  std::set<EnforcerBlockerType>{});
     const Transform3d& transform = volume->get_matrix();
     input.volume_transforms.emplace_back(transform);
-    TriangleSelector base_paint(volume->mesh());
-    base_paint.deserialize(mesh_idx < m_stained_glass_base_paint_data.size() ?
-        m_stained_glass_base_paint_data[mesh_idx] : volume->mmu_segmentation_facets.get_data(), false);
-    std::vector<ColorRGBA> source_colors(extruder_colors.size() + 1, source_color);
-    if (volume->extruder_id() > 0 && size_t(volume->extruder_id()) <= extruder_colors.size())
-        source_colors[0] = adjust_color_for_rendering(extruder_colors[size_t(volume->extruder_id() - 1)]);
-    for (size_t i = 0; i < extruder_colors.size(); ++i)
-        source_colors[i + 1] = adjust_color_for_rendering(extruder_colors[i]);
-    for (auto& color : source_colors) color.a(1.0f);
-    const bool trace_color = tracery_color_trace_enabled();
-    performance.stage("selection_input.filter_previous");
-    std::vector<size_t> remaining;
-    remaining.reserve(selected.facets.indices.size());
-    for (size_t index = 0; index < selected.facets.indices.size(); ++index) {
-        const stl_triangle_vertex_indices& face = selected.facets.indices[index];
-        const Vec3f a = selected.facets.vertices[face[0]], b = selected.facets.vertices[face[1]], c = selected.facets.vertices[face[2]];
-        if (!already_selected(selected.source_facet_ids[index], (a + b + c) / 3.0f))
-            remaining.push_back(index);
-    }
-    performance.count("previous_entries_scanned", scanned_previous);
-    performance.count("excluded_facets", selected.facets.indices.size() - remaining.size());
-    performance.count("remaining_facets", remaining.size());
-    performance.stage("selection_input.color_and_emit");
-    std::map<unsigned, size_t> sampled_colors;
-    performance.count("source_tree_queries", remaining.size());
-    for (size_t index : remaining) {
-        const stl_triangle_vertex_indices& face = selected.facets.indices[index];
-        const Vec3f a = selected.facets.vertices[face[0]], b = selected.facets.vertices[face[1]], c = selected.facets.vertices[face[2]];
-        Vec3f normal = (b - a).cross(c - a);
-        normal = normal.squaredNorm() > 0.0f ? normal.normalized() : Vec3f::UnitZ();
-        const Vec3f world_a = (transform * a.cast<double>()).cast<float>();
-        const Vec3f world_b = (transform * b.cast<double>()).cast<float>();
-        const Vec3f world_c = (transform * c.cast<double>()).cast<float>();
-        const unsigned state = unsigned(base_paint.state_at((a + b + c) / 3.0f, selected.source_facet_ids[index]));
-        const ColorRGBA color = state < source_colors.size() ? source_colors[state] : source_color;
-        if (trace_color) ++sampled_colors[tracery_color_rgb(color)];
-        input.surface_area += 0.5 * double((world_b - world_a).cross(world_c - world_a).norm());
-        input.surface_triangles.push_back({ mesh_idx, selected.source_facet_ids[index], a, b, c,
-            world_a, world_b, world_c, normal, color });
-    }
-    if (trace_color) {
-        std::fprintf(stderr, "TRACERY_COLOR sampling volume=%zu selected=%zu emitted=%zu source_tree=1 fallback_rgb=%06X\n",
-            volume_idx, selected.facets.indices.size(), remaining.size(), tracery_color_rgb(source_color));
-        for (const auto& entry : sampled_colors)
-            std::fprintf(stderr, "TRACERY_COLOR sampled volume=%zu rgb=%06X facets=%zu\n", volume_idx, entry.first, entry.second);
-    }
+    size_t emitted = 0;
+    for (const auto& facet : colored)
+        for (const auto& region : facet.regions) {
+            if (region.polygon.size() != 3)
+                throw std::runtime_error("Non-triangular vector generation input");
+            const auto point = [&](size_t i) -> Vec3f {
+                return (facet.origin + region.polygon[i].x() * facet.axis_u + region.polygon[i].y() * facet.axis_v).cast<float>();
+            };
+            const Vec3f a = point(0), b = point(1), c = point(2);
+            const Vec3f wa = (transform * a.cast<double>()).cast<float>(), wb = (transform * b.cast<double>()).cast<float>(),
+                        wc = (transform * c.cast<double>()).cast<float>();
+            unsigned state = unsigned(region.color);
+            if (state == 0 && volume->extruder_id() > 0)
+                state = unsigned(volume->extruder_id());
+            ColorRGBA color = state > 0 && state <= extruder_colors.size() ? adjust_color_for_rendering(extruder_colors[state - 1]) :
+                                                                             source_color;
+            color.a(1.f);
+            Vec3f normal = (b - a).cross(c - a);
+            if (normal.squaredNorm() <= 1e-20f)
+                continue;
+            normal.normalize();
+            input.surface_area += .5 * double((wb - wa).cross(wc - wa).norm());
+            input.surface_triangles.push_back({mesh_idx, facet.source_facet_id, a, b, c, wa, wb, wc, normal, color});
+            ++emitted;
+        }
+    performance.count("selected_source_facets", selected.regions().size());
+    performance.count("temporary_triangles", emitted);
 }
 
 bool GLGizmoTracery::build_color_regions_from_input_faces(
@@ -1546,33 +1631,22 @@ bool GLGizmoTracery::build_color_regions_from_input_faces(
         return (Vec4f(first.r(), first.g(), first.b(), first.a()) -
                 Vec4f(second.r(), second.g(), second.b(), second.a())).cwiseAbs().maxCoeff() <= 1e-5f;
     };
-    const auto edge_key = [](size_t mesh_idx, const Vec3f& first, const Vec3f& second) {
-        const auto point = [](const Vec3f& value) {
-            return std::array<int64_t, 3>{ int64_t(std::llround(value.x() * 100000.0f)),
-                                           int64_t(std::llround(value.y() * 100000.0f)),
-                                           int64_t(std::llround(value.z() * 100000.0f)) };
-        };
-        auto a = point(first);
-        auto b = point(second);
-        if (b < a)
-            std::swap(a, b);
-        return EdgeKey{ mesh_idx, { a[0], a[1], a[2], b[0], b[1], b[2] } };
-    };
-    std::map<EdgeKey, size_t> owners;
+    std::vector<TracerySurfaceEdge> edges;
+    edges.reserve(faces.size() * 3);
     performance.count("input_faces", faces.size());
     performance.stage("color_regions.connect_edges");
-    for (size_t index = 0; index < faces.size(); ++index) {
-        const auto& face = faces[index];
-        const std::array<std::pair<Vec3f, Vec3f>, 3> edges = {{{ face.a, face.b }, { face.b, face.c }, { face.c, face.a }}};
-        for (const auto& [first, second] : edges) {
-            const EdgeKey key = edge_key(face.mesh_idx, first, second);
-            const auto [found, inserted] = owners.try_emplace(key, index);
-            if (!inserted && same_color(face.source_color, faces[found->second].source_color))
-                components.unite(index, found->second);
-        }
+    for (size_t i = 0; i < faces.size(); ++i) {
+        const auto& f = faces[i];
+        edges.push_back({f.mesh_idx, i, f.a.cast<double>(), f.b.cast<double>()});
+        edges.push_back({f.mesh_idx, i, f.b.cast<double>(), f.c.cast<double>()});
+        edges.push_back({f.mesh_idx, i, f.c.cast<double>(), f.a.cast<double>()});
     }
+    performance.count("edge_candidates", tracery_shared_edges(edges, [&](size_t a, size_t b) {
+                          if (same_color(faces[a].source_color, faces[b].source_color))
+                              components.unite(a, b);
+                      }));
     std::map<size_t, size_t> region_by_root;
-    performance.count("unique_edges", owners.size());
+    performance.count("input_edges", edges.size());
     performance.stage("color_regions.group_faces");
     color_groups.clear();
     regions.clear();
@@ -1590,7 +1664,7 @@ bool GLGizmoTracery::build_color_regions_from_input_faces(
     }
     performance.count("connected_regions", regions.size());
     performance.stage("color_regions.cleanup");
-    owners.clear();
+    edges.clear();
     return !regions.empty();
 }
 
@@ -1638,6 +1712,8 @@ void GLGizmoTracery::generate_region_seeds(
         if (region.fragment_budget == 0 || region.face_indices.empty())
             continue;
         const std::vector<Vec3f> candidates = sample_region_seed_candidates(input, region);
+        if (candidates.empty())
+            continue;
         std::vector<float> nearest_distance(candidates.size(), std::numeric_limits<float>::max());
         for (size_t local_seed = 0; local_seed < region.fragment_budget; ++local_seed) {
             size_t selected = local_seed == 0 ? region.color_group % candidates.size() : 0;
@@ -1661,23 +1737,17 @@ void GLGizmoTracery::generate_region_seeds(
 std::vector<Vec3f> GLGizmoTracery::sample_region_seed_candidates(
     const GenerationInput& input, const VoronoiColorRegion& region) const
 {
-    const size_t samples_per_face = std::max<size_t>(4,
-        size_t(std::ceil(double(region.fragment_budget * 2) / region.face_indices.size())));
-    std::vector<Vec3f> candidates;
-    candidates.reserve(region.face_indices.size() * samples_per_face);
-    for (size_t face_index : region.face_indices) {
-        const auto& face = input.surface_triangles[face_index];
-        for (size_t sample = 0; sample < samples_per_face; ++sample) {
-            float u = (float(sample) + 0.5f) / float(samples_per_face);
-            float v = std::fmod((float(sample) + 1.0f) * 0.61803398875f, 1.0f);
-            if (u + v > 1.0f) {
-                u = 1.0f - u;
-                v = 1.0f - v;
-            }
-            candidates.emplace_back(face.world_a + u * (face.world_b - face.world_a) +
-                                    v * (face.world_c - face.world_a));
-        }
+    TraceryPerformanceScope performance("seed_candidates");
+    performance.count("input_triangles", region.face_indices.size());
+    performance.count("seed_budget", region.fragment_budget);
+    std::vector<std::array<Vec3f, 3>> triangles;
+    triangles.reserve(region.face_indices.size());
+    for (size_t index : region.face_indices) {
+        const auto& f = input.surface_triangles[index];
+        triangles.push_back({f.world_a, f.world_b, f.world_c});
     }
+    auto candidates = tracery_area_candidates(triangles, region.fragment_budget);
+    performance.count("candidates", candidates.size());
     return candidates;
 }
 
@@ -1788,29 +1858,19 @@ void GLGizmoTracery::build_fragment_topology(
     std::vector<std::set<size_t>>& neighbours) const
 {
     neighbours.assign(fragment_count, {});
-    const auto point = [](const Vec3f& value) {
-        return std::array<int64_t, 3>{ int64_t(std::llround(value.x() * 100000.0f)),
-                                       int64_t(std::llround(value.y() * 100000.0f)),
-                                       int64_t(std::llround(value.z() * 100000.0f)) };
-    };
-    std::map<EdgeKey, size_t> owners;
-    for (size_t volume_index = 0; volume_index < regions.size(); ++volume_index)
-        for (const GeneratedVoronoiRegion& region : regions[volume_index]) {
+    std::vector<TracerySurfaceEdge> edges;
+    for (size_t volume = 0; volume < regions.size(); ++volume)
+        for (const auto& region : regions[volume]) {
             if (region.fragment_id >= fragment_count || region.local_polygon.size() < 3)
                 continue;
-            for (size_t index = 0; index < region.local_polygon.size(); ++index) {
-                auto first = point(region.local_polygon[index]);
-                auto second = point(region.local_polygon[(index + 1) % region.local_polygon.size()]);
-                if (second < first)
-                    std::swap(first, second);
-                const EdgeKey edge{ volume_index, { first[0], first[1], first[2], second[0], second[1], second[2] } };
-                const auto [owner, inserted] = owners.try_emplace(edge, region.fragment_id);
-                if (!inserted && owner->second != region.fragment_id) {
-                    neighbours[region.fragment_id].insert(owner->second);
-                    neighbours[owner->second].insert(region.fragment_id);
-                }
-            }
+            for (size_t i = 0; i < region.local_polygon.size(); ++i)
+                edges.push_back({volume, region.fragment_id, region.local_polygon[i].cast<double>(),
+                                 region.local_polygon[(i + 1) % region.local_polygon.size()].cast<double>()});
         }
+    tracery_shared_edges(edges, [&](size_t a, size_t b) {
+        neighbours[a].insert(b);
+        neighbours[b].insert(a);
+    });
 }
 
 void GLGizmoTracery::assign_voronoi_fragment_colors(
@@ -3054,13 +3114,13 @@ void GLGizmoTracery::generate_paint_plan()
 
     if (m_active_stroke_erases) {
         performance.stage("generation.erase_projection");
-        if (m_pending_selection_mode == PaintMode::THROUGH) {
+        {
             size_t index = 0;
             for (const ModelVolume* volume : model_object->volumes) {
                 if (!volume->is_model_part()) continue;
                 m_generated_voronoi_regions.resize(index + 1);
-                if (index < m_previous_mask_data.size() && index < m_mask_data.size())
-                    for (const auto& facet : TraceryDocument::erased_regions(volume->mesh(), m_previous_mask_data[index], m_mask_data[index]))
+                if (index < m_previous_vector_masks.size() && index < m_vector_masks.size())
+                    for (const auto& facet : m_previous_vector_masks[index].difference(m_vector_masks[index]).triangulated(volume->mesh()))
                         for (const auto& region : facet.regions) {
                             GeneratedVoronoiRegion erased;
                             erased.source_facet_id = facet.source_facet_id;
@@ -4597,12 +4657,18 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
         // Final UI refresh below builds the colour panel once, after presets and
         // model pointers have settled. Intermediate renders only duplicate work.
         plater->sidebar().on_filaments_change(plan.colours.size(), false, true);
-        plater->sidebar().set_stained_glass_base_filament_preset(plan.new_physical_ids, true);
-        performance.stage("commit.reload_object_list");
-        wxGetApp().obj_list()->reload_all_plates(false);
-        performance.stage("commit.refresh_selection_second");
-        m_c->update(on_get_requirements());
-        update_from_model_object(false);
+        if (!plan.new_physical_ids.empty())
+            plater->sidebar().set_stained_glass_base_filament_preset(plan.new_physical_ids, true);
+        performance.stage("commit.refresh_object_list");
+        const bool retained_list = wxGetApp().obj_list()->refresh_after_tracery_material_conversion(*plan.model);
+        performance.count("retained_object_list", retained_list ? 1 : 0);
+        if (!retained_list) {
+            performance.stage("commit.reload_object_list");
+            wxGetApp().obj_list()->reload_all_plates(false);
+            performance.stage("commit.refresh_selection_second");
+            m_c->update(on_get_requirements());
+            update_from_model_object(false);
+        }
         invalidate_painting_raycast();
         plater->update_project_dirty_from_presets();
         if (plan.approximate_colour_count > 0)
@@ -4687,8 +4753,7 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
             "remaining_generated_volumes=" + std::to_string(m_generated_fragments.size()) +
             ",mixed_ids=" + std::to_string(m_fragment_mixed_filament_ids.size()));
 #endif
-    performance.stage("commit.final_ui_refresh");
-    wxGetApp().sidebar().update_color_mix_panel();
+    performance.stage("commit.schedule_ui_state");
     wxGetApp().plater()->post_slice_state_change_update();
     m_parent.set_as_dirty();
     // Draw the settled result once while document snapshots are still retained.
@@ -4698,6 +4763,12 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
     m_parent.enable_render(rendering_enabled);
     if (rendering_enabled && m_parent.is_initialized())
         m_parent.render();
+    // The model, palette, selectors and settings pointers are now consistent.
+    // Show the result before laying out the colour recipe controls. Keep this
+    // synchronous and measured so total latency does not disappear from traces.
+    performance.stage("commit.post_frame_colour_panel");
+    m_parent.enable_render(false);
+    wxGetApp().sidebar().update_color_mix_panel();
     performance.stage("commit.cleanup");
 }
 
@@ -4814,7 +4885,7 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
         }
         document.remap_materials(*mapping);
     }
-    if (recipes) {
+    if (recipes && !m_active_stroke_erases) {
         for (auto& facet : regions)
             for (auto& region : facet.regions)
                 region.color = EnforcerBlockerType(recipes->at(region.fragment_id));
@@ -4843,8 +4914,8 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
     performance.count("base_facets", document.base_mesh().its.indices.size());
     performance.count("output_facets", prepared.partition.mesh.indices.size());
     performance.stage("partition.save_selection_reference");
-    if (document.is_vector() && volume_index < m_fill_reference_selectors.size())
-        document.set_selection_reference(m_fill_reference_selectors[volume_index]->serialize());
+    if (document.is_vector() && volume_index < m_vector_masks.size())
+        document.set_vector_selection(m_vector_masks[volume_index].triangulated(volume.mesh()));
     performance.stage("partition.build_mapping_index");
     // Vector edits keep the original mesh and facet IDs. Do not project, round
     // and allocate each retained polygon again when the lineage is identity.
@@ -4879,7 +4950,7 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
     if (performance.enabled())
         performance.count("mapping_index_estimated_bytes", mapper ? mapper->estimated_bytes() : 0);
     performance.stage("partition.assign_region_materials");
-    if (recipes)
+    if (recipes && !m_active_stroke_erases)
         for (auto& region : prepared.generated)
             region.mixed_filament_id = recipes->at(region.fragment_id);
     if (mapping)
@@ -5496,7 +5567,9 @@ void GLGizmoTracery::update_from_model_object(bool)
         m_mask_object_index      = -1;
     }
     m_triangle_selectors.clear();
+    m_vector_fills.clear();
     m_fill_reference_selectors.clear();
+    m_vector_masks.clear();
     m_source_selection_policy.clear();
     // Rebuild every entry, including parts without a document. Resizing to a
     // later document index would otherwise create empty, falsely valid slots.
@@ -5534,35 +5607,18 @@ void GLGizmoTracery::update_from_model_object(bool)
             fill_reference->deserialize(m_stained_glass_base_paint_data[selector_idx], false, max_ebt);
         else
             fill_reference->deserialize(volume->mmu_segmentation_facets.get_data(), false, max_ebt);
-        if (!volume->tracery_edit_data.empty()) {
-            try {
-                const auto document = TraceryDocument::decode_cached(volume->tracery_edit_data);
-                if (document->is_vector() && !document->selection_reference().triangles_to_split.empty())
-                    fill_reference->deserialize(document->selection_reference(), true, max_ebt);
-            } catch (const std::exception& error) {
-                BOOST_LOG_TRIVIAL(error) << "Cannot restore stained-glass selection: " << error.what();
-            }
-        }
+        m_vector_masks.push_back(base_document ? TraceryVectorSelection::from_data(volume->mesh(), base_document->selection_regions()) :
+                                                 TraceryVectorSelection{});
         // Keep the normal material selector and its white seed-fill contour,
         // but hide only its coloured paint patches while editing stained glass.
         fill_reference->set_paint_fill_visible(false);
         fill_reference->request_update_render_data();
         m_fill_reference_selectors.emplace_back(std::move(fill_reference));
+        m_vector_fills.emplace_back(std::make_unique<TraceryVectorFill>(*m_fill_reference_selectors.back()));
 
-        // Keep the effect layer on exactly the material selector's leaf tree.
-        // Existing documents may contain an older, independently refined
-        // mask; sample it once while migrating to the shared topology.
+        // The base painter requires one selector per volume. Selection geometry
+        // lives in m_vector_masks; this neutral selector never subdivides.
         m_triangle_selectors.emplace_back(std::make_unique<TriangleSelectorGUI>(volume->mesh(), 0.2f));
-        TriangleSelectorGUI& effect = *m_triangle_selectors.back();
-        effect.deserialize(m_fill_reference_selectors.back()->serialize(), false);
-        if (selector_idx < m_mask_data.size()) {
-            TriangleSelector previous_effect(volume->mesh());
-            previous_effect.deserialize(m_mask_data[selector_idx], false);
-            effect.set_leaf_states(
-                [&previous_effect](const Vec3f& point, int source_facet) { return previous_effect.state_at(point, source_facet); });
-        } else {
-            effect.set_leaf_states({});
-        }
         m_triangle_selectors.back()->request_update_render_data();
     }
     // The model document owns the vector effect. Reopening only restores the
@@ -5575,6 +5631,9 @@ void GLGizmoTracery::update_from_model_object(bool)
 void GLGizmoTracery::on_shutdown()
 {
     m_generation_cache.reset();
+    m_pending_vector_masks.clear();
+    m_vector_selection_preview.clear();
+    m_vector_stroke_pending = false;
     // Completed edits are already stored on the model volume. The shared
     // surface renderer and slicer continue to read them after the gizmo closes.
 }
@@ -5583,6 +5642,11 @@ void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
 {
     m_generation_cache.reset();
     GLGizmoPainterBase::on_load(ar);
+    m_vector_masks.clear();
+    m_previous_vector_masks.clear();
+    m_pending_vector_masks.clear();
+    m_vector_selection_preview.clear();
+    m_vector_stroke_pending = false;
     ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_mesh_restore_states, m_regeneration_version);
     m_density_input          = m_fragment_density;
     m_regeneration_requested = false;

@@ -464,6 +464,12 @@ set(lisbslic3r_sources
     TraceryPartition.hpp
     TraceryThrough.cpp
     TraceryThrough.hpp
+    TracerySurfaceSampling.cpp
+    TracerySurfaceSampling.hpp
+    TraceryVectorSelection.cpp
+    TraceryVectorSelection.hpp
+    TraceryVectorBrush.cpp
+    TraceryVectorFill.hpp
     TraceryDocument.cpp
     TraceryDocument.hpp
     TraceryRestore.cpp

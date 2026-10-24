@@ -42,8 +42,11 @@ public:
     };
     const Annotation& selection_reference() const { return m_selection_reference; }
     void set_selection_reference(Annotation reference) { m_selection_reference = std::move(reference); }
+    TriangleSelector::Tracery2DData selection_regions() const;
+    void                            set_vector_selection(const TriangleSelector::Tracery2DData& selection);
+    bool                            has_vector_selection() const { return m_vector_selection; }
     bool is_vector() const { return m_vector; }
-    int                                         format_version() const { return m_vector ? (m_through_operations.empty() ? 2 : 3) : 1; }
+    int format_version() const { return m_vector_selection ? 4 : (m_vector ? (m_through_operations.empty() ? 2 : 3) : 1); }
     TraceryPartitionResult                      apply_vector_edit(const TriangleMesh&                    current,
                                                                   const std::vector<Annotation>&         annotations,
                                                                   const TriangleSelector::Tracery2DData& paint,
@@ -83,6 +86,7 @@ private:
     std::vector<TraceryThroughOperation> m_through_operations;
     Annotation m_selection_reference;
     bool m_vector = false;
+    bool                                 m_vector_selection = false;
     TriangleMesh            m_base;
     indexed_triangle_set    m_derived;
     std::vector<int>        m_sources;

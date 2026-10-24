@@ -1,5 +1,7 @@
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/TraceryPlateMaterials.hpp"
+#include "libslic3r/TraceryPerformance.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GUI_Factories.hpp"
 //#include "GUI_ObjectLayers.hpp"
@@ -5949,6 +5951,71 @@ void ObjectList::on_plate_deleted(int plate_idx)
     for (wxDataViewItem item : top_list) {
         Expand(item);
     }
+}
+
+bool ObjectList::refresh_after_tracery_material_conversion(const Model& previous)
+{
+    TraceryPerformanceScope performance("object_list_material_refresh");
+    performance.stage("object_list.check_structure");
+    const Model& current = wxGetApp().plater()->model();
+    if (!tracery_material_conversion_preserves_list(previous, current))
+        return false;
+    // Validate every node before replacing any pointer. Full reload remains the
+    // fallback for an incomplete tree, instance isolation or new settings nodes.
+    for (size_t i = 0; i < current.objects.size(); ++i) {
+        const auto item = m_objects_model->GetItemById(i);
+        if (!item || static_cast<ObjectDataViewModelNode*>(item.GetID())->m_model_object != previous.objects[i])
+            return false;
+    }
+    performance.stage("object_list.rebind_nodes");
+    for (size_t i = 0; i < current.objects.size(); ++i) {
+        const auto item = m_objects_model->GetItemById(i);
+        static_cast<ObjectDataViewModelNode*>(item.GetID())->m_model_object = current.objects[i];
+    }
+    const bool prevent_selection = m_prevent_canvas_selection_update;
+    m_prevent_canvas_selection_update = true;
+    ScopeGuard restore_selection([this, prevent_selection]() { m_prevent_canvas_selection_update = prevent_selection; });
+    performance.stage("object_list.material_rows");
+    for (size_t i = 0; i < current.objects.size(); ++i) {
+        const auto* object = current.objects[i];
+        const auto item = m_objects_model->GetItemById(i);
+        const auto extruder = wxString::Format("%d", object->config.extruder());
+        if (m_objects_model->GetExtruder(item) != extruder)
+            m_objects_model->SetExtruder(extruder, item);
+        size_t ui_volume_index = 0;
+        for (size_t v = 0; v < object->volumes.size(); ++v) {
+            if (object->is_cut() && object->volumes[v]->is_cut_connector())
+                continue;
+            const auto child = m_objects_model->GetItemByVolumeId(i, ui_volume_index++);
+            if (!child || child == item)
+                continue;
+            const auto& config = object->volumes[v]->config;
+            const auto value = wxString::Format("%d", config.has("extruder") ? config.extruder() : 0);
+            if (m_objects_model->GetExtruder(child) != value)
+                m_objects_model->SetExtruder(value, child);
+        }
+        size_t layer_index = 0;
+        for (const auto& range : object->layer_config_ranges) {
+            const auto child = m_objects_model->GetItemByLayerId(i, layer_index++);
+            if (!child)
+                continue;
+            const auto value = wxString::Format("%d", range.second.has("extruder") ? range.second.extruder() : 0);
+            if (m_objects_model->GetExtruder(child) != value)
+                m_objects_model->SetExtruder(value, child);
+        }
+        update_info_items(i);
+    }
+    performance.stage("object_list.palette_icons");
+    // Refresh icons even when slot IDs stayed the same but their palette changed.
+    update_filament_colors();
+    performance.stage("object_list.selection_settings");
+    // Settings tabs also retain ModelConfig pointers. Rebind them while the old
+    // model is still alive, without rebuilding nodes or triggering plater.update().
+    update_selections();
+    if (GetSelectedItemsCount() == 1 && m_objects_model->GetItemType(GetSelection()) & (itSettings | itLayerRoot | itLayer))
+        part_selection_changed();
+    wxGetApp().plater()->notify_filament_usage_changed();
+    return true;
 }
 
 void ObjectList::reload_all_plates(bool notify_partplate)

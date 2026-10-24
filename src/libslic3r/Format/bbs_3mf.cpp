@@ -4874,7 +4874,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                 else if ((metadata.key == VOLUME_TYPE_KEY) || (metadata.key == PART_TYPE_KEY))
                     volume->set_type(ModelVolume::type_from_string(metadata.value));
                 else if (metadata.key == "tracery_edit_data_v1" || metadata.key == "tracery_edit_data_v2" ||
-                         metadata.key == "tracery_edit_data_v3")
+                         metadata.key == "tracery_edit_data_v3" || metadata.key == "tracery_edit_data_v4")
                     volume->tracery_edit_data = metadata.value;
                 else if (metadata.key == SOURCE_FILE_KEY)
                     volume->source.input_file = metadata.value;
