@@ -131,6 +131,31 @@ TEST_CASE("Through documents round trip, remap recipes and keep display paint ou
     CHECK(restored.through_operations().empty());
 }
 
+TEST_CASE("Cached publication preserves full-depth operations and separate slice surfaces", "[TraceryThrough][TraceryCache]")
+{
+    const auto                               mesh = make_cube(10, 10, 5);
+    std::vector<TraceryDocument::Annotation> annotations(8);
+    auto                                     document = TraceryDocument::capture(mesh, annotations);
+    const auto                               regions  = top_entry(mesh, 2);
+    document.apply_vector_edit(mesh, annotations, regions, TraceryEdit::Paint, &regions);
+    const auto                      expected = document.encode();
+    TraceryDocument::ReadCacheScope cache;
+    const auto                      encoded = std::move(document).encode_cached();
+    REQUIRE(encoded == expected);
+    const auto snapshot = TraceryDocument::decode_cached(encoded);
+    REQUIRE(snapshot->format_version() == 3);
+    CHECK(snapshot->material_surfaces().count(2) == 1);
+    CHECK(snapshot->material_surfaces(true).count(2) == 0);
+    auto layers = slice_tracery_through(mesh.its, snapshot->through_operations(), Transform3d::Identity(), {2.5f});
+    CHECK(area_mm(layers[0][2]) == Catch::Approx(36).margin(1e-4));
+    auto edited = *snapshot;
+    edited.clear_vector_glass(mesh, annotations);
+    CHECK(edited.through_operations().empty());
+    CHECK_FALSE(snapshot->through_operations().empty());
+    CHECK(TraceryDocument::decode_cached(encoded) == snapshot);
+    CHECK(TraceryDocument::decode(encoded).encode() == encoded);
+}
+
 TEST_CASE("Full-depth vectors reach every real slicer layer including the middle", "[TraceryThrough][TraceryThroughIntegration]")
 {
     Model model;

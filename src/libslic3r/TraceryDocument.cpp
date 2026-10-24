@@ -23,6 +23,10 @@ struct TraceryCacheEntry {
     std::shared_ptr<const TraceryDocument> document;
 };
 using TraceryCacheEntryPtr = std::shared_ptr<const TraceryCacheEntry>;
+thread_local std::list<TraceryCacheEntryPtr> document_cache;
+thread_local size_t document_cache_bytes = 0;
+constexpr size_t max_source_bytes = 32 * 1024 * 1024;
+constexpr size_t max_entries = 16;
 } // namespace
 
 struct TraceryDocument::ReadCacheScope::State {
@@ -34,6 +38,12 @@ struct TraceryDocument::ReadCacheScope::State {
     ~State() { active = previous; }
     void retain(const TraceryCacheEntryPtr& entry)
     {
+        // A nested validation callback must not release the working set before
+        // the enclosing scene update has finished using the same documents.
+        if (previous) {
+            previous->retain(entry);
+            return;
+        }
         entries.push_back(entry);
         source_bytes += entry->data.size();
     }
@@ -53,10 +63,7 @@ std::shared_ptr<const TraceryDocument> TraceryDocument::decode_cached(const std:
     // The bounded idle cache serves isolated readers. A commit scope retains its
     // whole working set until all UI callbacks finish, avoiding cyclic eviction.
     // Entries are shared, so retaining them does not copy their large strings.
-    static thread_local std::list<TraceryCacheEntryPtr> cache;
-    static thread_local size_t source_bytes = 0;
-    constexpr size_t max_source_bytes = 32 * 1024 * 1024;
-    constexpr size_t max_entries = 16;
+    auto& cache = document_cache;
     TraceryPerformanceScope performance("document_cache");
     performance.stage("document_cache.lookup");
     performance.count("source_bytes", data.size());
@@ -88,23 +95,77 @@ std::shared_ptr<const TraceryDocument> TraceryDocument::decode_cached(const std:
     performance.stage("document_cache.decode");
     auto document = std::make_shared<const TraceryDocument>(decode(data));
     performance.stage("document_cache.store");
-    if (active || data.size() <= max_source_bytes) {
-        auto entry = std::make_shared<const TraceryCacheEntry>(TraceryCacheEntry{hash, data, document});
-        if (active)
-            active->retain(entry);
-        if (data.size() <= max_source_bytes) {
-            size_t evictions = 0;
-            while (!cache.empty() && (cache.size() >= max_entries || source_bytes + data.size() > max_source_bytes)) {
-                source_bytes -= cache.back()->data.size();
-                cache.pop_back();
-                ++evictions;
-            }
-            cache.push_front(std::move(entry));
-            source_bytes += data.size();
-            performance.count("idle_evictions", evictions);
-        }
-    }
+    cache_document(data, document);
     return document;
+}
+
+void TraceryDocument::cache_document(const std::string& data, std::shared_ptr<const TraceryDocument> document)
+{
+    auto* active = ReadCacheScope::State::active;
+    if (!active && data.size() > max_source_bytes)
+        return;
+    auto entry = std::make_shared<const TraceryCacheEntry>(TraceryCacheEntry{
+        std::hash<std::string>{}(data), data, std::move(document)});
+    if (active)
+        active->retain(entry);
+    if (data.size() <= max_source_bytes) {
+        while (!document_cache.empty() &&
+               (document_cache.size() >= max_entries || document_cache_bytes + data.size() > max_source_bytes)) {
+            document_cache_bytes -= document_cache.back()->data.size();
+            document_cache.pop_back();
+        }
+        document_cache.push_front(std::move(entry));
+        document_cache_bytes += data.size();
+    }
+}
+
+std::string TraceryDocument::encode_cached() &&
+{
+    TraceryPerformanceScope performance("document_publish_snapshot");
+    performance.stage("document_publish.validate");
+    // Publishing a live snapshot skips decode(), but must retain its structural
+    // checks. Inspect the native data directly without parsing another JSON tree.
+    const auto validate_mesh = [](const indexed_triangle_set& mesh) {
+        for (const auto& vertex : mesh.vertices)
+            if (!vertex.allFinite())
+                throw std::runtime_error("Invalid stained-glass vertex");
+        for (const auto& face : mesh.indices)
+            for (int vertex : face)
+                if (vertex < 0 || size_t(vertex) >= mesh.vertices.size())
+                    throw std::runtime_error("Invalid stained-glass face");
+    };
+    validate_mesh(m_base.its);
+    validate_mesh(m_derived);
+    if (m_sources.size() != m_derived.indices.size())
+        throw std::runtime_error("Invalid stained-glass lineage");
+    for (int id : m_sources)
+        if (id < 0 || size_t(id) >= m_base.its.indices.size())
+            throw std::runtime_error("Invalid stained-glass source facet");
+    if (m_channels.size() != 8 || m_last.size() != 8)
+        throw std::runtime_error("Invalid stained-glass channels");
+    for (const auto& channel : m_channels)
+        for (const auto& [facet, states] : channel)
+            for (const auto& [state, polygons] : states) {
+                if (facet < 0 || size_t(facet) >= m_base.its.indices.size() || state > unsigned(EnforcerBlockerType::ExtruderMax))
+                    throw std::runtime_error("Invalid stained-glass region");
+                for (const auto& polygon : polygons)
+                    if (polygon.points.size() < 3)
+                        throw std::runtime_error("Invalid stained-glass polygon");
+            }
+    const auto validate_annotation = [&](const Annotation& annotation) {
+        for (const auto& triangle : annotation.triangles_to_split)
+            if (triangle.triangle_idx < 0 || size_t(triangle.triangle_idx) >= m_sources.size() ||
+                triangle.bitstream_start_idx < 0 || size_t(triangle.bitstream_start_idx) >= annotation.bitstream.size())
+                throw std::runtime_error("Invalid stained-glass annotation");
+    };
+    for (const auto& annotation : m_last)
+        validate_annotation(annotation);
+    validate_annotation(m_selection_reference);
+    performance.stage("document_publish.encode");
+    auto data = encode();
+    performance.stage("document_publish.retain");
+    cache_document(data, std::make_shared<const TraceryDocument>(std::move(*this)));
+    return data;
 }
 
 namespace {

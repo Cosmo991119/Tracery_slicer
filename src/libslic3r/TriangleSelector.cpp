@@ -576,6 +576,14 @@ EnforcerBlockerType TriangleSelector::state_at(const Vec3f& point, int facet_sta
 
 void TriangleSelector::set_leaf_states(const std::function<EnforcerBlockerType(const Vec3f&, int source_facet)>& state_for)
 {
+    transform_leaf_states([&](EnforcerBlockerType, const Vec3f& point, int source_facet) {
+        return state_for ? state_for(point, source_facet) : EnforcerBlockerType::NONE;
+    });
+}
+
+void TriangleSelector::transform_leaf_states(
+    const std::function<EnforcerBlockerType(EnforcerBlockerType, const Vec3f&, int)>& state_for)
+{
     for (Triangle& triangle : m_triangles) {
         if (triangle.is_split() || !triangle.valid())
             continue;
@@ -583,7 +591,8 @@ void TriangleSelector::set_leaf_states(const std::function<EnforcerBlockerType(c
         const Vec3f& a = m_vertices[triangle.verts_idxs[0]].v;
         const Vec3f& b = m_vertices[triangle.verts_idxs[1]].v;
         const Vec3f& c = m_vertices[triangle.verts_idxs[2]].v;
-        triangle.set_state(state_for ? state_for((a + b + c) / 3.f, triangle.source_triangle) : EnforcerBlockerType::NONE);
+        triangle.set_state(state_for ? state_for(triangle.get_state(), (a + b + c) / 3.f, triangle.source_triangle) :
+                                      EnforcerBlockerType::NONE);
         triangle.unselect_by_seed_fill();
     }
 }

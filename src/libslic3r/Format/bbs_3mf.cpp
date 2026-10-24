@@ -15,11 +15,15 @@
 #include "../I18N.hpp"
 
 #include "bbs_3mf.hpp"
+#include "BackupSnapshot.hpp"
+#include "../TraceryPerformance.hpp"
+#include "../TraceryDocumentMetadata.hpp"
 
 #include <limits>
 #include <stdexcept>
 #include <iomanip>
 #include <cstring>
+#include <thread>
 
 #include <boost/assign.hpp>
 #include <boost/bimap.hpp>
@@ -7523,6 +7527,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
     bool _BBS_3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, PlateDataPtrs& plate_data_list, const ObjectToObjectDataMap &objects_data, const DynamicPrintConfig& config, int export_plate_idx, bool save_gcode, bool use_loaded_id)
     {
+        TraceryPerformanceScope timing("project_model_config_export");
+        timing.stage("project_model_config_xml");
         std::stringstream stream;
         // Store mesh transformation in full precision, as the volumes are stored transformed and they need to be transformed back
         // when loaded as accurately as possible.
@@ -7576,8 +7582,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
                             if (!volume->tracery_edit_data.empty())
                                 stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"tracery_edit_data_v"
-                                       << TraceryDocument::decode(volume->tracery_edit_data).format_version() << "\" " << VALUE_ATTR
-                                       << "=\"" << xml_escape(volume->tracery_edit_data) << "\"/>\n";
+                                       << tracery_document_version(volume->tracery_edit_data) << "\" "
+                                       << VALUE_ATTR << "=\"" << xml_escape(volume->tracery_edit_data) << "\"/>\n";
 
                             // stores volume's modifier field (legacy, to support old slicers)
                             /*if (volume->is_modifier())
@@ -7836,6 +7842,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         stream << "</" << CONFIG_TAG << ">\n";
 
         std::string out = stream.str();
+        timing.stage("project_model_config_zip");
         if (!mz_zip_writer_add_mem(&archive, BBS_MODEL_CONFIG_FILE.c_str(), (const void*)out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ":" << __LINE__ << boost::format("Unable to add model config file to archive\n");
             add_error("Unable to add model config file to archive");
@@ -8147,6 +8154,101 @@ static void handle_legacy_project_loaded(unsigned int version_project_file, Dyna
     }
 }
 
+// All mutable export inputs belong to this snapshot. Never give its Model the
+// live project's backup path: Model destruction would delete that backup.
+struct BackupSnapshot::Data
+{
+    Model model;
+    DynamicPrintConfig config;
+    std::vector<std::unique_ptr<PlateData>> plates;
+    std::vector<std::unique_ptr<Preset>> presets;
+    BBLProject project;
+    std::string path;
+    std::string scratch;
+    StoreParams params;
+
+    explicit Data(const StoreParams& source) : model(*source.model), config(*source.config), path(source.path)
+    {
+        for (size_t i = 0; i < model.objects.size(); ++i) {
+            model.set_object_backup_id(*model.objects[i], source.model->get_object_backup_id(*source.model->objects[i]));
+            for (auto* volume : model.objects[i]->volumes) {
+                if (volume->emboss_shape && volume->emboss_shape->svg_file) {
+                    auto& data = volume->emboss_shape->svg_file->file_data;
+                    if (data) data = std::make_shared<std::string>(*data);
+                }
+            }
+        }
+        if (model.design_info) model.design_info = std::make_shared<ModelDesignInfo>(*model.design_info);
+        if (model.model_info) model.model_info = std::make_shared<ModelInfo>(*model.model_info);
+        if (model.profile_info) model.profile_info = std::make_shared<ModelProfileInfo>(*model.profile_info);
+        params.path = path.c_str();
+        params.model = &model;
+        params.config = &config;
+        params.strategy = source.strategy;
+        params.export_plate_idx = source.export_plate_idx;
+        for (const auto* plate : source.plate_data_list) {
+            plates.push_back(std::make_unique<PlateData>(*plate));
+            params.plate_data_list.push_back(plates.back().get());
+        }
+        for (const auto* preset : source.project_presets) {
+            if (!preset) continue;
+            presets.push_back(std::make_unique<Preset>(*preset));
+            params.project_presets.push_back(presets.back().get());
+        }
+        if (source.project) {
+            // These are the only project fields exported; profiles contain live pointers.
+            project.project_model_id = source.project->project_model_id;
+            project.project_country_code = source.project->project_country_code;
+            params.project = &project;
+        }
+    }
+    ~Data()
+    {
+        model.set_backup_path("detach");
+        if (!scratch.empty()) {
+            boost::system::error_code ec;
+            boost::filesystem::remove_all(scratch, ec);
+        }
+    }
+    bool write()
+    {
+        TraceryPerformanceScope timing("backup_write_background");
+        timing.count("thread_id", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        try {
+            scratch = (boost::filesystem::temp_directory_path() /
+                       boost::filesystem::unique_path("tracery-backup-write-%%%%-%%%%-%%%%")).string();
+            boost::filesystem::create_directories(scratch);
+            model.set_backup_path(scratch);
+            const bool result = store_bbs_3mf(params);
+            if (!result) timing.mark_failed();
+            return result;
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "Background project backup failed: " << e.what();
+            timing.mark_failed();
+            return false;
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "Background project backup failed";
+            timing.mark_failed();
+            return false;
+        }
+    }
+};
+
+BackupSnapshot::BackupSnapshot(const StoreParams& source)
+{
+    TraceryPerformanceScope timing("backup_snapshot_prepare");
+    timing.count("thread_id", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    auto strategy = source.strategy;
+    if (!source.path || !source.model || !source.config || !(strategy & SaveStrategy::Backup) || source.proFn ||
+        source.profile || !source.thumbnail_data.empty() || !source.no_light_thumbnail_data.empty() ||
+        !source.top_thumbnail_data.empty() || !source.pick_thumbnail_data.empty() ||
+        !source.calibration_thumbnail_data.empty() || !source.id_bboxes.empty())
+        throw std::invalid_argument("Background backup requires owned, non-interactive backup inputs");
+    m_data = std::make_unique<Data>(source);
+}
+
+BackupSnapshot::~BackupSnapshot() = default;
+
 // backup backgroud thread to dispatch tasks and coperate with ui thread
 class _BBS_Backup_Manager
 {
@@ -8202,9 +8304,35 @@ public:
         push_task({ RemoveObject, object.id().id, object.get_model()->get_backup_path() });
     }
 
+    void enqueue_snapshot(std::shared_ptr<BackupSnapshot> snapshot, std::function<void(bool)> completed)
+    {
+        Task task{SaveProject, 0, snapshot->m_data->path};
+        task.write = std::make_shared<WriteTask>();
+        task.write->snapshot = std::move(snapshot);
+        task.write->completed = std::move(completed);
+        task.write->revision = m_other_changes_revision;
+        std::deque<Task> superseded;
+        {
+            boost::lock_guard lock(m_mutex);
+            for (auto it = m_tasks.begin(); it != m_tasks.end();) {
+                if (it->type == SaveProject && it->path == task.path) {
+                    superseded.push_back(std::move(*it));
+                    it = m_tasks.erase(it);
+                } else ++it;
+            }
+            // Append after mesh updates; replacing in place could export a new
+            // manifest before the corresponding object files have been written.
+            m_tasks.push_back(std::move(task));
+            ++m_task_seq;
+            m_cond.notify_all();
+        }
+        for (auto& old : superseded) process_ui_task(old, true);
+    }
+
     void backup_soon() {
         boost::lock_guard lock(m_mutex);
         m_other_changes_backup = true;
+        ++m_other_changes_revision;
         m_tasks.push_back({ Backup, 0, std::string(), nullptr, ++m_task_seq });
         m_cond.notify_all();
     }
@@ -8228,6 +8356,7 @@ public:
         if (model.is_need_backup()) {
             m_other_changes = false;
             m_other_changes_backup = false;
+            ++m_other_changes_revision;
         }
         m_cond.notify_all();
         lock.unlock();
@@ -8251,6 +8380,7 @@ public:
         BOOST_LOG_TRIVIAL(info) << "put_other_changes";
         m_other_changes        = true;
         m_other_changes_backup = true;
+        ++m_other_changes_revision;
     }
 
     void clear_other_changes(bool backup)
@@ -8273,7 +8403,14 @@ private:
         AddObject,
         RemoveObject,
         RemoveBackup,
+        SaveProject,
         Exit
+    };
+    struct WriteTask {
+        std::shared_ptr<BackupSnapshot> snapshot;
+        std::function<void(bool)> completed;
+        bool success = false;
+        size_t revision = 0;
     };
     struct Task {
         TaskType type;
@@ -8285,6 +8422,7 @@ private:
         size_t sequence;
         bool removeAll;
         };
+        std::shared_ptr<WriteTask> write;
         friend bool operator==(Task const& l, Task const& r) {
             return l.type == r.type && l.id == r.id;
         }
@@ -8294,6 +8432,7 @@ private:
                                                   "AddObject",
                                                   "RemoveObject",
                                                   "RemoveBackup",
+                                                  "SaveProject",
                                                   "Exit"};
             std::ostringstream os;
             os << "{ type:" << type_names[type] << ", id:" << id
@@ -8373,9 +8512,15 @@ private:
                         if (callback) callback(1);
                     } catch (...) {}
                 }
-                m_other_changes_backup = false;
                 break;
             }
+            case SaveProject:
+                if (!canceled) {
+                    if (t.write->success && t.write->revision == m_other_changes_revision)
+                        m_other_changes_backup = false;
+                    if (t.write->completed) t.write->completed(t.write->success);
+                }
+                break;
             case AddObject:
                 m_temp_model.delete_object(t.object);
                 break;
@@ -8398,6 +8543,11 @@ private:
         switch (t.type) {
             case Backup:
                 // do it in response
+                break;
+            case SaveProject:
+                t.write->success = t.write->snapshot->m_data->write();
+                // Release large copied documents here, not in the GUI completion.
+                t.write->snapshot.reset();
                 break;
             case AddObject: {
                 {
@@ -8452,14 +8602,17 @@ public:
                     continue;
             }
             m_tasks.pop_front();
-            auto callback = m_post_callback;
             lock.unlock();
             process_task(t);
             lock.lock();
             if (t.type > None) {
-                m_ui_tasks.push_back(t);
-                if (m_ui_tasks.size() == 1 && callback)
-                    callback(0);
+                // Move GUI-owned completion captures into the UI queue so their
+                // final destruction cannot race window destruction on this worker.
+                m_ui_tasks.push_back(std::move(t));
+                // The window may have closed during a long write. Re-read the
+                // callback under the lock instead of using a pre-write copy.
+                if (m_ui_tasks.size() == 1 && m_post_callback)
+                    m_post_callback(0);
             }
         }
     }
@@ -8501,12 +8654,19 @@ private:
     long m_interval = 1 * 60;
     boost::system_time m_next_backup;
     Model m_temp_model; // visit only in main thread
+    size_t m_other_changes_revision = 0; // visit only in main thread
     bool m_other_changes = false; // visit only in main thread
     bool m_other_changes_backup = false; // visit only in main thread
     std::vector<std::pair<ModelObject*, size_t>> m_gaurd_objects;
     boost::thread m_thread;
 };
 
+
+void BackupSnapshot::enqueue(std::shared_ptr<BackupSnapshot> snapshot, std::function<void(bool)> completed)
+{
+    if (!snapshot) throw std::invalid_argument("Missing backup snapshot");
+    _BBS_Backup_Manager::get().enqueue_snapshot(std::move(snapshot), std::move(completed));
+}
 
 //BBS: add plate data list related logic
 bool load_bbs_3mf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, PlateDataPtrs* plate_data_list, std::vector<Preset*>* project_presets,

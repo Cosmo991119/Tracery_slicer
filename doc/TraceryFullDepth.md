@@ -2,7 +2,7 @@
 
 Development branch: `codex/tracery-full-through-slicing`.
 Based on `462d900886` of `codex/tracery-density-performance`.
-Do not merge until the user has verified the preview build.
+The user accepted the preview and authorized integration into `codex/tracery-app-icons` on 2026-10-24.
 
 ## 预览版验收
 
@@ -14,7 +14,7 @@ Do not merge until the user has verified the preview build.
 
 复选框默认关闭，改变它只影响后续操作；重新生成会按当前模式处理选区。
 启用完整贯穿的项目保存为 V3，请用本预览版打开，避免用旧版覆盖保存。
-本分支在用户确认效果之前不合并。
+用户已于 2026-10-24 确认效果并授权合入 `codex/tracery-app-icons`。
 
 ## User behavior
 
@@ -109,3 +109,11 @@ is implied by unit or slicing tests.
   acceptance before merge. Physical printing has not been tested.
 
 Logs are bundled beside the application in `build-through/releases/verification/`.
+
+## Integration with the current application branch
+
+The integration preserves the current branch's identity remapping, published
+snapshot cache, material-usage cache and asynchronous backup worker. Its streaming
+metadata reader now accepts V3 as well as V1/V2. Cached full-depth documents and
+both V2/V3 background backup restore paths have explicit regression coverage.
+The unrelated README change from the feature branch's historical base is excluded.

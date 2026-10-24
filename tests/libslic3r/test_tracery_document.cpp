@@ -8,14 +8,19 @@
 #include "libslic3r/TraceryPerformance.hpp"
 #include "libslic3r/TraceryPolygonPreparation.hpp"
 #include "libslic3r/TraceryBasePaint.hpp"
+#include "libslic3r/TraceryPlateMaterials.hpp"
 #include "libslic3r/TraceryDisjointSet.hpp"
 #include "libslic3r/TraceryPreviousFacetIndex.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Format/BackupSnapshot.hpp"
+#include "libslic3r/Preset.hpp"
+#include <thread>
 #include <boost/filesystem.hpp>
 #include <fstream>
 #include <cstdlib>
 #include <chrono>
+#include <cstdio>
 #include <random>
 using namespace Slic3r;
 
@@ -335,6 +340,105 @@ TEST_CASE("Uniform selection subtrees export once without changing the brush tre
     CHECK(selector.coalesced_painted_leaves(true, &no_changes).empty());
 }
 
+TEST_CASE("Direct leaf transforms preserve brush and erase results without self queries", "[TraceryVector][TraceryLeafTransform]")
+{
+    indexed_triangle_set its;
+    its.vertices = {{0,0,0},{16,0,0},{0,16,0}};
+    its.indices = {{0,1,2}};
+    const TriangleMesh mesh(its);
+    TriangleSelector reference(mesh), optimized(mesh);
+    reference.deserialize(uniform_annotation_tree(6));
+    reference.set_leaf_states([](const Vec3f& p, int) {
+        return p.x() > 8 ? EnforcerBlockerType::ExtruderMax : EnforcerBlockerType(2);
+    });
+    optimized.deserialize(reference.serialize());
+    for (bool erase : {false, true}) {
+        reference.set_leaf_states([&](const Vec3f& p, int facet) {
+            const auto state = reference.state_at(p, facet);
+            return state == EnforcerBlockerType::ExtruderMax || (erase && p.y() < 3) ? EnforcerBlockerType::NONE : state;
+        });
+        optimized.transform_leaf_states([&](EnforcerBlockerType state, const Vec3f& p, int) {
+            return state == EnforcerBlockerType::ExtruderMax || (erase && p.y() < 3) ? EnforcerBlockerType::NONE : state;
+        });
+        CHECK(optimized.serialize() == reference.serialize());
+    }
+    optimized.transform_leaf_states({});
+    CHECK_FALSE(optimized.has_facets(EnforcerBlockerType(2)));
+    CHECK(optimized.painted_leaves(true).size() == 4096);
+}
+
+TEST_CASE("Source facet queries recover subdivided paint without searching other surfaces", "[TraceryVector][TracerySourcePaint]")
+{
+    indexed_triangle_set its;
+    its.vertices = {{0,0,0}, {16,0,0}, {0,16,0}, {0,0,0.00001f}, {16,0,0.00001f}, {0,16,0.00001f}};
+    its.indices = {{0,1,2}, {3,4,5}};
+    const TriangleMesh mesh(its);
+    TriangleSelector source(mesh);
+    source.deserialize(uniform_annotation_tree(6));
+    source.set_leaf_states([](const Vec3f& p, int facet) {
+        return EnforcerBlockerType(facet == 1 ? 4 : (p.x() < 5 ? 1 : (p.y() < 5 ? 2 : 0)));
+    });
+    for (unsigned state : {0u, 1u, 2u, 4u}) {
+        const auto exported = source.get_facets_strict_with_sources(EnforcerBlockerType(state));
+        for (size_t i = 0; i < exported.facets.indices.size(); ++i) {
+            const auto& face = exported.facets.indices[i];
+            const auto& vertices = exported.facets.vertices;
+            const Vec3f center = (vertices[face[0]] + vertices[face[1]] + vertices[face[2]]) / 3.f;
+            CHECK(unsigned(source.state_at(center, exported.source_facet_ids[i])) == state);
+        }
+    }
+}
+
+TEST_CASE("Measure direct brush leaf transforms against self queries", "[TraceryLeafTransformBenchmark][.benchmark]")
+{
+    indexed_triangle_set its;
+    its.vertices = {{0,0,0}, {16,0,0}, {0,16,0}};
+    its.indices = {{0,1,2}};
+    const TriangleMesh mesh(its);
+    TriangleSelector reference(mesh), optimized(mesh);
+    reference.deserialize(uniform_annotation_tree(9));
+    reference.set_leaf_states([](const Vec3f& point, int) {
+        return point.x() > 8 ? EnforcerBlockerType::ExtruderMax : EnforcerBlockerType(2);
+    });
+    const auto initial = reference.serialize();
+    using Clock = std::chrono::steady_clock;
+    for (int repeat = 0; repeat < 3; ++repeat) {
+        reference.deserialize(initial);
+        optimized.deserialize(initial);
+        const auto begin = Clock::now();
+        reference.set_leaf_states([&](const Vec3f& point, int facet) {
+            const auto state = reference.state_at(point, facet);
+            return state == EnforcerBlockerType::ExtruderMax ? EnforcerBlockerType::NONE : state;
+        });
+        const auto middle = Clock::now();
+        optimized.transform_leaf_states([](EnforcerBlockerType state, const Vec3f&, int) {
+            return state == EnforcerBlockerType::ExtruderMax ? EnforcerBlockerType::NONE : state;
+        });
+        const auto end = Clock::now();
+        CHECK(optimized.serialize() == reference.serialize());
+        std::printf("TRACERY_LEAF_BENCH repeat=%d leaves=262144 lookup_ms=%.3f direct_ms=%.3f\n", repeat,
+            std::chrono::duration<double, std::milli>(middle - begin).count(),
+            std::chrono::duration<double, std::milli>(end - middle).count());
+    }
+}
+
+TEST_CASE("Source filtering preserves selection when blocked materials are absent", "[TraceryVector][TracerySourcePaint]")
+{
+    const TriangleMesh mesh = make_cube(5,5,1);
+    TriangleSelector source(mesh), selected(mesh);
+    source.set_facet(0, EnforcerBlockerType(2));
+    selected.set_facet(0, EnforcerBlockerType::ENFORCER);
+    selected.set_facet(1, EnforcerBlockerType::ENFORCER);
+    const auto before = selected.serialize();
+    tracery_filter_source_selection(selected, source, {EnforcerBlockerType(3)});
+    CHECK(selected.serialize() == before);
+    tracery_filter_source_selection(selected, source, {EnforcerBlockerType(2)});
+    CHECK_FALSE(selected.has_facets(EnforcerBlockerType(2)));
+    CHECK(selected.num_facets(EnforcerBlockerType::ENFORCER) == 1);
+    tracery_filter_source_selection(selected, source, {EnforcerBlockerType::NONE});
+    CHECK_FALSE(selected.has_facets(EnforcerBlockerType::ENFORCER));
+}
+
 TEST_CASE("Coalesced annotation export preserves colours holes and original facets", "[TraceryVector][TraceryCoalesce]")
 {
     indexed_triangle_set its;
@@ -516,6 +620,37 @@ TEST_CASE("Vector document snapshots reuse identical data without sharing mutabl
     REQUIRE(editable.material_ids().empty());
 }
 
+TEST_CASE("Publishing a document reuses its immutable snapshot across nested refreshes", "[TraceryVector][TraceryCache]")
+{
+    const TriangleMesh mesh = make_cube(3, 4, 5);
+    std::vector<TraceryDocument::Annotation> annotations(8);
+    auto document = TraceryDocument::capture(mesh, annotations);
+    document.apply_vector_edit(mesh, annotations, {}, TraceryEdit::Paint);
+    const auto expected = document.encode();
+    const auto* vertices = document.base_mesh().its.vertices.data();
+    TraceryDocument::ReadCacheScope transaction;
+    const auto encoded = std::move(document).encode_cached();
+    REQUIRE(encoded == expected);
+    const auto snapshot = TraceryDocument::decode_cached(encoded);
+    // Moving the prepared document into the cache avoids a JSON round trip.
+    CHECK(snapshot->base_mesh().its.vertices.data() == vertices);
+    {
+        TraceryDocument::ReadCacheScope refresh;
+        CHECK(TraceryDocument::decode_cached(encoded) == snapshot);
+        auto editable = *snapshot;
+        editable.set_selection_reference(annotations[0]);
+        CHECK(editable.encode() == expected);
+    }
+    CHECK(TraceryDocument::decode(encoded).encode() == expected);
+    REQUIRE_THROWS(TraceryDocument::decode_cached("{broken-published-document}"));
+    auto invalid = *snapshot;
+    auto bad_reference = annotations[0];
+    bad_reference.bitstream.push_back(false);
+    bad_reference.triangles_to_split.emplace_back(int(mesh.its.indices.size()), 0);
+    invalid.set_selection_reference(std::move(bad_reference));
+    REQUIRE_THROWS(std::move(invalid).encode_cached());
+}
+
 TEST_CASE("Previous selection candidates preserve the original scan order", "[TraceryVector][TracerySelectionIndex]")
 {
     const std::vector<int> sources = {3, 1, 3, 8, 1, 3, -1};
@@ -529,6 +664,57 @@ TEST_CASE("Previous selection candidates preserve the original scan order", "[Tr
                 expected.push_back(i);
         CHECK(index.candidates(source) == expected);
     }
+}
+
+TEST_CASE("Material queries reuse unchanged large documents after the commit scope ends", "[TraceryVector][TraceryMaterialUsageCache]")
+{
+    Model model;
+    auto* object = model.add_object();
+    for (unsigned i = 0; i < 3; ++i) {
+        auto* volume = object->add_volume(make_cube(10, 10, 1));
+        TriangleSelector paint(volume->mesh());
+        paint.set_facet(0, EnforcerBlockerType(i + 2));
+        volume->mmu_segmentation_facets.set(paint);
+        std::vector<TraceryDocument::Annotation> annotations(8);
+        annotations[0] = volume->mmu_segmentation_facets.get_data();
+        auto document = TraceryDocument::capture(volume->mesh(), annotations);
+        document.apply_vector_edit(volume->mesh(), annotations, {}, TraceryEdit::Paint);
+        // Valid whitespace reproduces documents exceeding the 32 MiB idle
+        // budget without coupling this regression to expensive geometry.
+        volume->tracery_edit_data = document.encode() + std::string(33 * 1024 * 1024 + i, ' ');
+    }
+    {
+        TraceryPerformanceScope first("material_usage_first_pass");
+        TraceryDocument::ReadCacheScope commit;
+        for (unsigned i = 0; i < object->volumes.size(); ++i)
+            CHECK(object->volumes[i]->vector_material_ids() == std::vector<unsigned>{i + 2});
+    }
+    {
+        TraceryPerformanceScope repeated("material_usage_repeat_pass");
+        for (int pass = 0; pass < 3; ++pass)
+            for (unsigned i = 0; i < object->volumes.size(); ++i)
+                CHECK(object->volumes[i]->vector_material_ids() == std::vector<unsigned>{i + 2});
+    }
+}
+
+TEST_CASE("An outer update retains snapshots loaded by a nested validation callback", "[TraceryVector][TraceryNestedCache]")
+{
+    const TriangleMesh mesh = make_cube(11,12,1);
+    const std::vector<TraceryDocument::Annotation> annotations(8);
+    auto document = TraceryDocument::capture(mesh, annotations);
+    document.apply_vector_edit(mesh, annotations, {}, TraceryEdit::Paint);
+    const auto encoded = document.encode() + std::string(33 * 1024 * 1024 + 17, ' ');
+    std::weak_ptr<const TraceryDocument> snapshot;
+    {
+        TraceryDocument::ReadCacheScope update;
+        {
+            TraceryDocument::ReadCacheScope validation;
+            snapshot = TraceryDocument::decode_cached(encoded);
+        }
+        REQUIRE_FALSE(snapshot.expired());
+        CHECK(TraceryDocument::decode_cached(encoded) == snapshot.lock());
+    }
+    CHECK(snapshot.expired()); // no unbounded retention after the update
 }
 
 TEST_CASE("Vector snapshots follow ordinary paint and undo without mutating cached documents", "[TraceryVector][TraceryCache]")
@@ -559,6 +745,66 @@ TEST_CASE("Vector snapshots follow ordinary paint and undo without mutating cach
     volume->set_mesh(make_cube(20, 10, 1));
     volume->tracery_edit_data = saved;
     REQUIRE_THROWS(TraceryDocument::from_volume_snapshot(*volume));
+}
+
+TEST_CASE("Material usage tracks document edits ordinary paint copies undo and mesh replacement", "[TraceryVector][TraceryMaterialUsageState]")
+{
+    indexed_triangle_set its;
+    its.vertices = {{0,0,0}, {10,0,0}, {0,10,0}};
+    its.indices = {{0,1,2}};
+    Model model;
+    auto* object = model.add_object();
+    auto* volume = object->add_volume(TriangleMesh(its), ModelVolumeType::MODEL_PART, false);
+    std::vector<TraceryDocument::Annotation> annotations(8);
+    auto encoded = [&](unsigned color) {
+        auto document = TraceryDocument::capture(volume->mesh(), annotations);
+        TriangleSelector::TraceryFacet2DData facet;
+        facet.source_facet_id = 0;
+        TriangleSelector::TraceryRegion2D region;
+        region.color = EnforcerBlockerType(color);
+        region.polygon = {{0,0}, {10,0}, {0,10}};
+        facet.regions.push_back(region);
+        document.apply_vector_edit(volume->mesh(), annotations, {facet}, TraceryEdit::Paint);
+        return document.encode();
+    };
+    const auto first = encoded(2), second = encoded(3);
+    REQUIRE(first.size() == second.size());
+    volume->tracery_edit_data = first;
+    CHECK(volume->vector_material_ids() == std::vector<unsigned>{2});
+    auto* copy = model.add_object(*object)->volumes.front();
+    CHECK(copy->vector_material_ids() == std::vector<unsigned>{2});
+    volume->tracery_edit_data = second; // same length, different content
+    CHECK(volume->vector_material_ids() == std::vector<unsigned>{3});
+    CHECK(copy->vector_material_ids() == std::vector<unsigned>{2});
+    volume->tracery_edit_data = first; // undo
+    CHECK(volume->vector_material_ids() == std::vector<unsigned>{2});
+    TriangleSelector ordinary(volume->mesh());
+    ordinary.set_facet(0, EnforcerBlockerType(7));
+    volume->mmu_segmentation_facets.set(ordinary);
+    CHECK(volume->vector_material_ids() == std::vector<unsigned>{7});
+    const auto serialized_paint = volume->mmu_segmentation_facets.get_triangle_as_string(0);
+    ordinary.set_facet(0, EnforcerBlockerType::NONE);
+    volume->mmu_segmentation_facets.set(ordinary);
+    CHECK(volume->vector_material_ids() == std::vector<unsigned>{2});
+    // Import appends annotation data without changing its timestamp.
+    const auto timestamp = volume->mmu_segmentation_facets.timestamp();
+    volume->mmu_segmentation_facets.set_triangle_from_string(0, serialized_paint);
+    CHECK(volume->mmu_segmentation_facets.timestamp() == timestamp);
+    CHECK(volume->vector_material_ids() == std::vector<unsigned>{7});
+    volume->mmu_segmentation_facets.reset();
+    CHECK(volume->vector_material_ids() == std::vector<unsigned>{2});
+    volume->tracery_edit_data = "{invalid}";
+    CHECK_THROWS(volume->vector_material_ids());
+    volume->tracery_edit_data.clear();
+    CHECK(volume->vector_material_ids().empty());
+    volume->tracery_edit_data = first;
+    CHECK(volume->vector_material_ids() == std::vector<unsigned>{2});
+    volume->center_geometry_after_creation();
+    volume->tracery_edit_data = first;
+    CHECK_THROWS(volume->vector_material_ids());
+    volume->set_mesh(make_cube(10,10,1));
+    volume->tracery_edit_data = first;
+    CHECK_THROWS(volume->vector_material_ids());
 }
 
 TEST_CASE("Stained glass groups retain their connectivity for long merge chains", "[TraceryVector][TraceryConnectivity]")
@@ -1238,4 +1484,185 @@ TEST_CASE("Successive glass strokes preserve the earlier selection footprint", "
     paint(Vec3f(12, 3, 0), 2.f);
     CHECK(mask.state_at(Vec3f(3, 3, 0), 0) == EnforcerBlockerType::ENFORCER);
     CHECK(mask.state_at(Vec3f(6, 3, 0), 0) == EnforcerBlockerType::NONE);
+}
+
+
+TEST_CASE("Background backup restores its captured vector document after subsequent edits", "[TraceryBackup]")
+{
+    const bool full_depth = GENERATE(false, true);
+    CAPTURE(full_depth);
+    set_backup_interval(0);
+    const auto directory = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("tracery-backup-%%%%-%%%%");
+    boost::filesystem::create_directories(directory / "3D/Objects");
+    Model model, restored;
+    PlateDataPtrs plates;
+    std::vector<Preset*> presets;
+    struct Cleanup {
+        Model& model;
+        Model& restored;
+        PlateDataPtrs& plates;
+        std::vector<Preset*>& presets;
+        boost::filesystem::path directory;
+        ~Cleanup() {
+            model.set_backup_path("detach");
+            restored.set_backup_path("detach");
+            release_PlateData_list(plates);
+            for (auto* preset : presets) delete preset;
+            boost::system::error_code error;
+            boost::filesystem::remove_all(directory, error);
+        }
+    } cleanup{model, restored, plates, presets, directory};
+    model.set_backup_path(directory.string());
+    auto* object = model.add_object();
+    object->name = "captured";
+    auto* volume = object->add_volume(make_cube(10, 10, 1));
+    object->add_instance();
+    TriangleSelector ordinary(volume->mesh());
+    ordinary.set_facet(0, EnforcerBlockerType(2));
+    volume->mmu_segmentation_facets.set(ordinary);
+    std::vector<TraceryDocument::Annotation> annotations(8);
+    annotations[0] = ordinary.serialize();
+    auto document = TraceryDocument::capture(volume->mesh(), annotations);
+    TriangleSelector::Tracery2DData paint;
+    const auto bounds = volume->mesh().bounding_box();
+    const float top = bounds.max.z();
+    for (size_t i = 0; i < volume->mesh().its.indices.size(); ++i) {
+        const auto& triangle = volume->mesh().its.indices[i];
+        const auto& vertices = volume->mesh().its.vertices;
+        if (vertices[triangle[0]].z() != top || vertices[triangle[1]].z() != top || vertices[triangle[2]].z() != top)
+            continue;
+        TriangleSelector::TraceryFacet2DData facet;
+        facet.source_facet_id = int(i);
+        facet.origin.z() = top;
+        TriangleSelector::TraceryRegion2D region;
+        const double x_mid = (bounds.min.x() + bounds.max.x()) * .5;
+        region.polygon = {{bounds.min.x(), bounds.min.y()}, {x_mid, bounds.min.y()},
+                          {x_mid, bounds.max.y()}, {bounds.min.x(), bounds.max.y()}};
+        region.color = EnforcerBlockerType(3);
+        facet.regions.push_back(region);
+        paint.push_back(facet);
+    }
+    REQUIRE_FALSE(paint.empty());
+    document.apply_vector_edit(volume->mesh(), annotations, paint, TraceryEdit::Paint, full_depth ? &paint : nullptr);
+    REQUIRE_FALSE(document.surface_regions().empty());
+    auto captured = document.encode();
+    if (const char* mb = std::getenv("TRACERY_BACKUP_BENCH_MB"))
+        captured.append(size_t(std::clamp(std::atoi(mb), 0, 128)) * 1024 * 1024, ' ');
+    volume->tracery_edit_data = captured;
+    model.set_need_backup();
+    save_object_mesh(*object);
+    DynamicPrintConfig config;
+    config.set_key_value("layer_height", new ConfigOptionFloat(.2));
+    const std::string filename = (directory / ".3mf").string();
+    StoreParams params;
+    params.path = filename.c_str();
+    params.model = &model;
+    params.config = &config;
+    params.strategy = SaveStrategy::Backup;
+    put_other_changes();
+    auto snapshot = std::make_shared<BackupSnapshot>(params);
+    config.set_key_value("layer_height", new ConfigOptionFloat(.3));
+    volume->tracery_edit_data.clear();
+    object->name = "later edit";
+    struct Completion { bool done = false; bool success = false; std::thread::id thread; };
+    auto completion = std::make_shared<Completion>();
+    bool& completed = completion->done;
+    bool& success = completion->success;
+    const auto ui_thread = std::this_thread::get_id();
+    BackupSnapshot::enqueue(std::move(snapshot), [completion](bool result) {
+        completion->thread = std::this_thread::get_id();
+        completion->success = result;
+        completion->done = true;
+    });
+    CHECK(has_other_changes(true)); // queueing does not acknowledge backup
+    CHECK_FALSE(completed); // no synchronous serialization/completion on the GUI thread
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!completed && std::chrono::steady_clock::now() < deadline) {
+        run_backup_ui_tasks();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(completed);
+    REQUIRE(success);
+    CHECK_FALSE(has_other_changes(true));
+    CHECK(completion->thread == ui_thread);
+    ConfigSubstitutionContext context{ForwardCompatibilitySubstitutionRule::Disable};
+    bool is_bbs = false;
+    Semver version;
+    REQUIRE(load_bbs_3mf(filename.c_str(), &config, &context, &restored, &plates, &presets,
+                         &is_bbs, &version, nullptr, LoadStrategy::Restore));
+    REQUIRE(restored.objects.size() == 1);
+    CHECK(restored.objects[0]->name == "captured");
+    REQUIRE(config.option<ConfigOptionFloat>("layer_height"));
+    CHECK(config.option<ConfigOptionFloat>("layer_height")->value == .2);
+    CHECK(restored.objects[0]->volumes[0]->tracery_edit_data == captured);
+    CHECK(restored.objects[0]->volumes[0]->mmu_segmentation_facets.get_data() == annotations[0]);
+    const auto restored_document = TraceryDocument::decode(restored.objects[0]->volumes[0]->tracery_edit_data);
+    CHECK(restored_document.matches(restored.objects[0]->volumes[0]->mesh()));
+    CHECK(restored_document.format_version() == (full_depth ? 3 : 2));
+    CHECK(restored_document.through_operations().empty() == !full_depth);
+    // A failed write must leave the previous recoverable archive intact and
+    // keep the project dirty so the next backup can retry it.
+    const auto read_archive = [&]() {
+        std::ifstream file(filename, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(file), {});
+    };
+    const auto previous_archive = read_archive();
+    REQUIRE_FALSE(previous_archive.empty());
+    volume->tracery_edit_data = "{invalid json";
+    put_other_changes();
+    completed = false;
+    BackupSnapshot::enqueue(std::make_shared<BackupSnapshot>(params), [completion](bool result) {
+        completion->success = result;
+        completion->done = true;
+    });
+    const auto failure_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!completed && std::chrono::steady_clock::now() < failure_deadline) {
+        run_backup_ui_tasks();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(completed);
+    CHECK_FALSE(success);
+    CHECK(has_other_changes(true));
+    CHECK(read_archive() == previous_archive);
+
+    // Exercise the non-exception I/O failure path as well: a nonempty directory
+    // at the temporary filename prevents opening the archive, without touching
+    // the previous successful backup.
+    volume->tracery_edit_data = captured;
+    boost::filesystem::create_directory(filename + ".tmp");
+    { std::ofstream blocker(filename + ".tmp/occupied"); blocker << "test"; }
+    completed = false;
+    BackupSnapshot::enqueue(std::make_shared<BackupSnapshot>(params), [completion](bool result) {
+        completion->success = result;
+        completion->done = true;
+    });
+    const auto io_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!completed && std::chrono::steady_clock::now() < io_deadline) {
+        run_backup_ui_tasks();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(completed);
+    CHECK_FALSE(success);
+    CHECK(has_other_changes(true));
+    CHECK(read_archive() == previous_archive);
+    boost::filesystem::remove_all(filename + ".tmp");
+
+    // Retry works; a config edit made after enqueue must not be acknowledged by
+    // the completion of the older snapshot.
+    volume->tracery_edit_data = captured;
+    object->name = "captured";
+    completed = false;
+    BackupSnapshot::enqueue(std::make_shared<BackupSnapshot>(params), [completion](bool result) {
+        completion->success = result;
+        completion->done = true;
+    });
+    put_other_changes();
+    const auto retry_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    while (!completed && std::chrono::steady_clock::now() < retry_deadline) {
+        run_backup_ui_tasks();
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(completed);
+    CHECK(success);
+    CHECK(has_other_changes(true));
 }

@@ -1,5 +1,6 @@
 #include "libslic3r/libslic3r.h"
 #include "GLCanvas3D.hpp"
+#include "libslic3r/TraceryInteractionTiming.hpp"
 
 #include <igl/unproject.h>
 
@@ -2892,6 +2893,8 @@ bool GLCanvas3D::make_current_for_postinit() {
 
 void GLCanvas3D::render(bool only_init)
 {
+    TraceryInteractionTiming::Activity gap_timing("post_stroke.render", this);
+    gap_timing.stage("post_stroke.render.setup");
     if (m_in_render) {
         // if called recursively, return
         m_dirty = true;
@@ -2966,6 +2969,7 @@ void GLCanvas3D::render(bool only_init)
     camera.UpdateFrustum();
     wxGetApp().imgui()->new_frame();
 
+    gap_timing.stage("post_stroke.render.picking");
     if (m_picking_enabled) {
         if (m_rectangle_selection.is_dragging())
             // picking pass using rectangle selection
@@ -2985,6 +2989,7 @@ void GLCanvas3D::render(bool only_init)
         }
     }
 
+    gap_timing.stage("post_stroke.render.scene");
     const ESelectionHighlightMode highlightMode = ResolveSelectionHighlightMode();
 
     // draw scene
@@ -3066,6 +3071,7 @@ void GLCanvas3D::render(bool only_init)
     // sidebar hints need to be rendered before the gizmos because the depth buffer
     // could be invalidated by the following gizmo render methods
     _render_selection_sidebar_hints();
+    gap_timing.stage("post_stroke.render.gizmo");
     _render_current_gizmo();
 
 #if ENABLE_RAYCAST_PICKING_DEBUG
@@ -3081,6 +3087,7 @@ void GLCanvas3D::render(bool only_init)
         m_rectangle_selection.render(*this);
 
     // draw overlays
+    gap_timing.stage("post_stroke.render.overlays");
     _render_overlays();
 
     if (wxGetApp().plater()->is_render_statistic_dialog_visible()) {
@@ -3167,9 +3174,12 @@ void GLCanvas3D::render(bool only_init)
         wxGetApp().plater()->get_dailytips()->render();
     }
 
+    gap_timing.stage("post_stroke.render.imgui");
     wxGetApp().imgui()->render();
 
+    gap_timing.stage("post_stroke.render.swap_buffers");
     m_canvas->SwapBuffers();
+    TraceryInteractionTiming::frame_presented(this);
     m_render_stats.increment_fps_counter();
 }
 
@@ -4192,6 +4202,10 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
     if (!m_initialized)
         return;
 
+    ScopeGuard interaction_idle([this]() { TraceryInteractionTiming::idle(this); });
+    TraceryInteractionTiming::Activity gap_timing("post_stroke.idle", this);
+    gap_timing.stage("post_stroke.idle.toolbars");
+
     m_dirty |= m_main_toolbar.update_items_state();
     //BBS: GUI refactor: GLToolbar
     m_dirty |= m_assemble_view_toolbar.update_items_state();
@@ -4199,9 +4213,11 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
     //m_dirty |= wxGetApp().plater()->get_view_toolbar().update_items_state();
     m_dirty |= wxGetApp().plater()->get_collapse_toolbar().update_items_state();
     _update_imgui_select_plate_toolbar();
+    gap_timing.stage("post_stroke.idle.controller_notifications");
     bool mouse3d_controller_applied = wxGetApp().plater()->get_mouse3d_controller().apply(wxGetApp().plater()->get_camera());
     m_dirty |= mouse3d_controller_applied;
     m_dirty |= wxGetApp().plater()->get_notification_manager()->update_notifications(*this);
+    gap_timing.stage("post_stroke.idle.gizmo_state");
     auto gizmo = wxGetApp().plater()->get_view3D_canvas3D()->get_gizmos_manager().get_current();
     if (gizmo != nullptr) m_dirty |= gizmo->update_items_state();
 #if ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
@@ -4219,6 +4235,7 @@ void GLCanvas3D::on_idle(wxIdleEvent& evt)
     wxGetApp().imgui()->reset_requires_extra_frame();
 #endif // ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
 
+    gap_timing.stage("post_stroke.idle.refresh");
     _refresh_if_shown_on_screen();
 
 #if ENABLE_ENHANCED_IMGUI_SLIDER_FLOAT
@@ -5123,6 +5140,11 @@ void GLCanvas3D::on_gesture(wxGestureEvent &evt)
 
 void GLCanvas3D::on_mouse(wxMouseEvent& evt)
 {
+    ScopeGuard mouse_return([this, released = evt.LeftUp() || evt.RightUp()]() {
+        if (released && TraceryInteractionTiming::after_generation(this))
+            TraceryInteractionTiming::milestone("mouse_release_handler_finished");
+    });
+    TraceryInteractionTiming::Activity gap_mouse("post_stroke.mouse_event", this);
     if (!m_initialized || !_set_current())
         return;
 
@@ -5226,6 +5248,7 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
     };
 
     if (!mouse_in_layer_editing && m_gizmos.on_mouse(evt)) {
+        TraceryInteractionTiming::Activity gap_cleanup("post_stroke.mouse_cleanup", this);
         if (m_gizmos.is_running()) {
             _deactivate_arrange_menu();
             _deactivate_orient_menu();
