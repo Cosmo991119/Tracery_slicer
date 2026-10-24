@@ -16,6 +16,7 @@
 #include "libslic3r/TraceryDisjointSet.hpp"
 #include "libslic3r/TraceryPreviousFacetIndex.hpp"
 #include "libslic3r/TraceryPerformance.hpp"
+#include "libslic3r/TraceryInteractionTiming.hpp"
 #include "libslic3r/TraceryVoronoi.hpp"
 #include "libslic3r/TraceryRegionMapping.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
@@ -1133,6 +1134,7 @@ void GLGizmoTracery::clear_stained_glass_editor()
 void GLGizmoTracery::update_model_object()
 {
     TraceryPerformanceScope performance("stroke");
+    TraceryInteractionTiming::Stroke interaction(&m_parent, performance.id());
     performance.stage("stroke.checkpoint");
     // The selectors already contain the brush preview, but m_mask_data still
     // describes the last committed stroke. Keep the complete editor checkpoint
@@ -1178,6 +1180,7 @@ void GLGizmoTracery::update_model_object()
         performance.stage("stroke.rollback");
         rollback();
         performance.stage("stroke.error_dialog_wait");
+        TraceryInteractionTiming::fail_current();
         wxMessageBox(from_u8(error.what()), _L("Stained glass"), wxOK | wxICON_ERROR);
         return;
     }
@@ -3164,6 +3167,7 @@ void GLGizmoTracery::apply_stained_glass_colors(const std::function<void()>& rol
         }
         performance.mark_failed();
         performance.stage("apply.error_dialog_wait");
+        TraceryInteractionTiming::fail_current();
         wxMessageBox(from_u8(error.what()), _L("Stained glass"), wxOK | wxICON_ERROR);
     }
 }
@@ -4925,6 +4929,7 @@ void GLGizmoTracery::notify_mmu_paint_changed(const ModelObject& object) const
     performance.stage("notify.instance_usage");
     wxGetApp().plater()->get_partplate_list().notify_instance_update(object_index, 0);
     performance.stage("notify.schedule_slice");
+    TraceryInteractionTiming::background_scheduled();
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
     performance.stage("notify.filament_usage");
     wxGetApp().plater()->notify_filament_usage_changed();

@@ -34,6 +34,7 @@ public:
     ~TraceryPerformanceScope() { finish(); }
 
     bool enabled() const { return m_enabled; }
+    unsigned long long id() const { return m_id; }
     void mark_failed() const
     {
         for (auto* scope = this; scope; scope = scope->m_parent)

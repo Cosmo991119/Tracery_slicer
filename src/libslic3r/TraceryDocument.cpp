@@ -38,6 +38,12 @@ struct TraceryDocument::ReadCacheScope::State {
     ~State() { active = previous; }
     void retain(const TraceryCacheEntryPtr& entry)
     {
+        // A nested validation callback must not release the working set before
+        // the enclosing scene update has finished using the same documents.
+        if (previous) {
+            previous->retain(entry);
+            return;
+        }
         entries.push_back(entry);
         source_bytes += entry->data.size();
     }

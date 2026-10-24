@@ -10,6 +10,7 @@
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
 #include "TraceryDocument.hpp"
+#include "TraceryPerformance.hpp"
 
 #include "Format/AMF.hpp"
 #include "Format/svg.hpp"
@@ -2605,11 +2606,45 @@ bool ModelVolume::is_splittable() const
     return m_is_splittable == 1;
 }
 
+struct ModelVolume::VectorMaterialUsageCache
+{
+    std::string document;
+    Timestamp paint_timestamp;
+    size_t paint_triangle_count;
+    size_t paint_bit_count;
+    std::weak_ptr<const TriangleMesh> mesh;
+    std::vector<unsigned> materials;
+};
+
 // BBS
 std::vector<unsigned> ModelVolume::vector_material_ids() const
 {
+    if (tracery_edit_data.empty()) {
+        std::atomic_store(&m_vector_material_usage_cache, std::shared_ptr<const VectorMaterialUsageCache>{});
+        return {};
+    }
+    TraceryPerformanceScope performance("vector_material_usage");
+    performance.stage("material_usage.lookup");
+    const auto& paint = mmu_segmentation_facets.get_data();
+    const auto cached = std::atomic_load(&m_vector_material_usage_cache);
+    if (cached && cached->paint_timestamp == mmu_segmentation_facets.timestamp() &&
+        cached->paint_triangle_count == paint.triangles_to_split.size() && cached->paint_bit_count == paint.bitstream.size() &&
+        cached->mesh.lock() == m_mesh && cached->document == tracery_edit_data) {
+        performance.count("cache_hit", 1);
+        return cached->materials;
+    }
+    performance.count("cache_hit", 0);
+    performance.stage("material_usage.compute");
     const auto doc = TraceryDocument::from_volume_snapshot(*this);
-    return doc ? doc->material_ids() : std::vector<unsigned>{};
+    auto materials = doc ? doc->material_ids() : std::vector<unsigned>{};
+    performance.stage("material_usage.publish");
+    // Keep the exact source string for collision-free invalidation, but not the
+    // much larger parsed geometry. Failed reads never publish a cache entry.
+    std::shared_ptr<const VectorMaterialUsageCache> entry = std::make_shared<VectorMaterialUsageCache>(
+        VectorMaterialUsageCache{tracery_edit_data, mmu_segmentation_facets.timestamp(), paint.triangles_to_split.size(),
+                                 paint.bitstream.size(), m_mesh, materials});
+    std::atomic_store(&m_vector_material_usage_cache, std::move(entry));
+    return materials;
 }
 
 std::vector<int> ModelVolume::get_extruders() const
@@ -2753,6 +2788,7 @@ void ModelVolume::center_geometry_after_creation(bool update_source_offset)
     if (!shift.isApprox(Vec3d::Zero()))
     {
         tracery_edit_data.clear();
+        std::atomic_store(&m_vector_material_usage_cache, std::shared_ptr<const VectorMaterialUsageCache>{});
         if (m_mesh) {
             const_cast<TriangleMesh*>(m_mesh.get())->translate(-(float)shift(0), -(float)shift(1), -(float)shift(2));
             const_cast<TriangleMesh*>(m_mesh.get())->set_init_shift(shift);
@@ -3034,6 +3070,7 @@ void ModelVolume::mirror(Axis axis)
 void ModelVolume::scale_geometry_after_creation(const Vec3f& versor)
 {
     tracery_edit_data.clear();
+    std::atomic_store(&m_vector_material_usage_cache, std::shared_ptr<const VectorMaterialUsageCache>{});
 	const_cast<TriangleMesh*>(m_mesh.get())->scale(versor);
     if (m_convex_hull->empty())
         //BBS: recompute the convex hull if it is null for previous too small

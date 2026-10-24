@@ -1115,6 +1115,12 @@ private:
     //      1   ->   is splittable
     mutable int               		m_is_splittable{ -1 };
 
+    // Transient material metadata, never serialized. Immutable entries can be
+    // shared by model copies; changes are detected from the full document,
+    // ordinary paint timestamp and source mesh identity.
+    struct VectorMaterialUsageCache;
+    mutable std::shared_ptr<const VectorMaterialUsageCache> m_vector_material_usage_cache;
+
 	ModelVolume(ModelObject *object, const TriangleMesh &mesh, ModelVolumeType type = ModelVolumeType::MODEL_PART) : m_mesh(new TriangleMesh(mesh)), m_type(type), object(object)
     {
 		assert(this->id().valid());
@@ -1166,7 +1172,8 @@ private:
         name(other.name), source(other.source), tracery_edit_data(other.tracery_edit_data), m_mesh(other.m_mesh), m_convex_hull(other.m_convex_hull),
         config(other.config), m_type(other.m_type), object(object), m_transformation(other.m_transformation),
         supported_facets(other.supported_facets), seam_facets(other.seam_facets), mmu_segmentation_facets(other.mmu_segmentation_facets),
-        fuzzy_skin_facets(other.fuzzy_skin_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape)
+        fuzzy_skin_facets(other.fuzzy_skin_facets), cut_info(other.cut_info), text_configuration(other.text_configuration), emboss_shape(other.emboss_shape),
+        m_vector_material_usage_cache(std::atomic_load(&other.m_vector_material_usage_cache))
     {
 		assert(this->id().valid()); 
         assert(this->config.id().valid()); 
