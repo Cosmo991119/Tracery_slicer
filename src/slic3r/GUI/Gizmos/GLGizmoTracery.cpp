@@ -17,6 +17,7 @@
 #include "libslic3r/TraceryPreviousFacetIndex.hpp"
 #include "libslic3r/TraceryPerformance.hpp"
 #include "libslic3r/TraceryVoronoi.hpp"
+#include "libslic3r/TraceryGenerationCache.hpp"
 #include "libslic3r/TraceryRegionMapping.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/NotificationManager.hpp"
@@ -458,6 +459,18 @@ struct GLGizmoTracery::VoronoiColorRegion {
     double              world_area = 0.0;
     size_t              fragment_budget = 0;
 };
+
+struct GLGizmoTracery::PreparedGeneration
+{
+    std::vector<GenerationInput::SurfaceTriangle> triangles;
+    std::vector<Transform3d>                      transforms;
+    double                                        area = 0.;
+    std::vector<ColorGroup>                       color_groups;
+    std::vector<VoronoiColorRegion>               regions;
+};
+
+struct GLGizmoTracery::GenerationCache : TraceryGenerationCache<PreparedGeneration>
+{};
 
 struct GLGizmoTracery::ColorRegionIntegrity {
     size_t immutable_hash = 0;
@@ -1113,6 +1126,7 @@ bool GLGizmoTracery::restore_original_tracery_meshes(ModelObject& object, bool& 
 
 void GLGizmoTracery::clear_stained_glass_editor()
 {
+    m_generation_cache.reset();
     m_edit_document_hashes.clear();
     m_selection_modified = true;
     m_mask_data.clear();
@@ -1302,34 +1316,81 @@ void GLGizmoTracery::save_selection_mask()
     for (auto& [volume, data] : updates) volume->tracery_edit_data = std::move(data);
 }
 
-bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
+ColorRGBA GLGizmoTracery::volume_source_color(const ModelObject* object, int volume_index) const
 {
-    using SurfaceTriangle = GenerationInput::SurfaceTriangle;
-    using ColorSource = GenerationInput::ColorSource;
-
-    const Model* canvas_model = m_parent.get_model();
-    int object_idx = -1;
-    if (canvas_model != nullptr) {
-        for (size_t idx = 0; idx < canvas_model->objects.size(); ++idx) {
-            if (canvas_model->objects[idx] == input.model_object) {
-                object_idx = int(idx);
-                break;
-            }
-        }
-    }
-    const auto volume_source_color = [this, object_idx](int volume_idx) {
-        if (object_idx >= 0) {
-            for (const GLVolume* display_volume : m_parent.get_volumes().volumes) {
-                if (display_volume->composite_id.object_id == object_idx && display_volume->composite_id.volume_id == volume_idx) {
-                    ColorRGBA color = display_volume->color;
-                    color.a(1.0f);
+    const Model* model = m_parent.get_model();
+    if (model != nullptr) {
+        const auto found = std::find(model->objects.begin(), model->objects.end(), object);
+        if (found != model->objects.end()) {
+            const int object_index = int(found - model->objects.begin());
+            for (const GLVolume* volume : m_parent.get_volumes().volumes) {
+                if (volume->composite_id.object_id == object_index && volume->composite_id.volume_id == volume_index) {
+                    ColorRGBA color = volume->color;
+                    color.a(1.f);
                     return color;
                 }
             }
         }
-        return GLVolume::NEUTRAL_COLOR;
-    };
+    }
+    return GLVolume::NEUTRAL_COLOR;
+}
 
+std::shared_ptr<GLGizmoTracery::PreparedGeneration> GLGizmoTracery::prepare_generation_input(const ModelObject* object)
+{
+    TraceryPerformanceScope performance("generation_preparation");
+    performance.stage("preparation.key");
+    TraceryGenerationKey key;
+    const auto           colors = ::get_extruders_colors();
+    const auto exact_color      = [](const ColorRGBA& color) { return std::array<float, 4>{color.r(), color.g(), color.b(), color.a()}; };
+    size_t     index            = 0;
+    if (!m_incremental_generation) {
+        for (size_t vi = 0; vi < object->volumes.size(); ++vi) {
+            const auto* volume = object->volumes[vi];
+            if (!volume->is_model_part())
+                continue;
+            if (index >= m_triangle_selectors.size())
+                break;
+            const auto& base = index < m_stained_glass_base_paint_data.size() ? m_stained_glass_base_paint_data[index] :
+                                                                                volume->mmu_segmentation_facets.get_data();
+            std::vector<std::array<float, 4>> source_colors{exact_color(volume_source_color(object, int(vi)))};
+            for (size_t id = 1; id <= colors.size(); ++id)
+                if (id == size_t(volume->extruder_id()) || (id < base.used_states.size() && base.used_states[id]))
+                    source_colors.push_back(exact_color(colors[id - 1]));
+            std::array<double, 16> matrix;
+            const Transform3d      transform = volume->get_matrix();
+            std::copy_n(transform.matrix().data(), matrix.size(), matrix.begin());
+            key.emplace_back(volume->mesh_ptr(), matrix, volume->extruder_id(), m_triangle_selectors[index++]->serialize(), base,
+                             std::move(source_colors));
+        }
+        if (m_generation_cache)
+            if (auto cached = m_generation_cache->find(key)) {
+                performance.count("cache_hit", 1);
+                return cached;
+            }
+    }
+    performance.count("cache_hit", 0);
+    auto                                                                    prepared = std::make_shared<PreparedGeneration>();
+    std::vector<std::vector<std::unique_ptr<GenerationInput::ColorSource>>> sources(m_triangle_selectors.size());
+    GenerationInput input{object, prepared->triangles, sources, prepared->transforms, prepared->area};
+    performance.stage("preparation.collect_input");
+    if (!collect_generation_input(input))
+        return {};
+    performance.stage("preparation.color_regions");
+    if (!build_color_regions_from_input_faces(input, prepared->color_groups, prepared->regions))
+        return {};
+    // Incremental strokes describe only the newly painted area, never cache them as a full selection.
+    if (!m_incremental_generation) {
+        if (!m_generation_cache)
+            m_generation_cache = std::make_shared<GenerationCache>();
+        m_generation_cache->store(std::move(key), prepared);
+    } else {
+        m_generation_cache.reset();
+    }
+    return prepared;
+}
+
+bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
+{
     const std::vector<ColorRGBA> extruder_colors = ::get_extruders_colors();
     size_t mesh_idx = 0;
     for (size_t volume_idx = 0; volume_idx < input.model_object->volumes.size(); ++volume_idx) {
@@ -1338,7 +1399,8 @@ bool GLGizmoTracery::collect_generation_input(GenerationInput& input)
             continue;
         if (mesh_idx >= m_triangle_selectors.size())
             break;
-        collect_volume_generation_input(input, mesh_idx, volume_idx, extruder_colors, volume_source_color(int(volume_idx)));
+        collect_volume_generation_input(input, mesh_idx, volume_idx, extruder_colors,
+                                        volume_source_color(input.model_object, int(volume_idx)));
         ++mesh_idx;
     }
 
@@ -3082,23 +3144,15 @@ void GLGizmoTracery::generate_paint_plan()
         return;
     }
 
-    using SurfaceTriangle = GenerationInput::SurfaceTriangle;
-    using ColorSource = GenerationInput::ColorSource;
-    std::vector<ColorGroup> color_groups;
-    std::vector<std::vector<std::unique_ptr<ColorSource>>> color_sources(m_triangle_selectors.size());
-    std::vector<SurfaceTriangle> surface_triangles;
-    std::vector<Transform3d> volume_transforms;
-    double surface_area = 0.0;
-    GenerationInput input{ model_object, surface_triangles, color_sources, volume_transforms, surface_area };
-
-    performance.stage("generation.collect_input");
-    if (!collect_generation_input(input))
+    performance.stage("generation.prepare_input");
+    auto prepared = prepare_generation_input(model_object);
+    if (!prepared)
         return;
-    performance.count("surface_triangles", surface_triangles.size());
-    performance.stage("generation.color_regions");
-    std::vector<VoronoiColorRegion> regions;
-    if (!build_color_regions_from_input_faces(input, color_groups, regions))
-        return;
+    std::vector<std::vector<std::unique_ptr<GenerationInput::ColorSource>>> sources(m_triangle_selectors.size());
+    GenerationInput input{model_object, prepared->triangles, sources, prepared->transforms, prepared->area};
+    performance.count("surface_triangles", prepared->triangles.size());
+    // Budgets depend on density; the cached connectivity and geometry do not.
+    auto        regions                   = prepared->regions;
     const float maximum_fragment_diameter = (6.5f - 4.0f * m_fragment_density) * 1.35f;
     allocate_region_fragment_budgets(regions, maximum_fragment_diameter);
     std::vector<FragmentSeed> seeds;
@@ -3118,7 +3172,7 @@ void GLGizmoTracery::generate_paint_plan()
     std::vector<std::set<size_t>> fragment_neighbours;
     build_fragment_topology(generated, seeds.size(), fragment_neighbours);
     performance.stage("generation.colors");
-    assign_voronoi_fragment_colors(color_groups, seeds, fragment_neighbours);
+    assign_voronoi_fragment_colors(prepared->color_groups, seeds, fragment_neighbours);
     m_pending_selection_fragment_count = m_fragment_colors.size();
     performance.stage("generation.publish");
     publish_generated_regions(std::move(generated));
@@ -4513,6 +4567,11 @@ void GLGizmoTracery::generate_through_voronoi_regions()
 void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
 {
     TraceryPerformanceScope performance("commit");
+    // Sidebar and selection refreshes can synchronously render the same large
+    // vector overlay repeatedly. Publish everything before drawing one frame.
+    const bool rendering_enabled = m_parent.is_rendering_enabled();
+    m_parent.enable_render(false);
+    ScopeGuard                      restore_rendering([this, rendering_enabled]() { m_parent.enable_render(rendering_enabled); });
     TraceryDocument::ReadCacheScope document_cache;
     m_commit_refresh_active = true;
     m_commit_selector_key.reset();
@@ -4697,7 +4756,8 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
     // Keep the first displayed frame in the measured commit rather than moving
     // its parsing/upload cost into an unmeasured deferred callback.
     performance.stage("commit.final_scene_render");
-    if (m_parent.is_initialized())
+    m_parent.enable_render(rendering_enabled);
+    if (rendering_enabled && m_parent.is_initialized())
         m_parent.render();
     performance.stage("commit.cleanup");
 }
@@ -4839,12 +4899,20 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
         document.set_selection_reference(m_fill_reference_selectors[volume_index]->serialize());
     prepared.document = document.encode();
     performance.stage("partition.build_mapping_index");
-    TraceryRegionMapper mapper(document.base_mesh().its, prepared.partition);
-    auto                remap_view = [&](const std::vector<GeneratedVoronoiRegion>& view) {
+    const bool identity = tracery_has_identity_mapping(document.base_mesh().its, prepared.partition, previous_sources);
+    performance.count("identity_mapping", identity ? 1 : 0);
+    std::unique_ptr<TraceryRegionMapper> mapper;
+    if (!identity)
+        mapper = std::make_unique<TraceryRegionMapper>(document.base_mesh().its, prepared.partition);
+    auto remap_view = [&](const std::vector<GeneratedVoronoiRegion>& view) {
+        // These polygons were already clipped to their source facets during
+        // generation. An unchanged vector mesh needs no second clipping pass.
+        if (identity)
+            return view;
         auto base_view = view;
         for (auto& region : base_view)
             region.source_facet_id = previous_sources.at(region.source_facet_id);
-        return remap_partition_regions(base_view, mapper);
+        return remap_partition_regions(base_view, *mapper);
     };
     performance.stage("partition.remap_generated_regions");
     if (volume_index < m_generated_voronoi_regions.size())
@@ -4854,7 +4922,7 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
         prepared.selections.push_back(volume_index < selection.regions.size() ? remap_view(selection.regions[volume_index]) :
                                                                                 std::vector<GeneratedVoronoiRegion>{});
     if (performance.enabled())
-        performance.count("mapping_index_estimated_bytes", mapper.estimated_bytes());
+        performance.count("mapping_index_estimated_bytes", mapper ? mapper->estimated_bytes() : 0);
     performance.stage("partition.assign_region_materials");
     if (recipes)
         for (auto& region : prepared.generated)
@@ -5539,12 +5607,14 @@ void GLGizmoTracery::update_from_model_object(bool)
 
 void GLGizmoTracery::on_shutdown()
 {
+    m_generation_cache.reset();
     // Completed edits are already stored on the model volume. The shared
     // surface renderer and slicer continue to read them after the gizmo closes.
 }
 
 void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
 {
+    m_generation_cache.reset();
     GLGizmoPainterBase::on_load(ar);
     ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength,
        m_mesh_restore_states, m_regeneration_version);

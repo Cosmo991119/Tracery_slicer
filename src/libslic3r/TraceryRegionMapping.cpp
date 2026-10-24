@@ -7,6 +7,19 @@
 #include <stdexcept>
 
 namespace Slic3r {
+bool tracery_has_identity_mapping(const indexed_triangle_set&   source,
+                                  const TraceryPartitionResult& partition,
+                                  const std::vector<int>&       previous_sources)
+{
+    if (source.vertices != partition.mesh.vertices || source.indices != partition.mesh.indices ||
+        previous_sources.size() != source.indices.size() || partition.source_facets.size() != source.indices.size())
+        return false;
+    for (size_t facet = 0; facet < source.indices.size(); ++facet)
+        if (previous_sources[facet] != int(facet) || partition.source_facets[facet] != int(facet))
+            return false;
+    return true;
+}
+
 namespace {
 using Tree = AABBTreeIndirect::Tree<2, double>;
 using Box = Tree::BoundingBox;

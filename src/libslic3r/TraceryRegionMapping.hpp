@@ -23,6 +23,11 @@ struct TraceryMappedRegion
     std::vector<Vec3f> polygon;
 };
 
+// Direct reuse is safe only when geometry and both facet mappings are unchanged.
+bool tracery_has_identity_mapping(const indexed_triangle_set&   source,
+                                  const TraceryPartitionResult& partition,
+                                  const std::vector<int>&       previous_sources);
+
 namespace detail {
 // Shares the exact clipping frame/quantization with the geometry partitioner.
 class TraceryFacetClipper
