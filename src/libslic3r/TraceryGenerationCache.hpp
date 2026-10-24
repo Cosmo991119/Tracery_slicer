@@ -10,7 +10,7 @@
 
 namespace Slic3r {
 
-// Exact input identity, independent of density, refraction and generated paint.
+// Exact input identity, independent of density and generated paint.
 // Holding the immutable mesh prevents pointer reuse after object replacement.
 using TraceryGenerationVolumeKey = std::tuple<std::shared_ptr<const TriangleMesh>,
                                               std::array<double, 16>,

@@ -79,9 +79,7 @@ private:
         m_regeneration_requested = false;
         m_palette_update_requested = false;
         m_opening_fragment_density = m_fragment_density;
-        m_opening_refraction_strength = m_refraction_strength;
-        m_density_input = m_fragment_density;
-        m_refraction_input = m_refraction_strength;
+        m_density_input            = m_fragment_density;
         m_paint_mode = PaintMode::SURFACE;
     }
     void on_shutdown() override;
@@ -175,21 +173,18 @@ private:
         const std::vector<float>& fragment_boundary_distance,
         const std::vector<size_t>& fragment_boundary_neighbor) const;
     struct FragmentColorAssignmentIntegrity;
-    bool assign_fragment_colors(const std::vector<ColorGroup>& color_groups,
-                                const std::vector<FragmentSeed>& seeds,
-                                const std::vector<std::set<size_t>>& fragment_neighbours,
-                                const std::vector<float>& fragment_boundary_distance,
-                                const std::vector<size_t>& fragment_boundary_neighbor,
-                                size_t fragment_count, float target_edge, float refraction_strength,
-                                std::vector<ColorRGBA>& fragment_colors, bool verify_integrity,
-                                FragmentColorAssignmentIntegrity* builder_integrity);
-    FragmentColorAssignmentIntegrity inspect_fragment_color_assignment(
-        const std::vector<ColorGroup>& color_groups, const std::vector<FragmentSeed>& seeds,
-        const std::vector<std::set<size_t>>& fragment_neighbours,
-        const std::vector<float>& fragment_boundary_distance,
-        const std::vector<size_t>& fragment_boundary_neighbor,
-        size_t fragment_count, float target_edge, float refraction_strength,
-        const std::vector<ColorRGBA>& fragment_colors) const;
+    bool                             assign_fragment_colors(const std::vector<ColorGroup>&       color_groups,
+                                                            const std::vector<FragmentSeed>&     seeds,
+                                                            const std::vector<std::set<size_t>>& fragment_neighbours,
+                                                            size_t                               fragment_count,
+                                                            std::vector<ColorRGBA>&              fragment_colors,
+                                                            bool                                 verify_integrity,
+                                                            FragmentColorAssignmentIntegrity*    builder_integrity);
+    FragmentColorAssignmentIntegrity inspect_fragment_color_assignment(const std::vector<ColorGroup>&       color_groups,
+                                                                       const std::vector<FragmentSeed>&     seeds,
+                                                                       const std::vector<std::set<size_t>>& fragment_neighbours,
+                                                                       size_t                               fragment_count,
+                                                                       const std::vector<ColorRGBA>&        fragment_colors) const;
     struct PublishGeneratedFragmentsIntegrity;
     void publish_generated_fragments(std::vector<std::vector<CpuGeometry>>& geometry,
                                      const std::vector<Transform3d>& volume_transforms,
@@ -324,12 +319,9 @@ private:
     std::string m_display_diagnostics_last_canvas_state;
     std::set<std::string> m_display_diagnostics_captured;
 #endif
-    float   m_fragment_density = 0.5f;
-    float   m_refraction_strength = 0.5f;
-    float   m_density_input = 0.5f;
-    float   m_refraction_input = 0.5f;
+    float   m_fragment_density         = 0.5f;
+    float   m_density_input            = 0.5f;
     float   m_opening_fragment_density = 0.5f;
-    float   m_opening_refraction_strength = 0.5f;
     size_t  m_regeneration_version = 0;
     // Keep the editable selection independently from the model. The base
     // painter clears its live selectors when the gizmo closes, while this

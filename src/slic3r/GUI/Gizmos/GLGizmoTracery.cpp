@@ -192,16 +192,6 @@ Slic3r::ColorRGBA analogous_color(const Slic3r::ColorRGBA& base, size_t fragment
         std::clamp(hue_channel(first, second, shifted_hue - 1.0f / 3.0f), 0.0f, 1.0f), 1.0f);
 }
 
-Slic3r::ColorRGBA glass_color(const Slic3r::ColorRGBA& base, const Slic3r::ColorRGBA& boundary_color,
-    float boundary_mix, size_t fragment_id)
-{
-    const Slic3r::ColorRGBA local = analogous_color(base, fragment_id);
-    const Slic3r::ColorRGBA neighboring = analogous_color(boundary_color, fragment_id + 151);
-    return Slic3r::ColorRGBA(local.r() * (1.0f - boundary_mix) + neighboring.r() * boundary_mix,
-        local.g() * (1.0f - boundary_mix) + neighboring.g() * boundary_mix,
-        local.b() * (1.0f - boundary_mix) + neighboring.b() * boundary_mix, 1.0f);
-}
-
 Slic3r::GUI::MixedColorMatchRecipeResult build_tracery_recipe(
     const std::vector<std::string>& physical_colours, const wxColour& target, Slic3r::TraceryMaterialMode mode)
 {
@@ -990,13 +980,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
     ImGui::PushItemWidth(m_imgui->scaled(8.f));
     m_imgui->bbl_slider_float_style("##tracery_density", &m_density_input, 0.f, 1.f, "%.0f%%", 1.0f, true);
     const bool density_edit_finished = ImGui::IsItemDeactivatedAfterEdit();
-    ImGui::AlignTextToFramePadding();
-    m_imgui->text(_L("Refraction strength"));
-    ImGui::SameLine();
-    ImGui::PushItemWidth(m_imgui->scaled(8.f));
-    m_imgui->bbl_slider_float_style("##tracery_refraction", &m_refraction_input, 0.f, 1.f, "%.0f%%", 1.0f, true);
-    const bool refraction_edit_finished = ImGui::IsItemDeactivatedAfterEdit();
-    if (density_edit_finished || refraction_edit_finished)
+    if (density_edit_finished)
         regenerate_stained_glass(false);
 
     ImGui::Separator();
@@ -1026,8 +1010,7 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
 void GLGizmoTracery::regenerate_stained_glass(bool randomize)
 {
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Regenerate stained glass", UndoRedo::SnapshotType::GizmoAction);
-    m_fragment_density = m_density_input;
-    m_refraction_strength = m_refraction_input;
+    m_fragment_density       = m_density_input;
     const bool has_selection = std::any_of(m_triangle_selectors.begin(), m_triangle_selectors.end(),
         [](const auto& selector) { return selector->has_facets(EnforcerBlockerType::ENFORCER); });
     if (has_selection) {
@@ -1834,12 +1817,7 @@ void GLGizmoTracery::assign_voronoi_fragment_colors(
     const std::vector<ColorGroup>& color_groups, const std::vector<FragmentSeed>& seeds,
     const std::vector<std::set<size_t>>& neighbours)
 {
-    const size_t no_group = color_groups.size();
-    std::vector<float> boundary_distance(seeds.size(), std::numeric_limits<float>::max());
-    std::vector<size_t> boundary_neighbor(seeds.size(), no_group);
-    const float target_edge = 6.5f - 4.0f * m_fragment_density;
-    assign_fragment_colors(color_groups, seeds, neighbours, boundary_distance, boundary_neighbor,
-                           seeds.size(), target_edge, m_refraction_strength, m_fragment_colors, false, nullptr);
+    assign_fragment_colors(color_groups, seeds, neighbours, seeds.size(), m_fragment_colors, false, nullptr);
 }
 
 void GLGizmoTracery::publish_generated_regions(std::vector<std::vector<GeneratedVoronoiRegion>>&& regions)
@@ -2220,12 +2198,11 @@ GLGizmoTracery::FragmentGenerationIntegrity GLGizmoTracery::inspect_fragment_gen
 }
 
 GLGizmoTracery::FragmentColorAssignmentIntegrity GLGizmoTracery::inspect_fragment_color_assignment(
-    const std::vector<ColorGroup>& color_groups, const std::vector<FragmentSeed>& seeds,
+    const std::vector<ColorGroup>&       color_groups,
+    const std::vector<FragmentSeed>&     seeds,
     const std::vector<std::set<size_t>>& fragment_neighbours,
-    const std::vector<float>& fragment_boundary_distance,
-    const std::vector<size_t>& fragment_boundary_neighbor,
-    size_t fragment_count, float target_edge, float refraction_strength,
-    const std::vector<ColorRGBA>& fragment_colors) const
+    size_t                               fragment_count,
+    const std::vector<ColorRGBA>&        fragment_colors) const
 {
     const auto mix_hash = [](size_t& hash, size_t value) {
         hash = (hash * size_t(0x9e3779b1U)) ^ value;
@@ -2243,8 +2220,6 @@ GLGizmoTracery::FragmentColorAssignmentIntegrity GLGizmoTracery::inspect_fragmen
     FragmentColorAssignmentIntegrity result;
     result.input_hash = size_t(0x9e3779b9U);
     mix_hash(result.input_hash, fragment_count);
-    mix_float(result.input_hash, target_edge);
-    mix_float(result.input_hash, refraction_strength);
     mix_hash(result.input_hash, color_groups.size());
     for (const ColorGroup& group : color_groups) {
         mix_hash(result.input_hash, group.component_id);
@@ -2264,23 +2239,14 @@ GLGizmoTracery::FragmentColorAssignmentIntegrity GLGizmoTracery::inspect_fragmen
         for (size_t neighbour : neighbours)
             mix_hash(result.input_hash, neighbour);
     }
-    mix_hash(result.input_hash, fragment_boundary_distance.size());
-    for (float distance : fragment_boundary_distance)
-        mix_float(result.input_hash, distance);
-    mix_hash(result.input_hash, fragment_boundary_neighbor.size());
-    for (size_t neighbour : fragment_boundary_neighbor)
-        mix_hash(result.input_hash, neighbour);
-
     result.color_count = fragment_colors.size();
     result.output_hash = size_t(0x85ebca77U);
     mix_hash(result.output_hash, fragment_colors.size());
-    bool valid = seeds.size() == fragment_count && fragment_neighbours.size() == fragment_count &&
-        fragment_boundary_distance.size() == fragment_count && fragment_boundary_neighbor.size() == fragment_count &&
-        fragment_colors.size() == fragment_count;
+    bool valid = seeds.size() == fragment_count && fragment_neighbours.size() == fragment_count && fragment_colors.size() == fragment_count;
     for (size_t fragment = 0; fragment < seeds.size(); ++fragment) {
         if (seeds[fragment].color_group >= color_groups.size())
             valid = false;
-        if (fragment >= fragment_neighbours.size() || fragment >= fragment_boundary_neighbor.size()) {
+        if (fragment >= fragment_neighbours.size()) {
             valid = false;
             continue;
         }
@@ -2288,8 +2254,6 @@ GLGizmoTracery::FragmentColorAssignmentIntegrity GLGizmoTracery::inspect_fragmen
             if (neighbour >= fragment_count || neighbour >= fragment_neighbours.size() || neighbour == fragment ||
                 !fragment_neighbours[neighbour].count(fragment))
                 valid = false;
-        if (fragment_boundary_neighbor[fragment] > color_groups.size())
-            valid = false;
     }
     for (const ColorRGBA& color : fragment_colors) {
         mix_color(result.output_hash, color);
@@ -2834,19 +2798,18 @@ bool GLGizmoTracery::generate_fragments(
     return true;
 }
 
-bool GLGizmoTracery::assign_fragment_colors(
-    const std::vector<ColorGroup>& color_groups, const std::vector<FragmentSeed>& seeds,
-    const std::vector<std::set<size_t>>& fragment_neighbours,
-    const std::vector<float>& fragment_boundary_distance,
-    const std::vector<size_t>& fragment_boundary_neighbor,
-    size_t fragment_count, float target_edge, float refraction_strength,
-    std::vector<ColorRGBA>& fragment_colors, bool verify_integrity,
-    FragmentColorAssignmentIntegrity* builder_integrity)
+bool GLGizmoTracery::assign_fragment_colors(const std::vector<ColorGroup>&       color_groups,
+                                            const std::vector<FragmentSeed>&     seeds,
+                                            const std::vector<std::set<size_t>>& fragment_neighbours,
+                                            size_t                               fragment_count,
+                                            std::vector<ColorRGBA>&              fragment_colors,
+                                            bool                                 verify_integrity,
+                                            FragmentColorAssignmentIntegrity*    builder_integrity)
 {
-    const size_t input_hash_before = verify_integrity ? inspect_fragment_color_assignment(
-        color_groups, seeds, fragment_neighbours, fragment_boundary_distance, fragment_boundary_neighbor,
-        fragment_count, target_edge, refraction_strength, fragment_colors).input_hash : 0;
-    const size_t no_group = color_groups.size();
+    const size_t input_hash_before =
+        verify_integrity ?
+            inspect_fragment_color_assignment(color_groups, seeds, fragment_neighbours, fragment_count, fragment_colors).input_hash :
+            0;
     std::vector<ColorRGBA> base_colors;
     base_colors.reserve(fragment_count);
     for (const FragmentSeed& seed : seeds)
@@ -2855,18 +2818,8 @@ bool GLGizmoTracery::assign_fragment_colors(
     if (editor_palette.empty())
         return false;
     std::vector<ColorRGBA> desired_colors(fragment_count);
-    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
-        ColorRGBA boundary_color = base_colors[fragment];
-        const size_t neighbor = fragment_boundary_neighbor[fragment];
-        if (neighbor != no_group)
-            boundary_color = color_groups[neighbor].color;
-        const float boundary_band = target_edge * 1.7f;
-        const float linear_proximity = fragment_boundary_distance[fragment] < boundary_band ?
-            1.0f - fragment_boundary_distance[fragment] / boundary_band : 0.0f;
-        const float proximity = linear_proximity * linear_proximity * (3.0f - 2.0f * linear_proximity);
-        const float boundary_mix = proximity * (0.16f + 0.42f * refraction_strength);
-        desired_colors[fragment] = glass_color(base_colors[fragment], boundary_color, boundary_mix, seeds[fragment].stable_id);
-    }
+    for (size_t fragment = 0; fragment < fragment_count; ++fragment)
+        desired_colors[fragment] = analogous_color(base_colors[fragment], seeds[fragment].stable_id);
 
     struct CandidateRecipe {
         size_t palette_index;
@@ -2979,9 +2932,8 @@ bool GLGizmoTracery::assign_fragment_colors(
 
     if (builder_integrity != nullptr) {
         if (verify_integrity) {
-            *builder_integrity = inspect_fragment_color_assignment(color_groups, seeds, fragment_neighbours,
-                fragment_boundary_distance, fragment_boundary_neighbor, fragment_count, target_edge,
-                refraction_strength, fragment_colors);
+            *builder_integrity = inspect_fragment_color_assignment(color_groups, seeds, fragment_neighbours, fragment_count,
+                                                                   fragment_colors);
             builder_integrity->immutable_input_preserved = builder_integrity->input_hash == input_hash_before;
             builder_integrity->valid = builder_integrity->valid && builder_integrity->immutable_input_preserved;
         } else {
@@ -5631,10 +5583,8 @@ void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
 {
     m_generation_cache.reset();
     GLGizmoPainterBase::on_load(ar);
-    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength,
-       m_mesh_restore_states, m_regeneration_version);
-    m_density_input = m_fragment_density;
-    m_refraction_input = m_refraction_strength;
+    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_mesh_restore_states, m_regeneration_version);
+    m_density_input          = m_fragment_density;
     m_regeneration_requested = false;
     m_generated_fragments.clear();
     m_generated_voronoi_regions.clear();
@@ -5645,8 +5595,7 @@ void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
 
 void GLGizmoTracery::on_save(cereal::BinaryOutputArchive& ar) const
 {
-    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_refraction_strength,
-       m_mesh_restore_states, m_regeneration_version);
+    ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_mesh_restore_states, m_regeneration_version);
 }
 
 PainterGizmoType GLGizmoTracery::get_painter_type() const

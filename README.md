@@ -24,11 +24,11 @@ Import and select a model, then click the **flower icon** in the top toolbar to 
 | :---: | :---: |
 | [![Tool location: the red arrow points to the flower icon in the top toolbar](doc/images/tracery-entry-location.png)](doc/images/tracery-entry-location.png) | [![The Stained glass settings panel](doc/images/tracery-entry.png)](doc/images/tracery-entry.png) |
 
-The panel includes Normal Mode and Through Mode, painting tools, brush size, fragment density, refraction strength, and regeneration controls. Screenshots are shared with the Chinese README and may contain Chinese interface text.
+The panel includes Normal Mode and Through Mode, painting tools, brush size, fragment density, and regeneration controls. Screenshots are shared with the Chinese README and may contain Chinese interface text.
 
 ## Stained Glass Features
 
-Paint an area on the model to generate irregular colored fragments resembling a stained-glass mosaic. Adjust fragment density and refraction strength to change the pattern. Colors are matched using CMYW (cyan, magenta, yellow, and white) mixing recipes, with mixed-material slots added automatically.
+Paint an area on the model to generate irregular colored fragments resembling a stained-glass mosaic. Adjust fragment density to change the pattern. Colors are matched using CMYW (cyan, magenta, yellow, and white) mixing recipes, with mixed-material slots added automatically.
 
 ### Normal Mode and Through Mode
 
