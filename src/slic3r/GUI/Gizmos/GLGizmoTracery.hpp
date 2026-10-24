@@ -95,6 +95,11 @@ private:
     void erase_all_stained_glass();
     void generate_paint_plan();
     struct GenerationInput;
+    struct PreparedGeneration;
+    struct GenerationCache;
+    std::shared_ptr<GenerationCache>    m_generation_cache;
+    std::shared_ptr<PreparedGeneration> prepare_generation_input(const ModelObject* object);
+    ColorRGBA                           volume_source_color(const ModelObject* object, int volume_index) const;
     struct ColorGroup;
     struct FragmentSeed;
     struct VoronoiColorRegion;
