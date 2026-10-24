@@ -462,6 +462,8 @@ set(lisbslic3r_sources
     TraceryRegionMapping.hpp
     TraceryPartition.cpp
     TraceryPartition.hpp
+    TraceryThrough.cpp
+    TraceryThrough.hpp
     TraceryDocument.cpp
     TraceryDocument.hpp
     TraceryRestore.cpp

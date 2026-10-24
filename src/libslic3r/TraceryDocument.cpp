@@ -555,9 +555,12 @@ TraceryPartitionResult TraceryDocument::rebuild(const TriangleMesh&             
     return result;
 }
 
-std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(
-    const TriangleMesh& current, const std::vector<Annotation>& annotations,
-    const TriangleSelector::Tracery2DData& paint, TraceryEdit edit) const
+std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(const TriangleMesh&                    current,
+                                                                        const std::vector<Annotation>&         annotations,
+                                                                        const TriangleSelector::Tracery2DData& paint,
+                                                                        TraceryEdit                            edit,
+                                                                        Regions*                               slicing,
+                                                                        bool                                   full_through) const
 {
     TraceryPerformanceScope performance("vector_update_channels");
     performance.stage("vector.copy_channels");
@@ -568,6 +571,8 @@ std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(
             continue;
         const auto changes = annotation_delta(m_base, m_sources, current, m_last[channel], annotations[channel]);
         overlay(channels[channel], changes);
+        if (channel == 0 && slicing)
+            overlay(*slicing, changes);
         if (channel == 0)
             overlay(channels[5], changes); // ordinary paint survives erase
     }
@@ -589,10 +594,15 @@ std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(
                 }
             }
             overlay(channels[0], restore);
+            if (slicing)
+                overlay(*slicing, restore);
         }
     }
-    if (edit == TraceryEdit::Regenerate)
+    if (edit == TraceryEdit::Regenerate) {
         channels[0] = channels[5];
+        if (slicing)
+            *slicing = channels[5];
+    }
     performance.stage("vector.project_paint");
     const auto incoming = paint_regions(m_base, m_sources, paint);
     performance.count("paint_facets", paint.size());
@@ -614,16 +624,22 @@ std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(
             }
         }
         overlay(channels[0], restore);
+        if (slicing)
+            overlay(*slicing, restore);
     } else {
         overlay(channels[0], incoming);
+        if (slicing && !full_through)
+            overlay(*slicing, incoming);
     }
     channels[7] = channels[6]; // next stroke starts from the committed mask
     return channels;
 }
 
-TraceryPartitionResult TraceryDocument::apply_vector_edit(
-    const TriangleMesh& current, const std::vector<Annotation>& annotations,
-    const TriangleSelector::Tracery2DData& paint, TraceryEdit edit)
+TraceryPartitionResult TraceryDocument::apply_vector_edit(const TriangleMesh&                    current,
+                                                          const std::vector<Annotation>&         annotations,
+                                                          const TriangleSelector::Tracery2DData& paint,
+                                                          TraceryEdit                            edit,
+                                                          const TriangleSelector::Tracery2DData* through_entry)
 {
     TraceryPerformanceScope performance("vector_apply_edit");
     performance.count("base_facets", m_base.its.indices.size());
@@ -633,8 +649,52 @@ TraceryPartitionResult TraceryDocument::apply_vector_edit(
         annotations.size() != 8)
         throw std::runtime_error("Vector painting requires the unchanged source mesh");
     performance.stage("vector.update_channels");
-    auto channels = updated_channels(current, annotations, paint, edit);
+    const bool separate_surface = through_entry != nullptr || !m_through_operations.empty();
+    Regions    slicing;
+    if (separate_surface)
+        slicing = m_through_operations.empty() ? m_channels[0] : m_slice_regions;
+    auto channels   = updated_channels(current, annotations, paint, edit, separate_surface ? &slicing : nullptr, through_entry != nullptr);
+    auto operations = edit == TraceryEdit::Regenerate ? std::vector<TraceryThroughOperation>{} : m_through_operations;
+    if (through_entry || (edit == TraceryEdit::Erase && !operations.empty())) {
+        auto incoming = paint_regions(m_base, m_sources, through_entry ? *through_entry : paint);
+        // Surface-mode erase may supply only a selector delta.
+        if (edit == TraceryEdit::Erase && incoming.empty()) {
+            const auto delta = annotation_delta(m_base, m_sources, current, m_last[6], annotations[6]);
+            for (const auto& [facet, states] : delta) {
+                auto found = states.find(0);
+                if (found != states.end())
+                    incoming[facet][0] = found->second;
+            }
+        }
+        TraceryThroughOperation operation;
+        operation.erase = edit == TraceryEdit::Erase;
+        for (const auto& [id, states] : incoming) {
+            const auto  frame     = plane(m_base, id);
+            const auto  face      = m_base.its.indices.at(id);
+            const Vec3d a         = m_base.its.vertices[face[0]].cast<double>();
+            const Vec3d b         = m_base.its.vertices[face[1]].cast<double>();
+            const Vec3d c         = m_base.its.vertices[face[2]].cast<double>();
+            const Vec3d direction = -(b - a).cross(c - a).normalized();
+            if (!direction.allFinite())
+                throw std::runtime_error("Invalid through entry face");
+            for (const auto& [material, polygons] : states) {
+                const auto triangles = triangulate_expolygons_2d(union_ex(polygons));
+                for (size_t i = 0; i + 2 < triangles.size(); i += 3) {
+                    TraceryThroughPatch patch;
+                    patch.direction = direction;
+                    patch.material  = material;
+                    for (size_t j = 0; j < 3; ++j)
+                        patch.entry.emplace_back(frame.origin + triangles[i + j].x() * frame.axis_u + triangles[i + j].y() * frame.axis_v);
+                    operation.patches.push_back(std::move(patch));
+                }
+            }
+        }
+        if (!operation.patches.empty())
+            operations.push_back(std::move(operation));
+    }
     performance.stage("vector.publish");
+    m_slice_regions      = operations.empty() ? Regions{} : std::move(slicing);
+    m_through_operations = std::move(operations);
     m_channels = std::move(channels);
     m_last = annotations;
     m_last[5] = annotations[0]; // ordinary paint remains the editable base on an unchanged mesh
@@ -661,6 +721,8 @@ void TraceryDocument::clear_vector_glass(const TriangleMesh& current, const std:
     }
     performance.stage("clear.restore_base");
     m_channels[0] = m_channels[5];
+    m_slice_regions.clear();
+    m_through_operations.clear();
     m_channels[6].clear();
     m_channels[7].clear();
     m_selection_reference = {};
@@ -681,13 +743,18 @@ std::vector<unsigned> TraceryDocument::material_ids() const
     for (const auto& [facet, states] : m_channels.at(0))
         for (const auto& [state, polygons] : states)
             if (state != 0 && !polygons.empty()) ids.insert(state);
+    for (const auto& operation : m_through_operations)
+        if (!operation.erase)
+            for (const auto& patch : operation.patches)
+                if (patch.material)
+                    ids.insert(patch.material);
     return {ids.begin(), ids.end()};
 }
 
-std::map<unsigned, indexed_triangle_set> TraceryDocument::material_surfaces() const
+std::map<unsigned, indexed_triangle_set> TraceryDocument::material_surfaces(bool for_slicing) const
 {
     std::map<unsigned, indexed_triangle_set> result;
-    for (const auto& [id, states] : m_channels.at(0)) {
+    for (const auto& [id, states] : (for_slicing && !m_through_operations.empty() ? m_slice_regions : m_channels.at(0))) {
         const auto frame = plane(m_base, id);
         for (const auto& [state, polygons] : states) {
             const auto points = triangulate_expolygons_2d(union_ex(polygons));
@@ -709,6 +776,8 @@ void TraceryDocument::apply_ordinary_paint(const TriangleSelector::Tracery2DData
     const auto incoming = paint_regions(m_base, m_sources, paint);
     overlay(m_channels[0], incoming);
     overlay(m_channels[5], incoming);
+    if (!m_through_operations.empty())
+        overlay(m_slice_regions, incoming);
 }
 
 namespace {
@@ -764,12 +833,14 @@ TraceryDocument::Annotation read_annotation(const Json& j, size_t facets)
 std::string TraceryDocument::encode() const
 {
     Json root;
-    root["version"]  = m_vector ? 2 : 1;
+    root["version"]            = format_version();
     root["base"]     = mesh_json(m_base.its);
     root["derived"]  = mesh_json(m_derived);
     root["sources"]  = m_sources;
     root["channels"] = Json::array();
-    for (const auto& channel : m_channels) {
+    const size_t channel_count = m_channels.size() + (m_through_operations.empty() ? 0 : 1);
+    for (size_t channel_id = 0; channel_id < channel_count; ++channel_id) {
+        const auto& channel = channel_id < m_channels.size() ? m_channels[channel_id] : m_slice_regions;
         Json entries = Json::array();
         for (const auto& [facet, states] : channel)
             for (const auto& [state, polys] : states) {
@@ -785,6 +856,18 @@ std::string TraceryDocument::encode() const
             }
         root["channels"].push_back(std::move(entries));
     }
+    if (!m_through_operations.empty())
+        root["through"] = Json::array();
+    for (const auto& operation : m_through_operations) {
+        Json patches = Json::array();
+        for (const auto& patch : operation.patches) {
+            Json points = Json::array();
+            for (const auto& point : patch.entry)
+                points.push_back({point.x(), point.y(), point.z()});
+            patches.push_back({patch.material, {patch.direction.x(), patch.direction.y(), patch.direction.z()}, points});
+        }
+        root["through"].push_back({operation.erase, patches});
+    }
     root["selection_reference"] = annotation_json(m_selection_reference);
     root["last"] = Json::array();
     for (const auto& annotation : m_last)
@@ -794,10 +877,10 @@ std::string TraceryDocument::encode() const
 TraceryDocument TraceryDocument::decode(const std::string& data)
 {
     const Json root = Json::parse(data);
-    if (root.at("version").get<int>() != 1 && root.at("version").get<int>() != 2)
+    if (root.at("version").get<int>() != 1 && root.at("version").get<int>() != 2 && root.at("version").get<int>() != 3)
         throw std::runtime_error("Unsupported stained-glass editing data version");
     TraceryDocument result;
-    result.m_vector = root.at("version").get<int>() == 2;
+    result.m_vector  = root.at("version").get<int>() >= 2;
     result.m_base    = TriangleMesh(read_mesh(root.at("base")));
     result.m_derived = read_mesh(root.at("derived"));
     result.m_sources = root.at("sources").get<std::vector<int>>();
@@ -828,6 +911,35 @@ TraceryDocument TraceryDocument::decode(const std::string& data)
         result.m_last.push_back(read_annotation(a, result.m_sources.size()));
     if (root.contains("selection_reference"))
         result.m_selection_reference = read_annotation(root.at("selection_reference"), result.m_sources.size());
+    if (root.at("version").get<int>() == 3) {
+        if (result.m_channels.size() != 9)
+            throw std::runtime_error("Invalid through surface channels");
+        result.m_slice_regions = std::move(result.m_channels.back());
+        result.m_channels.pop_back();
+        for (const auto& entry : root.at("through")) {
+            TraceryThroughOperation operation;
+            operation.erase = entry.at(0).get<bool>();
+            for (const auto& p : entry.at(1)) {
+                TraceryThroughPatch patch;
+                patch.material  = p.at(0).get<unsigned>();
+                const auto& d   = p.at(1);
+                patch.direction = Vec3d(d.at(0).get<double>(), d.at(1).get<double>(), d.at(2).get<double>());
+                if (!patch.direction.allFinite() || std::abs(patch.direction.norm() - 1.) > 1e-5 ||
+                    patch.material > unsigned(EnforcerBlockerType::ExtruderMax))
+                    throw std::runtime_error("Invalid through material or direction");
+                for (const auto& v : p.at(2)) {
+                    Vec3d point(v.at(0).get<double>(), v.at(1).get<double>(), v.at(2).get<double>());
+                    if (!point.allFinite())
+                        throw std::runtime_error("Invalid through entry vertex");
+                    patch.entry.push_back(point);
+                }
+                if (patch.entry.size() != 3)
+                    throw std::runtime_error("Invalid through entry patch");
+                operation.patches.push_back(std::move(patch));
+            }
+            result.m_through_operations.push_back(std::move(operation));
+        }
+    }
     if (result.m_channels.size() != 8 || result.m_last.size() != 8)
         throw std::runtime_error("Invalid stained-glass channels");
     return result;
@@ -906,6 +1018,18 @@ TriangleSelector::Tracery2DData TraceryDocument::erased_regions(const TriangleMe
 }
 void TraceryDocument::remap_materials(const EnforcerBlockerStateMap& mapping)
 {
+    for (auto& operation : m_through_operations)
+        if (!operation.erase)
+            for (auto& patch : operation.patches)
+                patch.material = unsigned(mapping.at(patch.material));
+    for (auto& [facet, states] : m_slice_regions) {
+        std::map<unsigned, Polygons> mapped;
+        for (const auto& [state, polygons] : states)
+            append(mapped[unsigned(mapping.at(state))], polygons);
+        for (auto& [state, polygons] : mapped)
+            polygons = union_(polygons);
+        states = std::move(mapped);
+    }
     const TriangleMesh current(m_derived);
     TriangleSelector reference(current);
     reference.deserialize(m_selection_reference, false);

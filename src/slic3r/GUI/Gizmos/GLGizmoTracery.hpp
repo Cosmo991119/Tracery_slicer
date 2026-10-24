@@ -222,8 +222,10 @@ private:
     void                                 apply_incremental_boundary_transitions();
     void                                 commit_stained_glass_apply(StainedGlassApplyPlan&& plan);
     void bake_fragments_to_mmu_painting(bool prepared = false);
-    TriangleSelector::Tracery2DData build_voronoi_2d_data(
-        size_t volume_index, const std::function<void(const std::string&)>& diagnostic, bool material_budget = false) const;
+    TriangleSelector::Tracery2DData                      build_voronoi_2d_data(size_t                                         volume_index,
+                                                                               const std::function<void(const std::string&)>& diagnostic,
+                                                                               bool                                           material_budget = false,
+                                                                               bool                                           front_only = false) const;
     TriangleSelector::Tracery2DData build_tracery_2d_data(size_t volume_index) const;
     ModelObject* find_masked_model_object(Model& model) const;
     std::vector<TriangleSelector::TriangleSplittingData> collect_partition_annotations(const ModelVolume& volume, size_t index) const;
@@ -280,11 +282,13 @@ private:
     // A completed stroke owns its mode, generated front/back geometry and the
     // CMYW slots it received. Geometry is retained for later transition work;
     // ordinary incremental baking deliberately leaves previous strokes intact.
-    struct TracerySelection {
-        PaintMode                                     mode = PaintMode::SURFACE;
+    struct TracerySelection
+    {
+        bool                                             full_through = false;
+        PaintMode                                        mode         = PaintMode::SURFACE;
         std::vector<std::vector<GeneratedVoronoiRegion>> regions;
-        std::vector<ColorRGBA>                         fragment_colors;
-        std::vector<unsigned int>                     mixed_filament_ids;
+        std::vector<ColorRGBA>                           fragment_colors;
+        std::vector<unsigned int>                        mixed_filament_ids;
     };
 
     // Prepares one projected back-side fragment. Its implementation will
@@ -296,6 +300,8 @@ private:
 
     PaintMode m_paint_mode = PaintMode::SURFACE;
     PaintMode m_pending_selection_mode = PaintMode::SURFACE;
+    bool      m_full_through             = false;
+    bool      m_pending_full_through     = false;
     wchar_t m_current_tool = 0;
     bool    m_eraser_mode = false;
     bool    m_detect_geometry_edge = true;

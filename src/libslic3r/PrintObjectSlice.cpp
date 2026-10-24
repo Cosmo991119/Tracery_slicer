@@ -1,3 +1,6 @@
+#include "TraceryDocument.hpp"
+#include "TraceryThrough.hpp"
+#include "TraceryPerformance.hpp"
 #include <boost/log/trivial.hpp>
 
 #include <algorithm>
@@ -262,16 +265,17 @@ static std::vector<PrintObjectRegions::LayerRangeRegions>::const_iterator layer_
 }
 
 static std::vector<std::vector<ExPolygons>> slices_to_regions(
-    const PrintConfig                                        &print_config,
-    const PrintObject                                        &print_object,
-    ModelVolumePtrs                                           model_volumes,
-    const PrintObjectRegions                                 &print_object_regions,
-    const std::vector<float>                                 &zs,
-    std::vector<VolumeSlices>                               &&volume_slices,
+    const PrintConfig&          print_config,
+    const PrintObject&          print_object,
+    ModelVolumePtrs             model_volumes,
+    const PrintObjectRegions&   print_object_regions,
+    const std::vector<float>&   zs,
+    std::vector<VolumeSlices>&& volume_slices,
     // If clipping is disabled, then ExPolygons produced by different volumes will never be merged, thus they will be allowed to overlap.
     // It is up to the model designer to handle these overlaps.
-    const bool                                                clip_multipart_objects,
-    const std::function<void()>                              &throw_on_cancel_callback)
+    const bool                                   clip_multipart_objects,
+    const std::function<void()>&                 throw_on_cancel_callback,
+    std::map<ObjectID, std::vector<ExPolygons>>* through_owners = nullptr)
 {
     model_volumes_sort_by_id(model_volumes);
 
@@ -290,8 +294,11 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                 if (model_volume->is_model_part()) {
                     VolumeSlices &slices_src = volume_slices_find_by_id(volume_slices, model_volume->id());
                     auto         &slices_dst = slices_by_region[layer_range.volume_regions.front().region->print_object_region_id()];
-                    for (; z_idx < zs.size() && zs[z_idx] < layer_range.layer_height_range.second; ++ z_idx)
+                    for (; z_idx < zs.size() && zs[z_idx] < layer_range.layer_height_range.second; ++z_idx) {
+                        if (through_owners && through_owners->count(model_volume->id()))
+                            through_owners->at(model_volume->id())[z_idx] = slices_src.slices[z_idx];
                         slices_dst[z_idx] = std::move(slices_src.slices[z_idx]);
+                    }
                 }
             } else {
                 zs_complex.reserve(zs.size());
@@ -320,6 +327,9 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                         zs_complex.push_back({ z_idx, z });
                     else if (idx_first_printable_region >= 0) {
                         const PrintObjectRegions::VolumeRegion &region = layer_range.volume_regions[idx_first_printable_region];
+                        if (through_owners && through_owners->count(region.model_volume->id()))
+                            through_owners->at(region.model_volume->id())[z_idx] =
+                                volume_slices_find_by_id(volume_slices, region.model_volume->id()).slices[z_idx];
                         slices_by_region[region.region->print_object_region_id()][z_idx] = std::move(volume_slices_find_by_id(volume_slices, region.model_volume->id()).slices[z_idx]);
                     }
                 }
@@ -339,17 +349,19 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
         }
         tbb::parallel_for(
             tbb::blocked_range<size_t>(0, zs_complex.size()),
-            [&slices_by_region, &print_object_regions, &zs_complex, &layer_ranges_regions_to_slices, clip_multipart_objects, &throw_on_cancel_callback]
-                (const tbb::blocked_range<size_t> &range) {
+            [&slices_by_region, &print_object_regions, &zs_complex, &layer_ranges_regions_to_slices, clip_multipart_objects,
+             &throw_on_cancel_callback, through_owners](const tbb::blocked_range<size_t>& range) {
                 float z              = zs_complex[range.begin()].second;
                 auto  it_layer_range = layer_range_first(print_object_regions.layer_ranges, z);
                 // Per volume_regions slices at this Z height.
-                struct RegionSlice {
+                struct RegionSlice
+                {
                     ExPolygons  expolygons;
                     // Identifier of this region in PrintObjectRegions::all_regions
                     int         region_id;
                     ObjectID    volume_id;
-                    bool operator<(const RegionSlice &rhs) const {
+                    bool operator<(const RegionSlice &rhs) const
+                    {
                         bool this_empty = this->region_id < 0 || this->expolygons.empty();
                         bool rhs_empty  = rhs.region_id < 0 || rhs.expolygons.empty();
                         // Sort the empty items to the end of the list.
@@ -423,7 +435,7 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                                 // Clip every non-zero region preceding it.
                                 for (int idx_region2 = 0; idx_region2 < idx_region; ++ idx_region2)
                                     if (! temp_slices[idx_region2].expolygons.empty()) {
-                                        // Skip trim_overlap for now, because it slow down the performace so much for some special cases
+                            // Skip trim_overlap for now, because it slow down the performace so much for some special cases
 #if 1
                                         if (const PrintObjectRegions::VolumeRegion& region2 = layer_range.volume_regions[idx_region2];
                                             !region2.model_volume->is_negative_volume() && overlap_in_xy(*region.bbox, *region2.bbox))
@@ -440,6 +452,22 @@ static std::vector<std::vector<ExPolygons>> slices_to_regions(
                                     }
                             }
                         }
+                    if (through_owners) {
+                        for (size_t i = 0; i < temp_slices.size(); ++i) {
+                            if (temp_slices[i].region_id < 0 || temp_slices[i].expolygons.empty())
+                                continue;
+                            size_t owner = i;
+                            while (layer_range.volume_regions[owner].model_volume->is_modifier()) {
+                                const int parent = layer_range.volume_regions[owner].parent;
+                                if (parent < 0 || size_t(parent) >= owner)
+                                    break;
+                                owner = size_t(parent);
+                            }
+                            const auto* volume = layer_range.volume_regions[owner].model_volume;
+                            if (volume->is_model_part() && through_owners->count(volume->id()))
+                                append(through_owners->at(volume->id())[z_idx], temp_slices[i].expolygons);
+                        }
+                    }
                     // Sort by region_id, push empty slices to the end.
                     std::sort(temp_slices.begin(), temp_slices.end());
                     // Remove the empty slices.
@@ -5225,9 +5253,20 @@ void PrintObject::slice_volumes()
     //applyNegtiveVolumes(this->model_object()->volumes, objSliceByVolume, firstLayerObjSliceByGroups, scaled_resolution);
     firstLayerObjSliceByVolume = objSliceByVolume;
 
-    std::vector<std::vector<ExPolygons>> region_slices =
-        slices_to_regions(print->config(), *this, this->model_object()->volumes, *m_shared_regions, slice_zs,
-                          std::move(objSliceByVolume), PrintObject::clip_multipart_objects, throw_on_cancel_callback);
+    std::map<ObjectID, std::vector<ExPolygons>>                          through_owners;
+    std::map<const ModelVolume*, std::shared_ptr<const TraceryDocument>> through_documents;
+    for (const auto* volume : this->model_object()->volumes) {
+        if (!volume->is_model_part())
+            continue;
+        if (auto document = TraceryDocument::from_volume_snapshot(*volume); document && !document->through_operations().empty()) {
+            through_documents.emplace(volume, document);
+            through_owners.emplace(volume->id(), std::vector<ExPolygons>(slice_zs.size()));
+        }
+    }
+    std::vector<std::vector<ExPolygons>> region_slices = slices_to_regions(print->config(), *this, this->model_object()->volumes,
+                                                                           *m_shared_regions, slice_zs, std::move(objSliceByVolume),
+                                                                           PrintObject::clip_multipart_objects, throw_on_cancel_callback,
+                                                                           through_owners.empty() ? nullptr : &through_owners);
 
     for (size_t region_id = 0; region_id < region_slices.size(); ++ region_id) {
         std::vector<ExPolygons> &by_layer = region_slices[region_id];
@@ -5269,6 +5308,43 @@ void PrintObject::slice_volumes()
         std::vector<std::vector<ExPolygons>> mm_segmentation = multi_material_segmentation_by_painting(*this, [print]() { print->throw_if_canceled(); });
         apply_mixed_surface_indentation(*this, mm_segmentation);
         apply_mixed_component_surface_offsets(*this, mm_segmentation);
+        // Compose full-depth regions after surface-only offsets, before recipe
+        // expansion. Display surfaces of these operations are excluded from MMU extraction.
+        if (!through_documents.empty()) {
+            TraceryPerformanceScope timing("through_slice");
+            for (const auto& [volume, document] : through_documents) {
+                timing.stage("through.section_and_first_exit");
+                TriangleMesh channel_solid = volume->mesh();
+                // Negative volumes form real exits too: entering a cut-out must
+                // stop a channel rather than recoloring the solid behind it.
+                for (const auto* cut : this->model_object()->volumes) {
+                    if (!cut->is_negative_volume())
+                        continue;
+                    TriangleMesh cavity = cut->mesh();
+                    cavity.transform(volume->get_matrix().inverse() * cut->get_matrix(), true);
+                    its_flip_triangles(cavity.its);
+                    channel_solid.merge(cavity);
+                }
+                auto masks = slice_tracery_through(channel_solid.its, document->through_operations(),
+                                                   this->trafo_centered() * volume->get_matrix(), slice_zs, throw_on_cancel_callback);
+                timing.stage("through.compose_materials");
+                for (size_t layer = 0; layer < mm_segmentation.size(); ++layer) {
+                    throw_on_cancel_callback();
+                    const auto owner = union_ex(through_owners.at(volume->id())[layer]);
+                    for (auto& [material, polygons] : masks[layer]) {
+                        if (material >= mm_segmentation[layer].size())
+                            throw std::runtime_error("Full-depth stained-glass material is no longer available");
+                        auto clipped = intersection_ex(polygons, owner);
+                        if (clipped.empty())
+                            continue;
+                        for (auto& old : mm_segmentation[layer])
+                            old = diff_ex(old, clipped);
+                        append(mm_segmentation[layer][material], std::move(clipped));
+                        mm_segmentation[layer][material] = union_ex(mm_segmentation[layer][material]);
+                    }
+                }
+            }
+        }
         std::vector<std::vector<ExPolygons>> local_z_segmentation =
             local_z_whole_objects_enabled
                 ? local_z_planner_segmentation_with_whole_object_mixed_wall(*this, mm_segmentation)

@@ -14,11 +14,11 @@ records = [dict(token.split("=", 1) for token in line.split()[1:])
 threads = {r["scope_id"]: r["value"] for r in records if r.get("metric") == "thread_id"}
 capture = [r for r in records if r.get("phase") == "backup_snapshot_prepare" and r.get("kind") == "total"]
 writes = [r for r in records if r.get("phase") == "backup_write_background" and r.get("kind") == "total"]
-assert len(capture) == 4 and len(writes) == 4, "Expected initial backup, serialization failure, I/O failure and retry"
+assert len(capture) == 8 and len(writes) == 8, "Expected backup, serialization failure, I/O failure and retry for both V2 and V3"
 assert len({threads[r["scope_id"]] for r in writes}) == 1, "Backups must share the serialized worker"
 assert {threads[r["scope_id"]] for r in capture}.isdisjoint({threads[r["scope_id"]] for r in writes}), \
     "File serialization/compression still runs on the snapshot caller's thread"
-assert [r["status"] for r in writes] == ["completed", "failed", "failed", "completed"]
+assert [r["status"] for r in writes] == ["completed", "failed", "failed", "completed"] * 2
 print("PASS: backup writes run on a separate serialized worker; restore, failed-write preservation and retry passed")
 for r in capture + writes:
     print(f'{r["phase"]}: {r["elapsed_ms"]} ms ({r["status"]})')

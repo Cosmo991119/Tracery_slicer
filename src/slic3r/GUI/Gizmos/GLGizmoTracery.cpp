@@ -863,6 +863,12 @@ void GLGizmoTracery::on_render_input_window(float x, float y, float bottom_limit
             m_imgui->tooltip(mode_tips[i], ImGui::GetFontSize() * 20.0f);
     }
     ImGui::Separator();
+    if (m_paint_mode == PaintMode::THROUGH) {
+        ImGui::Checkbox(into_u8(_L("Full depth material")).c_str(), &m_full_through);
+        if (ImGui::IsItemHovered())
+            m_imgui->tooltip(_L("Assign stained-glass materials throughout the channel, stopping at the first exit from the solid."),
+                             ImGui::GetFontSize() * 24.f);
+    }
     m_imgui->text(_L("Operation"));
     const std::array<wchar_t, 2> operation_icons = m_is_dark_mode ? std::array<wchar_t, 2>{
         ImGui::PaintOperationDarkIcon, ImGui::EraseOperationDarkIcon
@@ -1139,12 +1145,11 @@ void GLGizmoTracery::update_model_object()
     // The selectors already contain the brush preview, but m_mask_data still
     // describes the last committed stroke. Keep the complete editor checkpoint
     // until every volume's generated result has been prepared.
-    auto state = std::tie(m_mask_object_id, m_mask_object_index, m_mask_data, m_previous_mask_data,
-                         m_stained_glass_base_paint_data, m_tracery_selections, m_generated_fragments,
-                         m_generated_voronoi_regions, m_fragment_colors, m_fragment_mixed_filament_ids,
-                         m_transition_recipe_targets, m_pending_selection_fragment_count, m_pending_selection_mode,
-                         m_incremental_generation, m_selection_modified, m_generation_integrity_valid,
-                         m_regeneration_requested, m_regeneration_version);
+    auto state      = std::tie(m_mask_object_id, m_mask_object_index, m_mask_data, m_previous_mask_data, m_stained_glass_base_paint_data,
+                               m_tracery_selections, m_generated_fragments, m_generated_voronoi_regions, m_fragment_colors,
+                               m_fragment_mixed_filament_ids, m_transition_recipe_targets, m_pending_selection_fragment_count,
+                               m_pending_selection_mode, m_pending_full_through, m_incremental_generation, m_selection_modified,
+                               m_generation_integrity_valid, m_regeneration_requested, m_regeneration_version);
     auto checkpoint = std::apply([](const auto&... values) { return std::make_tuple(values...); }, state);
     bool restored = false;
     const std::function<void()> rollback = [&] {
@@ -1161,6 +1166,7 @@ void GLGizmoTracery::update_model_object()
             m_previous_mask_data = m_mask_data;
             m_incremental_generation = false;
             m_pending_selection_mode = m_paint_mode;
+            m_pending_full_through   = m_paint_mode == PaintMode::THROUGH && m_full_through;
         } else {
             performance.stage("stroke.commit_material_selection");
             commit_material_selection();
@@ -1293,6 +1299,7 @@ void GLGizmoTracery::capture_selection_mask()
         m_mask_data.emplace_back(selector->serialize());
     m_incremental_generation = false;
     m_pending_selection_mode = m_paint_mode;
+    m_pending_full_through   = m_paint_mode == PaintMode::THROUGH && m_full_through;
 }
 
 void GLGizmoTracery::save_selection_mask()
@@ -3287,7 +3294,7 @@ void GLGizmoTracery::apply_incremental_boundary_transitions()
                 continue;
             for (size_t selection_index = 0; selection_index < m_tracery_selections.size(); ++selection_index) {
                 const TracerySelection& selection = m_tracery_selections[selection_index];
-                if (volume >= selection.regions.size())
+                if (selection.full_through != m_pending_full_through || volume >= selection.regions.size())
                     continue;
                 for (const GeneratedVoronoiRegion& previous : selection.regions[volume]) {
                     if (previous.is_back_projection || previous.fragment_id >= selection.fragment_colors.size() ||
@@ -4811,7 +4818,16 @@ GLGizmoTracery::PreparedTraceryVolume GLGizmoTracery::prepare_volume_tracery_par
     performance.count("vector_surface", vector_surface ? 1 : 0);
     if (!vector_surface)
         throw std::runtime_error("Legacy stained-glass mesh editing is disabled. Open an unmodified model to use vector stained glass.");
-    prepared.partition = document.apply_vector_edit(volume.mesh(), annotations, regions, edit);
+    TriangleSelector::Tracery2DData through_entry;
+    const bool through_edit = m_pending_full_through || (m_active_stroke_erases && !document.through_operations().empty());
+    if (through_edit) {
+        through_entry = build_voronoi_2d_data(volume_index, {}, recipes != nullptr, true);
+        if (recipes && !m_active_stroke_erases)
+            for (auto& facet : through_entry)
+                for (auto& region : facet.regions)
+                    region.color = EnforcerBlockerType(recipes->at(region.fragment_id));
+    }
+    prepared.partition = document.apply_vector_edit(volume.mesh(), annotations, regions, edit, through_edit ? &through_entry : nullptr);
     performance.count("base_facets", document.base_mesh().its.indices.size());
     performance.count("output_facets", prepared.partition.mesh.indices.size());
     performance.stage("partition.save_selection_reference");
@@ -4953,7 +4969,8 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting(bool prepared)
         has_generated_regions = has_generated_regions || !regions.empty();
     if (has_generated_regions && m_pending_selection_fragment_count > 0) {
         TracerySelection selection;
-        selection.mode = m_pending_selection_mode;
+        selection.mode         = m_pending_selection_mode;
+        selection.full_through = m_pending_full_through;
         selection.regions.resize(m_generated_voronoi_regions.size());
         for (size_t volume = 0; volume < m_generated_voronoi_regions.size(); ++volume)
             for (const GeneratedVoronoiRegion& region : m_generated_voronoi_regions[volume])
@@ -4988,8 +5005,10 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting(bool prepared)
         wxGetApp().plater()->changed_mesh(int(found - objects.begin()));
 }
 
-TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(
-    size_t volume_index, const std::function<void(const std::string&)>& diagnostic, bool material_budget) const
+TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t                                         volume_index,
+                                                                      const std::function<void(const std::string&)>& diagnostic,
+                                                                      bool                                           material_budget,
+                                                                      bool                                           front_only) const
 {
     TriangleSelector::Tracery2DData data;
     if (volume_index >= m_generated_voronoi_regions.size()) {
@@ -5051,6 +5070,8 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(
     };
     std::map<int, size_t> facet_entries;
     for (const GeneratedVoronoiRegion& generated : m_generated_voronoi_regions[volume_index]) {
+        if (front_only && generated.is_back_projection)
+            continue;
         ProjectionStatistics& statistics = diagnostic ? statistics_by_facet[generated.source_facet_id] : unused_statistics;
         ++statistics.input;
         const double area_3d = diagnostic ? polygon_area_3d(generated.local_polygon) : 0.;

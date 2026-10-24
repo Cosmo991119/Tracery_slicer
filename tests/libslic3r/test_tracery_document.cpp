@@ -1489,6 +1489,8 @@ TEST_CASE("Successive glass strokes preserve the earlier selection footprint", "
 
 TEST_CASE("Background backup restores its captured vector document after subsequent edits", "[TraceryBackup]")
 {
+    const bool full_depth = GENERATE(false, true);
+    CAPTURE(full_depth);
     set_backup_interval(0);
     const auto directory = boost::filesystem::temp_directory_path() / boost::filesystem::unique_path("tracery-backup-%%%%-%%%%");
     boost::filesystem::create_directories(directory / "3D/Objects");
@@ -1541,7 +1543,7 @@ TEST_CASE("Background backup restores its captured vector document after subsequ
         paint.push_back(facet);
     }
     REQUIRE_FALSE(paint.empty());
-    document.apply_vector_edit(volume->mesh(), annotations, paint, TraceryEdit::Paint);
+    document.apply_vector_edit(volume->mesh(), annotations, paint, TraceryEdit::Paint, full_depth ? &paint : nullptr);
     REQUIRE_FALSE(document.surface_regions().empty());
     auto captured = document.encode();
     if (const char* mb = std::getenv("TRACERY_BACKUP_BENCH_MB"))
@@ -1594,7 +1596,10 @@ TEST_CASE("Background backup restores its captured vector document after subsequ
     CHECK(config.option<ConfigOptionFloat>("layer_height")->value == .2);
     CHECK(restored.objects[0]->volumes[0]->tracery_edit_data == captured);
     CHECK(restored.objects[0]->volumes[0]->mmu_segmentation_facets.get_data() == annotations[0]);
-    CHECK(TraceryDocument::decode(captured).matches(restored.objects[0]->volumes[0]->mesh()));
+    const auto restored_document = TraceryDocument::decode(restored.objects[0]->volumes[0]->tracery_edit_data);
+    CHECK(restored_document.matches(restored.objects[0]->volumes[0]->mesh()));
+    CHECK(restored_document.format_version() == (full_depth ? 3 : 2));
+    CHECK(restored_document.through_operations().empty() == !full_depth);
     // A failed write must leave the previous recoverable archive intact and
     // keep the project dirty so the next backup can retry it.
     const auto read_archive = [&]() {

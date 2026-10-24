@@ -15573,3 +15573,9 @@ msgstr "结束涂抹后自动生成花窗。"
 
 msgid "Randomize stained glass"
 msgstr "重新随机"
+
+msgid "Full depth material"
+msgstr "完整贯穿内部"
+
+msgid "Assign stained-glass materials throughout the channel, stopping at the first exit from the solid."
+msgstr "将花窗材料应用于整个通道，在首次离开实体时停止。"

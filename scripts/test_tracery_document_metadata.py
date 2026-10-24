@@ -15,8 +15,9 @@ int main() {
     assert(tracery_document_version(R"({"version":1})") == 1);
     assert(tracery_document_version(R"({"base":{"version":999},"label":"version:1","version":2})") == 2);
     assert(tracery_document_version(R"({"version":2,"nested":{"version":1}})") == 2);
+    assert(tracery_document_version(R"({"version":3,"through":[],"channels":[]})") == 3);
     for (const auto* bad : {"{}", "[]", "null", R"({"nested":{"version":2}})",
-            R"({"version":3})", R"({"version":-1})", R"({"version":"2"})", R"({"version":2.5})",
+            R"({"version":4})", R"({"version":-1})", R"({"version":"2"})", R"({"version":2.5})",
             R"({"version":null})", R"({"version":true})", R"({"version":{}})", R"({"version":[]})",
             R"({"version":1,"version":2})", R"({"version":2,})", R"({"version":2} garbage)"}) {
         bool rejected = false;
