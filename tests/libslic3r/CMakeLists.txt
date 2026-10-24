@@ -134,3 +134,10 @@ add_test(NAME tracery_vector COMMAND tracery_document_tests "[TraceryVector]")
 add_test(NAME tracery_voronoi COMMAND tracery_document_tests "[TraceryVoronoi]")
 
 add_test(NAME tracery_generation_cache COMMAND tracery_document_tests "[TraceryGenerationCache]")
+
+add_executable(tracery_through_tests test_tracery_through.cpp)
+target_link_libraries(tracery_through_tests PRIVATE ${TEST_LINK_LIBS})
+if(WIN32)
+    target_link_libraries(tracery_through_tests PRIVATE bcrypt.lib crypt32.lib)
+endif()
+add_test(NAME tracery_through COMMAND tracery_through_tests "[TraceryThrough]")

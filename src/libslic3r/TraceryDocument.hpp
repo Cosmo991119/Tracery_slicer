@@ -2,6 +2,7 @@
 #define slic3r_TraceryDocument_hpp_
 #include "TraceryPartition.hpp"
 #include "Polygon.hpp"
+#include "TraceryThrough.hpp"
 #include <map>
 #include <memory>
 
@@ -42,11 +43,16 @@ public:
     const Annotation& selection_reference() const { return m_selection_reference; }
     void set_selection_reference(Annotation reference) { m_selection_reference = std::move(reference); }
     bool is_vector() const { return m_vector; }
-    TraceryPartitionResult apply_vector_edit(const TriangleMesh& current, const std::vector<Annotation>& annotations,
-                                            const TriangleSelector::Tracery2DData& paint, TraceryEdit edit);
+    int                                         format_version() const { return m_vector ? (m_through_operations.empty() ? 2 : 3) : 1; }
+    TraceryPartitionResult                      apply_vector_edit(const TriangleMesh&                    current,
+                                                                  const std::vector<Annotation>&         annotations,
+                                                                  const TriangleSelector::Tracery2DData& paint,
+                                                                  TraceryEdit                            edit,
+                                                                  const TriangleSelector::Tracery2DData* through_entry = nullptr);
     void clear_vector_glass(const TriangleMesh& current, const std::vector<Annotation>& annotations);
     TriangleSelector::Tracery2DData surface_regions() const;
-    std::map<unsigned, indexed_triangle_set> material_surfaces() const;
+    std::map<unsigned, indexed_triangle_set>    material_surfaces(bool for_slicing = false) const;
+    const std::vector<TraceryThroughOperation>& through_operations() const { return m_through_operations; }
     std::vector<unsigned> material_ids() const;
     void apply_ordinary_paint(const TriangleSelector::Tracery2DData& paint);
     const TriangleMesh&                    base_mesh() const { return m_base; }
@@ -54,6 +60,9 @@ public:
     const std::vector<Annotation>&         last_annotations() const { return m_last; }
     bool                                   matches(const TriangleMesh& mesh) const;
     std::string                            encode() const;
+    // Consume a prepared document and publish the exact immutable snapshot to
+    // readers. Use a ReadCacheScope across preparation and commit for large data.
+    std::string                            encode_cached() &&;
     std::string                            encode_replay(const std::vector<Annotation>&         annotations,
                                                          const TriangleSelector::Tracery2DData& paint,
                                                          TraceryEdit                            edit) const;
@@ -63,8 +72,15 @@ public:
     void                                   remap_materials(const EnforcerBlockerStateMap& mapping);
 
 private:
-    std::vector<Regions> updated_channels(const TriangleMesh& current, const std::vector<Annotation>& annotations,
-                                          const TriangleSelector::Tracery2DData& paint, TraceryEdit edit) const;
+    static void cache_document(const std::string& data, std::shared_ptr<const TraceryDocument> document);
+    std::vector<Regions>                 updated_channels(const TriangleMesh&                    current,
+                                                          const std::vector<Annotation>&         annotations,
+                                                          const TriangleSelector::Tracery2DData& paint,
+                                                          TraceryEdit                            edit,
+                                                          Regions*                               slicing      = nullptr,
+                                                          bool                                   full_through = false) const;
+    Regions                              m_slice_regions;
+    std::vector<TraceryThroughOperation> m_through_operations;
     Annotation m_selection_reference;
     bool m_vector = false;
     TriangleMesh            m_base;

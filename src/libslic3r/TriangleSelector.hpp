@@ -366,6 +366,9 @@ public:
     // This is useful for effects which share another selector's exact topology
     // while keeping an independent, per-leaf flag.
     void set_leaf_states(const std::function<EnforcerBlockerType(const Vec3f&, int source_facet)>& state_for);
+    // As above, but expose the leaf's current state without a point lookup in
+    // this same tree. The callback must not change the subdivision topology.
+    void transform_leaf_states(const std::function<EnforcerBlockerType(EnforcerBlockerType, const Vec3f&, int)>& state_for);
 
     // Copy the transient seed-fill selection into a selector with the same
     // subdivision tree. Unlike seed_fill_apply_on_triangles(), this does not

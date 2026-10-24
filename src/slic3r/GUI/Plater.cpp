@@ -11,6 +11,8 @@
 #include "libslic3r/MixedFilament.hpp"
 #include "libslic3r/TraceryPlateMaterials.hpp"
 #include "libslic3r/TraceryPerformance.hpp"
+#include "libslic3r/TraceryDocument.hpp"
+#include "libslic3r/TraceryInteractionTiming.hpp"
 #include "libslic3r/filament_mixer.h"
 #include "common_func/common_func.hpp"
 #include "slic3r/Utils/SnapLogClient.hpp"
@@ -88,6 +90,7 @@
 #include "libslic3r/Format/AMF.hpp"
 //#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/bbs_3mf.hpp"
+#include "libslic3r/Format/BackupSnapshot.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/SLA/Hollowing.hpp"
@@ -10199,6 +10202,7 @@ struct Plater::priv
     std::string                 delayed_error_message;
 
     wxTimer                     background_process_timer;
+    bool                        background_timer_from_global = false;
 
     std::string                 label_btn_export;
     std::string                 label_btn_send;
@@ -10393,6 +10397,7 @@ struct Plater::priv
 
     // BBS: backup
     bool up_to_date(bool saved, bool backup);
+    void acknowledge_backup(size_t timestamp) { m_backup_timestamp = timestamp; }
 
     void suppress_snapshots()   { m_prevent_snapshots++; }
     void allow_snapshots()      { m_prevent_snapshots--; }
@@ -10805,8 +10810,12 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     this->background_process_timer.SetOwner(this->q, 0);
     this->q->Bind(wxEVT_TIMER, [this](wxTimerEvent &evt)
     {
+        background_timer_from_global = false;
+        TraceryInteractionTiming::milestone("background_timer_fired");
         if (!this->suppressed_backround_processing_update)
             this->update_restart_background_process(false, false);
+        else
+            TraceryInteractionTiming::milestone("background_timer_suppressed");
     });
 
     update();
@@ -10865,7 +10874,10 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         sidebar->Bind(wxEVT_COMBOBOX, &priv::on_combobox_select, this);
         sidebar->Bind(EVT_OBJ_LIST_OBJECT_SELECT, [this](wxEvent&) { priv::selection_changed(); });
         // BBS: should bind BACKGROUND_PROCESS event to plater
-        q->Bind(EVT_SCHEDULE_BACKGROUND_PROCESS, [this](SimpleEvent&) { this->schedule_background_process(); });
+        q->Bind(EVT_SCHEDULE_BACKGROUND_PROCESS, [this](SimpleEvent&) {
+            TraceryInteractionTiming::milestone("background_request_received_global");
+            this->schedule_background_process();
+        });
         // jump to found option from SearchDialog
         q->Bind(wxCUSTOMEVT_JUMP_TO_OPTION, [this](wxCommandEvent& evt) { sidebar->jump_to_option(evt.GetInt()); });
         q->Bind(wxCUSTOMEVT_JUMP_TO_OBJECT, [this](wxCommandEvent& evt) {
@@ -10883,8 +10895,17 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     if (wxGetApp().is_editor()) {
         // 3DScene events:
         view3D_canvas->Bind(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS, [this](SimpleEvent&) {
+            TraceryInteractionTiming::milestone("background_request_received_canvas");
             delayed_error_message.clear();
-            this->background_process_timer.Start(500, wxTIMER_ONE_SHOT);
+            // The global commit path already scheduled this update. A queued
+            // canvas notification must not push its deadline back another 500 ms.
+            if (background_timer_from_global && background_process_timer.IsRunning()) {
+                TraceryInteractionTiming::milestone("background_timer_reused_canvas");
+            } else {
+                background_timer_from_global = false;
+                const bool armed = this->background_process_timer.Start(500, wxTIMER_ONE_SHOT);
+                TraceryInteractionTiming::milestone(armed ? "background_timer_armed_canvas" : "background_timer_arm_failed");
+            }
             });
         view3D_canvas->Bind(EVT_GLCANVAS_OBJECT_SELECT, &priv::on_object_select, this);
         view3D_canvas->Bind(EVT_GLCANVAS_RIGHT_CLICK, &priv::on_right_click, this);
@@ -13357,9 +13378,12 @@ void Plater::priv::scale_selection_to_fit_print_volume()
 
 void Plater::priv::schedule_background_process()
 {
+    TraceryInteractionTiming::milestone("background_schedule_global");
     delayed_error_message.clear();
     // Trigger the timer event after 0.5s
-    this->background_process_timer.Start(500, wxTIMER_ONE_SHOT);
+    const bool armed = this->background_process_timer.Start(500, wxTIMER_ONE_SHOT);
+    background_timer_from_global = armed;
+    TraceryInteractionTiming::milestone(armed ? "background_timer_armed_global" : "background_timer_arm_failed");
     // Notify the Canvas3D that something has changed, so it may invalidate some of the layer editing stuff.
     this->view3D->get_canvas3d()->set_config(this->config);
 }
@@ -13573,11 +13597,15 @@ bool Plater::priv::can_current_plate_be_sliced() const
 // Returns a bitmask of UpdateBackgroundProcessReturnState.
 unsigned int Plater::priv::update_background_process(bool force_validation, bool postpone_error_messages, bool switch_print)
 {
+    TraceryPerformanceScope performance("deferred_model_update");
+    TraceryDocument::ReadCacheScope document_cache;
+    performance.stage("deferred_update.volume_state");
     // bitmap of enum UpdateBackgroundProcessReturnState
     unsigned int return_state = 0;
 
     // If the update_background_process() was not called by the timer, kill the timer,
     // so the update_restart_background_process() will not be called again in vain.
+    TraceryInteractionTiming::milestone("background_timer_stopped_for_update");
     background_process_timer.Stop();
     // Update the "out of print bed" state of ModelInstances.
     update_print_volume_state();
@@ -13591,8 +13619,12 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
         this->partplate_list.update_slice_context_to_current_plate(background_process);
         this->preview->update_gcode_result(partplate_list.get_current_slice_result());
     }
+    performance.stage("deferred_update.apply_model");
     Print::ApplyStatus invalidated = background_process.apply(this->model, wxGetApp().preset_bundle->full_config());
+    performance.stage("deferred_update.filament_compatibility");
     notify_filament_compatibility_after_apply();
+
+    performance.stage("deferred_update.preview_state");
 
     if ((invalidated == Print::APPLY_STATUS_CHANGED) || (invalidated == Print::APPLY_STATUS_INVALIDATED))
         // BBS: add only gcode mode
@@ -13641,7 +13673,9 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
         //BBS: refine seq-print logic
         Polygons polygons;
         std::vector<std::pair<Polygon, float>> height_polygons;
+        performance.stage("deferred_update.validate");
         StringObjectException err = background_process.validate(&warning, &polygons, &height_polygons);
+        performance.stage("deferred_update.validation_notifications");
         // update string by type
         q->post_process_string_object_exception(err);
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": validate err=%1%, warning=%2%")%err.string%warning.string;
@@ -13709,6 +13743,7 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
         return_state |= UPDATE_BACKGROUND_PROCESS_INVALID;
     }
 
+    performance.stage("deferred_update.warnings_and_buttons");
     //actualizate warnings
     if (invalidated != Print::APPLY_STATUS_UNCHANGED || background_process.empty()) {
         if (background_process.empty()) {
@@ -13906,6 +13941,16 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 }
 unsigned int Plater::priv::update_restart_background_process(bool force_update_scene, bool force_update_preview)
 {
+    const auto interaction = TraceryInteractionTiming::background_started();
+    const int exceptions = std::uncaught_exceptions();
+    ScopeGuard finish_interaction([interaction, exceptions]() {
+        if (std::uncaught_exceptions() > exceptions) TraceryInteractionTiming::fail(interaction);
+        else TraceryInteractionTiming::background_finished(interaction);
+    });
+    TraceryPerformanceScope performance("deferred_scene_update");
+    TraceryDocument::ReadCacheScope document_cache;
+    performance.count("interaction_id", interaction);
+    performance.stage("deferred_scene.apply_and_validate");
     bool switch_print = true;
     //BBS: judge whether can switch print or not
     if ((partplate_list.get_plate_count() > 1) && !this->background_process.can_switch_print())
@@ -13916,12 +13961,16 @@ unsigned int Plater::priv::update_restart_background_process(bool force_update_s
     }
     // bitmask of UpdateBackgroundProcessReturnState
     unsigned int state = this->update_background_process(false, false, switch_print);
+    performance.stage("deferred_scene.reload_scene");
     if (force_update_scene || (state & UPDATE_BACKGROUND_PROCESS_REFRESH_SCENE) != 0)
         view3D->reload_scene(false);
 
+    performance.stage("deferred_scene.reload_preview");
     if (force_update_preview)
         this->preview->reload_print();
+    performance.stage("deferred_scene.restart_worker");
     this->restart_background_process(state);
+    performance.stage("deferred_scene.cleanup");
     return state;
 }
 
@@ -20975,6 +21024,8 @@ void publish(Model &model, SaveStrategy strategy) {
 // BBS: backup
 int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy strategy, int export_plate_idx, Export3mfProgressFn proFn)
 {
+    std::optional<TraceryPerformanceScope> backup_timing;
+    if (strategy & SaveStrategy::Backup) backup_timing.emplace("backup_prepare_and_enqueue");
     int ret = 0;
     //if (p->model.objects.empty()) {
     //    MessageDialog dialog(nullptr, _L("No objects to export."), _L("Save project"), wxYES);
@@ -20997,7 +21048,8 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
 
     DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config_secure();
     const std::string path_u8 = into_u8(path);
-    wxBusyCursor wait;
+    std::unique_ptr<wxBusyCursor> wait;
+    if (!(strategy & SaveStrategy::Backup)) wait = std::make_unique<wxBusyCursor>();
 
     BOOST_LOG_TRIVIAL(trace) << __FUNCTION__ << boost::format(": path=%1%, backup=%2%, export_plate_idx=%3%, SaveStrategy=%4%")
         %output_path.string()%(strategy & SaveStrategy::Backup)%export_plate_idx %(unsigned int)strategy;
@@ -21164,7 +21216,28 @@ int Plater::export_3mf(const boost::filesystem::path& output_path, SaveStrategy 
         }
     }
 
-    bool store_result = Slic3r::store_bbs_3mf(store_params);
+    bool store_result = false;
+    if (strategy & SaveStrategy::Backup) {
+        const auto timestamp = p->undo_redo_stack_main().active_snapshot_time();
+        const auto model_id = p->model.id();
+        wxWeakRef<Plater> owner(this);
+        try {
+            auto snapshot = std::make_shared<BackupSnapshot>(store_params);
+            BackupSnapshot::enqueue(std::move(snapshot), [owner, timestamp, model_id, path_u8](bool success) {
+                if (!owner || !success || owner->p->model.id() != model_id ||
+                    owner->p->model.get_backup_path() + "/.3mf" != path_u8)
+                    return;
+                // Acknowledge the captured undo state, never newer edits made
+                // while the worker was compressing/writing the file.
+                owner->p->acknowledge_backup(timestamp);
+            });
+            store_result = true; // queued, not yet acknowledged as backed up
+        } catch (const std::exception& e) {
+            BOOST_LOG_TRIVIAL(error) << "Cannot prepare project backup: " << e.what();
+        }
+    } else {
+        store_result = Slic3r::store_bbs_3mf(store_params);
+    }
     // reset designed info
     if (!has_design_info)
         p->model.design_info = nullptr;
@@ -23543,6 +23616,7 @@ bool Plater::is_background_process_update_scheduled() const
 
 void Plater::suppress_background_process(const bool stop_background_process)
 {
+    TraceryInteractionTiming::milestone(stop_background_process ? "background_suppressed_and_stopped" : "background_suppressed");
     if (stop_background_process)
         this->p->background_process_timer.Stop();
 

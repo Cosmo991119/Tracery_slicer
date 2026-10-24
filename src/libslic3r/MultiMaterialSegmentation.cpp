@@ -2240,7 +2240,7 @@ std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(con
     std::map<const ModelVolume*, std::shared_ptr<const std::map<unsigned, indexed_triangle_set>>> snapshots;
     for (const auto* volume : print_object.model_object()->volumes) {
         if (auto doc = TraceryDocument::from_volume_snapshot(*volume))
-            snapshots.emplace(volume, std::make_shared<const std::map<unsigned, indexed_triangle_set>>(doc->material_surfaces()));
+            snapshots.emplace(volume, std::make_shared<const std::map<unsigned, indexed_triangle_set>>(doc->material_surfaces(true)));
     }
     const auto extract_facets_info = [&snapshots](const ModelVolume &mv) -> ModelVolumeFacetsInfo {
         auto found = snapshots.find(&mv);

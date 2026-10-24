@@ -1,4 +1,5 @@
 #include "libslic3r/Technologies.hpp"
+#include "libslic3r/TraceryInteractionTiming.hpp"
 #include "libslic3r/AllowlistManager.hpp"
 #include "libslic3r/FilamentHotBedNozzleRules.hpp"
 #include "GUI_App.hpp"
@@ -3032,6 +3033,8 @@ bool GUI_App::on_init_inner()
 
     Bind(wxEVT_IDLE, [this](wxIdleEvent& event)
     {
+        TraceryInteractionTiming::Activity gap_timing("post_stroke.app_idle");
+        gap_timing.stage("post_stroke.app_idle.activation");
         bool curr_studio_active = this->is_studio_active();
         if (m_studio_active != curr_studio_active) {
             if (curr_studio_active) {
@@ -3076,6 +3079,7 @@ bool GUI_App::on_init_inner()
             update_publish_status();
         }
 
+        gap_timing.stage("post_stroke.app_idle.save_config");
         if (m_post_initialized && app_config->dirty())
             app_config->save();
 
