@@ -245,6 +245,19 @@ void overlay(Regions& destination, const Regions& patch)
         }
     }
 }
+// Update ownership without confusing same-colored ordinary paint with glass.
+void update_surface_glass(Regions& mask, const Regions& patch, bool painted)
+{
+    for (const auto& [id, states] : patch) {
+        Polygons footprint;
+        for (const auto& [state, polys] : states)
+            append(footprint, polys);
+        auto& target = mask[id][1];
+        target = painted ? union_(target, footprint) : diff(target, footprint);
+        if (target.empty())
+            mask.erase(id);
+    }
+}
 Regions delta(const Regions& before, const Regions& after)
 {
     Regions result;
@@ -560,7 +573,8 @@ std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(const Tr
                                                                         const TriangleSelector::Tracery2DData& paint,
                                                                         TraceryEdit                            edit,
                                                                         Regions*                               slicing,
-                                                                        bool                                   full_through) const
+                                                                        bool                                   full_through,
+                                                                        Regions*                               surface_glass) const
 {
     TraceryPerformanceScope performance("vector_update_channels");
     performance.stage("vector.copy_channels");
@@ -575,6 +589,8 @@ std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(const Tr
             overlay(*slicing, changes);
         if (channel == 0)
             overlay(channels[5], changes); // ordinary paint survives erase
+        if (channel == 0 && surface_glass)
+            update_surface_glass(*surface_glass, changes, false);
     }
     performance.stage("vector.mask_delta");
     channels[7] = channels[6];
@@ -594,17 +610,23 @@ std::vector<TraceryDocument::Regions> TraceryDocument::updated_channels(const Tr
                 }
             }
             overlay(channels[0], restore);
+            if (surface_glass)
+                update_surface_glass(*surface_glass, restore, false);
             if (slicing)
                 overlay(*slicing, restore);
         }
     }
     if (edit == TraceryEdit::Regenerate) {
         channels[0] = channels[5];
+        if (surface_glass)
+            surface_glass->clear();
         if (slicing)
             *slicing = channels[5];
     }
     performance.stage("vector.project_paint");
     const auto incoming = paint_regions(m_base, m_sources, paint);
+    if (surface_glass && (edit == TraceryEdit::Erase || !full_through))
+        update_surface_glass(*surface_glass, incoming, edit != TraceryEdit::Erase);
     performance.count("paint_facets", paint.size());
     performance.count("incoming_facets", incoming.size());
     performance.stage("vector.overlay_paint");
@@ -653,7 +675,9 @@ TraceryPartitionResult TraceryDocument::apply_vector_edit(const TriangleMesh&   
     Regions    slicing;
     if (separate_surface)
         slicing = m_through_operations.empty() ? m_channels[0] : m_slice_regions;
-    auto channels   = updated_channels(current, annotations, paint, edit, separate_surface ? &slicing : nullptr, through_entry != nullptr);
+    auto surface_glass = m_surface_glass;
+    auto channels = updated_channels(current, annotations, paint, edit, separate_surface ? &slicing : nullptr,
+                                     through_entry != nullptr, &surface_glass);
     auto operations = edit == TraceryEdit::Regenerate ? std::vector<TraceryThroughOperation>{} : m_through_operations;
     if (through_entry || (edit == TraceryEdit::Erase && !operations.empty())) {
         auto incoming = paint_regions(m_base, m_sources, through_entry ? *through_entry : paint);
@@ -693,6 +717,7 @@ TraceryPartitionResult TraceryDocument::apply_vector_edit(const TriangleMesh&   
             operations.push_back(std::move(operation));
     }
     performance.stage("vector.publish");
+    m_surface_glass      = std::move(surface_glass);
     m_slice_regions      = operations.empty() ? Regions{} : std::move(slicing);
     m_through_operations = std::move(operations);
     m_channels = std::move(channels);
@@ -722,6 +747,7 @@ void TraceryDocument::clear_vector_glass(const TriangleMesh& current, const std:
     performance.stage("clear.restore_base");
     m_channels[0] = m_channels[5];
     m_slice_regions.clear();
+    m_surface_glass.clear();
     m_through_operations.clear();
     m_channels[6].clear();
     m_channels[7].clear();
@@ -771,14 +797,14 @@ std::vector<unsigned> TraceryDocument::material_ids() const
     return {ids.begin(), ids.end()};
 }
 
-std::map<unsigned, indexed_triangle_set> TraceryDocument::material_surfaces(bool for_slicing) const
+std::map<unsigned, indexed_triangle_set> TraceryDocument::material_surfaces(bool for_slicing, unsigned surface_state_offset) const
 {
     std::map<unsigned, indexed_triangle_set> result;
     for (const auto& [id, states] : (for_slicing && !m_through_operations.empty() ? m_slice_regions : m_channels.at(0))) {
         const auto frame = plane(m_base, id);
-        for (const auto& [state, polygons] : states) {
+        auto add_surface = [&](unsigned state, const Polygons& polygons) {
             const auto points = triangulate_expolygons_2d(union_ex(polygons));
-            if (points.empty()) continue;
+            if (points.empty()) return;
             auto& mesh = result[state];
             for (size_t i = 0; i + 2 < points.size(); i += 3) {
                 const int first = int(mesh.vertices.size());
@@ -786,6 +812,18 @@ std::map<unsigned, indexed_triangle_set> TraceryDocument::material_surfaces(bool
                     mesh.vertices.push_back((frame.origin + points[i+j].x() * frame.axis_u + points[i+j].y() * frame.axis_v).cast<float>());
                 mesh.indices.emplace_back(first, first + 1, first + 2);
             }
+        };
+        const auto glass = m_surface_glass.find(id);
+        for (const auto& [state, polygons] : states) {
+            // Out-of-range saved materials must not alias temporary glass states.
+            if (for_slicing && surface_state_offset && state >= surface_state_offset)
+                continue;
+            if (for_slicing && surface_state_offset && state != 0 && glass != m_surface_glass.end()) {
+                const auto& mask = glass->second.at(1);
+                add_surface(state, diff(polygons, mask));
+                add_surface(state + surface_state_offset, intersection(polygons, mask));
+            } else
+                add_surface(state, polygons);
         }
     }
     return result;
@@ -796,6 +834,7 @@ void TraceryDocument::apply_ordinary_paint(const TriangleSelector::Tracery2DData
     const auto incoming = paint_regions(m_base, m_sources, paint);
     overlay(m_channels[0], incoming);
     overlay(m_channels[5], incoming);
+    update_surface_glass(m_surface_glass, incoming, false);
     if (!m_through_operations.empty())
         overlay(m_slice_regions, incoming);
 }
@@ -858,9 +897,7 @@ std::string TraceryDocument::encode() const
     root["derived"]  = mesh_json(m_derived);
     root["sources"]  = m_sources;
     root["channels"] = Json::array();
-    const size_t channel_count = m_channels.size() + (m_through_operations.empty() ? 0 : 1);
-    for (size_t channel_id = 0; channel_id < channel_count; ++channel_id) {
-        const auto& channel = channel_id < m_channels.size() ? m_channels[channel_id] : m_slice_regions;
+    const auto encode_regions = [](const Regions& channel) {
         Json entries = Json::array();
         for (const auto& [facet, states] : channel)
             for (const auto& [state, polys] : states) {
@@ -874,7 +911,13 @@ std::string TraceryDocument::encode() const
                 if (!polygons.empty())
                     entries.push_back({facet, state, polygons});
             }
-        root["channels"].push_back(std::move(entries));
+        return entries;
+    };
+    root["surface_glass"] = encode_regions(m_surface_glass);
+    const size_t channel_count = m_channels.size() + (m_through_operations.empty() ? 0 : 1);
+    for (size_t channel_id = 0; channel_id < channel_count; ++channel_id) {
+        const auto& channel = channel_id < m_channels.size() ? m_channels[channel_id] : m_slice_regions;
+        root["channels"].push_back(encode_regions(channel));
     }
     if (!m_through_operations.empty())
         root["through"] = Json::array();
@@ -911,7 +954,7 @@ TraceryDocument TraceryDocument::decode(const std::string& data)
     for (int id : result.m_sources)
         if (id < 0 || size_t(id) >= result.m_base.its.indices.size())
             throw std::runtime_error("Invalid stained-glass source facet");
-    for (const auto& c : root.at("channels")) {
+    const auto decode_regions = [&result](const Json& c) {
         Regions channel;
         for (const auto& entry : c) {
             const int      facet = entry.at(0).get<int>();
@@ -927,8 +970,11 @@ TraceryDocument TraceryDocument::decode(const std::string& data)
                 channel[facet][state].push_back(std::move(p));
             }
         }
-        result.m_channels.push_back(std::move(channel));
-    }
+        return channel;
+    };
+    for (const auto& c : root.at("channels"))
+        result.m_channels.push_back(decode_regions(c));
+
     for (const auto& a : root.at("last"))
         result.m_last.push_back(read_annotation(a, result.m_sources.size()));
     if (root.contains("selection_reference"))
@@ -964,6 +1010,17 @@ TraceryDocument TraceryDocument::decode(const std::string& data)
     }
     if (result.m_channels.size() != 8 || result.m_last.size() != 8)
         throw std::runtime_error("Invalid stained-glass channels");
+    if (root.contains("surface_glass")) {
+        result.m_surface_glass = decode_regions(root.at("surface_glass"));
+        for (const auto& [facet, states] : result.m_surface_glass)
+            if (states.size() != 1 || states.begin()->first != 1)
+                throw std::runtime_error("Invalid surface glass ownership mask");
+    } else {
+        // Legacy projects did not record provenance. Recover the visible glass
+        // that differs from the saved ordinary-paint base; future edits are exact.
+        const auto& surface = result.m_through_operations.empty() ? result.m_channels[0] : result.m_slice_regions;
+        update_surface_glass(result.m_surface_glass, delta(result.m_channels[5], surface), true);
+    }
     return result;
 }
 std::string TraceryDocument::encode_replay(const std::vector<Annotation>&         annotations,

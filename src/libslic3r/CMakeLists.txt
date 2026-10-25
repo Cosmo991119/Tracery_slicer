@@ -301,6 +301,8 @@ set(lisbslic3r_sources
     Model.cpp
     Model.hpp
     MTUtils.hpp
+    PaintedRegionPhase.cpp
+    PaintedRegionPhase.hpp
     MultiMaterialSegmentation.cpp
     MultiMaterialSegmentation.hpp
     MultiPoint.cpp

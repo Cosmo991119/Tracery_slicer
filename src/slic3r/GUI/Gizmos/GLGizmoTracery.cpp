@@ -4972,6 +4972,10 @@ void GLGizmoTracery::commit_tracery_mesh_update(PreparedTraceryVolume&& prepared
         replace_tracery_mesh(volume, prepared.partition);
     m_mesh_restore_states.erase(old_id);
     volume.tracery_edit_data = std::move(prepared.document);
+    // Apply the surface-shell policy only after a successful non-through paint
+    // commit. Keep it on when later strokes add independent full-depth regions.
+    if (!m_pending_full_through && !m_active_stroke_erases && !prepared.generated.empty())
+        volume.get_object()->config.set_key_value("fs_surface_paint_only", new ConfigOptionBool(true));
     if (m_edit_document_hashes.size() <= index)
         m_edit_document_hashes.resize(index + 1, 0);
     m_edit_document_hashes[index] = std::hash<std::string>{}(volume.tracery_edit_data);

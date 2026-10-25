@@ -3488,6 +3488,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def           = this->add("fs_surface_paint_only", coBool);
+    def->label    = L("Surface paint only");
+    def->tooltip  = L("Limit side-painted colors to the wall shell calculated from wall loops and line widths. "
+                     "Non-full-depth stained glass extends one inner-wall line width deeper. Automatically enabled on objects receiving non-full-depth stained glass. Ordinary painting on the same object is also affected. "
+                     "Full-depth stained glass remains fully penetrating. Top and bottom painting retains its existing behavior. "
+                     "Beam interlocking bypasses this limit; thin walls may have no unpainted core.");
+    def->category = L("Advanced");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def           = this->add("mmu_segmented_region_max_width", coFloat);
     def->label    = L("Maximum width of a segmented region");
     def->tooltip  = L("Maximum width of a segmented region. Zero disables this feature.");

@@ -15579,3 +15579,11 @@ msgstr "完整贯穿内部"
 
 msgid "Assign stained-glass materials throughout the channel, stopping at the first exit from the solid."
 msgstr "将花窗材料应用于整个通道，在首次离开实体时停止。"
+
+#: src/libslic3r/PrintConfig.cpp
+msgid "Surface paint only"
+msgstr "仅表面涂色"
+
+#: src/libslic3r/PrintConfig.cpp
+msgid "Limit side-painted colors to the wall shell calculated from wall loops and line widths. Non-full-depth stained glass extends one inner-wall line width deeper. Automatically enabled on objects receiving non-full-depth stained glass. Ordinary painting on the same object is also affected. Full-depth stained glass remains fully penetrating. Top and bottom painting retains its existing behavior. Beam interlocking bypasses this limit; thin walls may have no unpainted core."
+msgstr "将侧面涂色限制在根据墙层数和线宽计算的外壳内；非完全贯穿花窗额外向内增加一个内墙线宽。生成非完全贯穿花窗时自动为该对象启用，同一对象的普通涂色也会受影响。完全贯穿花窗仍贯穿实体，顶底面涂色保持原有行为。启用梁互锁时不执行此限制；薄壁可能没有未染色的内部区域。"

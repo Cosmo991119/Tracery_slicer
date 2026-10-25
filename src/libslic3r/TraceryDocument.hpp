@@ -54,7 +54,7 @@ public:
                                                                   const TriangleSelector::Tracery2DData* through_entry = nullptr);
     void clear_vector_glass(const TriangleMesh& current, const std::vector<Annotation>& annotations);
     TriangleSelector::Tracery2DData surface_regions() const;
-    std::map<unsigned, indexed_triangle_set>    material_surfaces(bool for_slicing = false) const;
+    std::map<unsigned, indexed_triangle_set>    material_surfaces(bool for_slicing = false, unsigned surface_state_offset = 0) const;
     const std::vector<TraceryThroughOperation>& through_operations() const { return m_through_operations; }
     std::vector<unsigned> material_ids() const;
     void apply_ordinary_paint(const TriangleSelector::Tracery2DData& paint);
@@ -81,7 +81,10 @@ private:
                                                           const TriangleSelector::Tracery2DData& paint,
                                                           TraceryEdit                            edit,
                                                           Regions*                               slicing      = nullptr,
-                                                          bool                                   full_through = false) const;
+                                                          bool                                   full_through = false,
+                                                          Regions*                               surface_glass = nullptr) const;
+    // Ownership mask for non-through glass, independent of its material.
+    Regions                              m_surface_glass;
     Regions                              m_slice_regions;
     std::vector<TraceryThroughOperation> m_through_operations;
     Annotation m_selection_reference;

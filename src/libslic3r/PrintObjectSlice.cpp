@@ -20,6 +20,7 @@
 #include "MixedFilament.hpp"
 #include "MultiMaterialSegmentation.hpp"
 #include "Print.hpp"
+#include "PaintedRegionPhase.hpp"
 #include "SVG.hpp"
 //BBS
 #include "ShortestPath.hpp"
@@ -4169,72 +4170,15 @@ static inline void apply_mm_segmentation(PrintObject &print_object, std::vector<
     const bool                collapse_mixed_regions_effective = collapse_mixed_regions;
     const size_t              num_channels = segmentation.empty() ? 0 : segmentation.front().size();
 
-    // Anchor mixed painted cadence to each independent vertical activation run
-    // instead of the object's global layer zero.
+    // Anchor mixed cadence to each connected 3D paint zone. Finish connectivity
+    // first so later merges cannot change the cadence of earlier branches.
     const auto mixed_zone_phase_slot = [num_channels](size_t layer_id, size_t channel_idx) {
         return layer_id * num_channels + channel_idx;
     };
-    std::vector<std::vector<int>> mixed_zone_component_local_layer_index(segmentation.size() * num_channels);
-    if (num_channels > 1) {
-        struct TrackedMixedZoneComponent
-        {
-            ExPolygon   mask;
-            BoundingBox bbox;
-            int         start_layer = 0;
-        };
-        std::vector<std::vector<TrackedMixedZoneComponent>> active_components(num_channels);
-        for (size_t layer_id = 0; layer_id < segmentation.size(); ++layer_id) {
-            throw_on_cancel();
-            if (segmentation[layer_id].size() != num_channels)
-                continue;
-
-            for (size_t channel_idx = 1; channel_idx < num_channels; ++channel_idx) {
-                const unsigned int channel_id = segmentation_channel_filament_id(channel_idx);
-                if (!mixed_mgr.is_mixed(channel_id, num_physical))
-                    continue;
-
-                const ExPolygons &state_masks = segmentation[layer_id][channel_idx];
-                if (state_masks.empty()) {
-                    active_components[channel_idx].clear();
-                    continue;
-                }
-
-                std::vector<int> &component_local_indices =
-                    mixed_zone_component_local_layer_index[mixed_zone_phase_slot(layer_id, channel_idx)];
-                component_local_indices.assign(state_masks.size(), -1);
-
-                std::vector<TrackedMixedZoneComponent> next_components;
-                next_components.reserve(state_masks.size());
-                for (size_t component_idx = 0; component_idx < state_masks.size(); ++component_idx) {
-                    const ExPolygon &component = state_masks[component_idx];
-                    if (component.empty())
-                        continue;
-
-                    const BoundingBox component_bbox = get_extents(component);
-                    int start_layer = -1;
-                    for (const TrackedMixedZoneComponent &active : active_components[channel_idx]) {
-                        if (!active.bbox.overlap(component_bbox))
-                            continue;
-                        if (!active.mask.overlaps(component))
-                            continue;
-                        if (start_layer < 0 || active.start_layer < start_layer)
-                            start_layer = active.start_layer;
-                    }
-                    if (start_layer < 0)
-                        start_layer = int(layer_id);
-
-                    component_local_indices[component_idx] = int(layer_id) - start_layer;
-                    TrackedMixedZoneComponent next;
-                    next.mask = component;
-                    next.bbox = component_bbox;
-                    next.start_layer = start_layer;
-                    next_components.emplace_back(std::move(next));
-                }
-
-                active_components[channel_idx] = std::move(next_components);
-            }
-        }
-    }
+    std::vector<bool> mixed_channels(num_channels, false);
+    for (size_t channel = 1; channel < num_channels; ++channel)
+        mixed_channels[channel] = mixed_mgr.is_mixed(segmentation_channel_filament_id(channel), num_physical);
+    const auto mixed_zone_component_local_layer_index = compute_painted_region_phases(segmentation, mixed_channels, throw_on_cancel);
 
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, segmentation.size(), std::max(segmentation.size() / 128, size_t(1))),

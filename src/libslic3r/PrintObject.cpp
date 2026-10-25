@@ -887,6 +887,11 @@ bool PrintObject::invalidate_state_by_config_options(
     std::vector<PrintObjectStep> steps;
     bool invalidated = false;
     for (const t_config_option_key &opt_key : opt_keys) {
+        // Surface paint depth depends on wall geometry, not just the paint data.
+        if (m_config.fs_surface_paint_only.value &&
+            (opt_key == "wall_loops" || opt_key == "inner_wall_line_width" || opt_key == "outer_wall_line_width" ||
+             opt_key == "line_width" || opt_key == "wall_filament"))
+            steps.emplace_back(posSlice);
         if (   opt_key == "brim_width"
             || opt_key == "brim_object_gap"
             || opt_key == "brim_type"
@@ -961,6 +966,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "mixed_filament_component_bias_enabled"
             || opt_key == "mixed_filament_region_collapse"
             || opt_key == "mmu_segmented_region_max_width"
+            || opt_key == "fs_surface_paint_only"
             || opt_key == "mmu_segmented_region_interlocking_depth"
             || opt_key == "raft_layers"
             || opt_key == "raft_contact_distance"

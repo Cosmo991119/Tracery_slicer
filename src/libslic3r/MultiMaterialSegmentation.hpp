@@ -38,8 +38,12 @@ struct ModelVolumeFacetsInfo {
     // Indicate if the default extruder (TriangleStateType::NONE) should be replaced with the volume extruder.
     const bool              replace_default_extruder;
     std::shared_ptr<const std::map<unsigned, indexed_triangle_set>> vector_surfaces;
+    unsigned surface_state_offset = 0;
     indexed_triangle_set material_facets(const ModelVolume& volume, unsigned material, bool strict = false) const;
 };
+
+// Construct material regions from closed, oriented colored layer contours.
+std::vector<ExPolygons> segment_colored_contours(std::vector<ColoredLines> contours, size_t num_states, size_t layer_idx = 0);
 
 // Returns segmentation based on painting in segmentation gizmos.
 std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject                                               &print_object,
@@ -49,7 +53,8 @@ std::vector<std::vector<ExPolygons>> segmentation_by_painting(const PrintObject 
                                                               float                                                            segmentation_interlocking_depth,
                                                               bool                                                             segmentation_interlocking_beam,
                                                               IncludeTopAndBottomLayers                                        include_top_and_bottom_layers,
-                                                              const std::function<void()>                                     &throw_on_cancel_callback);
+                                                              const std::function<void()>                                     &throw_on_cancel_callback,
+                                                              const std::vector<float>                                       &side_shell_widths = {});
 
 // Returns multi-material segmentation based on painting in multi-material segmentation gizmo
 std::vector<std::vector<ExPolygons>> multi_material_segmentation_by_painting(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);
