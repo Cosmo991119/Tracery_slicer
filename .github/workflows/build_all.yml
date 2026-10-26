@@ -1,4 +1,4 @@
-name: Build all
+name: Upstream build (Snapmaker only)
 
 on:
   schedule:
@@ -23,6 +23,7 @@ concurrency:
 jobs:
   build_all:
     name: Build All
+    if: github.repository == 'Snapmaker/OrcaSlicer'
     strategy:
       fail-fast: false
       matrix:
@@ -42,7 +43,7 @@ jobs:
     secrets: inherit
   flatpak:
     name: "Flatpak"
-    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.build-deps-only }}
+    if: ${{ github.repository == 'Snapmaker/OrcaSlicer' && (github.event_name != 'workflow_dispatch' || !inputs.build-deps-only) }}
     concurrency:
       group: flatpak-${{ matrix.variant.arch }}-${{ github.ref }}
       cancel-in-progress: false

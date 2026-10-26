@@ -1,0 +1,223 @@
+name: Build and release Tracery Slicer
+
+on:
+  push:
+    tags: ['v[0-9]*']
+  workflow_dispatch:
+    inputs:
+      publish-release:
+        description: Publish a Release after all platforms succeed
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tracery-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            platform: Windows-x64
+            arch: x86_64
+            deps: deps/build/OrcaSlicer_dep
+          - os: macos-15
+            platform: macOS-arm64
+            arch: arm64
+            deps: deps/build/arm64/OrcaSlicer_dep
+          - os: macos-15-intel
+            platform: macOS-x86_64
+            arch: x86_64
+            deps: deps/build/x86_64/OrcaSlicer_dep
+          - os: ubuntu-24.04
+            platform: Linux-x86_64
+            arch: x86_64
+            deps: deps/build/destdir
+    env:
+      CMAKE_BUILD_PARALLEL_LEVEL: 2
+      BUILD_ARCH: ${{ matrix.arch }}
+      PLATFORM: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          lfs: true
+      - uses: lukka/get-cmake@v4.4.4
+        with:
+          cmakeVersion: '3.28.6'
+      - name: Read and verify version
+        shell: bash
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^set(Snapmaker_VERSION "\([^"]*\)")/\1/p' version.inc)
+          test -n "$version"
+          if [[ "$REF_TYPE" == tag && "$REF_NAME" != "v$version" ]]; then
+            echo "Tag $REF_NAME does not match version.inc ($version)" >&2
+            exit 1
+          fi
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p dist
+      - name: Install Linux tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo bash build_linux.sh -ur
+          sudo apt-get install -y libfuse2t64 libunwind-dev xvfb libglu1-mesa-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libgstreamer-plugins-good1.0-dev libsoup2.4-dev
+      - name: Install macOS tools
+        if: runner.os == 'macOS'
+        run: |
+          xcodebuild -version
+          brew install automake autoconf gettext libtool texinfo
+          echo "$(brew --prefix gettext)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix texinfo)/bin" >> "$GITHUB_PATH"
+          # Avoid finding Homebrew zstd while compiling static dependencies.
+          brew uninstall --ignore-dependencies zstd || true
+      - uses: microsoft/setup-msbuild@v2
+        if: runner.os == 'Windows'
+      - name: Install Windows tools
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install nsis strawberryperl -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'C:\Strawberry\perl\bin' | Out-File -Append $env:GITHUB_PATH
+          'C:\Program Files (x86)\NSIS' | Out-File -Append $env:GITHUB_PATH
+      - name: Restore dependencies
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ matrix.deps }}
+          key: tracery-v1-${{ matrix.os }}-${{ matrix.arch }}-cmake328-${{ hashFiles('deps/**', 'build_release_macos.sh', 'build_release_vs2022.bat', 'build_linux.sh') }}
+      - name: Build Linux dependencies
+        if: runner.os == 'Linux' && steps.deps.outputs.cache-hit != 'true'
+        run: bash build_linux.sh -dr -j 2
+      - name: Build macOS dependencies
+        if: runner.os == 'macOS' && steps.deps.outputs.cache-hit != 'true'
+        run: bash build_release_macos.sh -dx -a "$BUILD_ARCH" -t 12.0
+      - name: Build Windows dependencies
+        if: runner.os == 'Windows' && steps.deps.outputs.cache-hit != 'true'
+        shell: cmd
+        run: call build_release_vs2022.bat deps
+      - name: Save dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ matrix.deps }}
+          key: ${{ steps.deps.outputs.cache-primary-key }}
+      - name: Build Linux app and AppImage
+        if: runner.os == 'Linux'
+        run: |
+          bash build_linux.sh -sir -j 2
+          cp "build/Snapmaker_Orca_Linux_V${RELEASE_VERSION}.AppImage" \
+            "dist/Tracery_Slicer_${RELEASE_VERSION}_${PLATFORM}.AppImage"
+          chmod +x dist/*.AppImage
+          APPIMAGE_EXTRACT_AND_RUN=1 xvfb-run -a dist/*.AppImage --help
+      - name: Build macOS app
+        if: runner.os == 'macOS'
+        run: bash build_release_macos.sh -sx -a "$BUILD_ARCH" -t 12.0
+      - name: Verify and package macOS app
+        if: runner.os == 'macOS'
+        run: |
+          app="build/$BUILD_ARCH/Snapmaker_Orca/Tracery slicer.app"
+          lipo -verify_arch "$BUILD_ARCH" "$app/Contents/MacOS/Snapmaker_Orca"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+          "$app/Contents/MacOS/Snapmaker_Orca" --help
+          mkdir -p build/dmg
+          cp -R "$app" build/dmg/
+          ln -s /Applications build/dmg/Applications
+          hdiutil create -volname 'Tracery Slicer' -srcfolder build/dmg -ov -format UDZO \
+            "dist/Tracery_Slicer_${RELEASE_VERSION}_${PLATFORM}.dmg"
+      - name: Build Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory |
+            Where-Object { Test-Path "$($_.FullName)\um\Windows.h" } |
+            Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'Windows SDK not found' }
+          $env:WindowsSdkDir = 'C:\Program Files (x86)\Windows Kits\10\'
+          $env:WindowsSDKVersion = "$($sdk.Name)\"
+          cmd /c 'build_release_vs2022.bat slicer'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify and package Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = 'build/Snapmaker_Orca/snapmaker-orca.exe'
+          if (-not (Test-Path $exe)) { throw "Missing $exe" }
+          $process = Start-Process -FilePath (Resolve-Path $exe) -ArgumentList '--help' -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Launch failed: $($process.ExitCode)" }
+          Push-Location build
+          cpack -G NSIS -C Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Pop-Location
+          Copy-Item "build/Snapmaker_Orca_Windows_Installer_V$env:RELEASE_VERSION.exe" "dist/Tracery_Slicer_$($env:RELEASE_VERSION)_Windows-x64_Installer.exe"
+          & 'C:/Program Files/7-Zip/7z.exe' a -tzip "dist/Tracery_Slicer_$($env:RELEASE_VERSION)_Windows-x64_Portable.zip" './build/Snapmaker_Orca/*'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    name: Publish complete Release
+    needs: build
+    if: github.ref_type == 'tag' || inputs.publish-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Verify assets and generate checksums
+        run: |
+          version=$(sed -n 's/^set(Snapmaker_VERSION "\([^"]*\)")/\1/p' version.inc)
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+          for suffix in Windows-x64_Installer.exe Windows-x64_Portable.zip macOS-arm64.dmg macOS-x86_64.dmg Linux-x86_64.AppImage; do
+            test -s "dist/Tracery_Slicer_${version}_${suffix}"
+          done
+          cd dist
+          sha256sum Tracery_Slicer_* > SHA256SUMS.txt
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ env.RELEASE_TAG }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          if existing_sha=$(gh api "repos/$GH_REPO/commits/$TAG" --jq '.sha' 2>/dev/null); then
+            if [[ "$existing_sha" != "$RELEASE_SHA" ]]; then
+              echo "Tag $TAG already points to another commit; refusing to move it." >&2
+              exit 1
+            fi
+          fi
+          if gh release view "$TAG" --json isDraft --jq '.isDraft' > existing-release.txt 2>/dev/null; then
+            if [[ "$(cat existing-release.txt)" != true ]]; then
+              echo 'This release is already published; refusing to replace its assets.' >&2
+              exit 1
+            fi
+          else
+            gh release create "$TAG" --target "$RELEASE_SHA" --draft --title "Tracery Slicer $TAG" \
+              --notes-file doc/RELEASE_NOTES.md
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          gh release edit "$TAG" --draft=false --latest
