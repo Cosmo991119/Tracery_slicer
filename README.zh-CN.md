@@ -86,16 +86,16 @@ Tracery Slicer 是一个生成花窗特殊效果FDM 切片工具，通过涂选�
 
 项目仓库：[Cosmo991119/Tracery_slicer](https://github.com/Cosmo991119/Tracery_slicer)。
 
-首次获取当前开发分支：
+首次获取主分支：
 
 ```bash
-git clone --branch fix-tracery https://github.com/Cosmo991119/Tracery_slicer.git
+git clone --branch main https://github.com/Cosmo991119/Tracery_slicer.git
 cd Tracery_slicer
 git lfs install
 git lfs pull
 ```
 
-私有仓库需要使用有访问权限的 GitHub 账号。已有本地仓库无需重复克隆，编译前确认位于需要构建的分支即可。
+已有本地仓库无需重复克隆，编译前确认位于需要构建的分支即可。
 
 如果本项目提供构建产物，可在[本仓库 Releases 页面](https://github.com/Cosmo991119/Tracery_slicer/releases)查看；没有对应安装包时，请按下方说明从源码编译。[上游 Snapmaker Orca 发布版](https://github.com/Snapmaker/OrcaSlicer/releases)不等同于包含本分支花窗改动的版本。
 
@@ -103,7 +103,9 @@ git lfs pull
 
 - **Windows**：使用对应安装包或便携目录；运行所需组件包括 Microsoft WebView2 与 Visual C++ 运行库。
 - **macOS**：使用与处理器匹配的应用包，Apple Silicon 对应 `arm64`，Intel 对应 `x86_64`，将应用拖入“应用程序”目录。
-- **Linux**：使用 AppImage 时，先赋予执行权限，例如 `chmod +x ./Snapmaker_Orca_Linux.AppImage`；文件名以实际产物为准。
+- **Linux**：使用 AppImage 时，先赋予执行权限，例如 `chmod +x ./Tracery_Slicer_1.0.0_Linux-x86_64.AppImage`；文件名以实际产物为准。
+
+安装包类型与安装要求详见[发布说明](doc/RELEASE_NOTES.md)。维护者可在 GitHub Actions 中运行[发布工作流](.github/workflows/release.yml)，构建 Windows x64、macOS arm64/x86_64 和 Linux x86_64。勾选 **Publish a Release after all platforms succeed** 后，将按 `version.inc` 中的版本号发布；不勾选则只生成构建产物。四个平台的构建与启动检查必须全部通过，才会发布 Release。
 
 ## 如何编译
 
@@ -177,7 +179,7 @@ bash build_release_macos.sh -d
 bash build_release_macos.sh -s
 ```
 
-默认使用 Xcode 生成器，构建目录为 `build/<架构>`，打包后的应用位于 `build/<架构>/Snapmaker_Orca/Snapmaker Orca.app`。
+默认使用 Xcode 生成器，构建目录为 `build/<架构>`，打包后的应用位于 `build/<架构>/Snapmaker_Orca/Tracery slicer.app`。
 
 需要 Xcode 调试时，可先执行 `bash build_release_macos.sh -c RelWithDebInfo`，再打开对应构建目录中的 `Snapmaker_Orca.xcodeproj`，选择 `Snapmaker_Orca` Scheme，将 Run 的 Build Configuration 设置为 `RelWithDebInfo` 后运行。如果需要沿用上游调试设置，可在 Run → Options 中取消勾选 `Allow debugging when browsing versions`。
 
@@ -257,6 +259,6 @@ Tracery Slicer 基于 **Snapmaker Orca** 进行二次开发，保留上游切片
 
 ## 反馈与贡献
 
-与本分支花窗功能相关的问题或建议，可提交至[本仓库 Issues](https://github.com/Cosmo991119/Tracery_slicer/issues)，并附上复现步骤、截图、模型特征及所用提交版本。私有仓库的访问和反馈需要相应权限。
+与本分支花窗功能相关的问题或建议，可提交至[本仓库 Issues](https://github.com/Cosmo991119/Tracery_slicer/issues)，并附上复现步骤、截图、模型特征及所用提交版本。
 
 贡献代码前请阅读仓库中的 [开发约定](AGENTS.md)，并避免在问题报告或项目文件中包含账号凭据、打印机密码等敏感信息。

@@ -83,16 +83,16 @@ Stained-glass and color-mixing features are still evolving.
 
 Repository: [Cosmo991119/Tracery_slicer](https://github.com/Cosmo991119/Tracery_slicer).
 
-To clone the current development branch:
+To clone the main branch:
 
 ```bash
-git clone --branch fix-tracery https://github.com/Cosmo991119/Tracery_slicer.git
+git clone --branch main https://github.com/Cosmo991119/Tracery_slicer.git
 cd Tracery_slicer
 git lfs install
 git lfs pull
 ```
 
-Access to a private repository requires an authorized GitHub account. If you already have a local checkout, you do not need to clone it again; check that you are on the branch you intend to build.
+If you already have a local checkout, you do not need to clone it again; check that you are on the branch you intend to build.
 
 If project builds are available, check [this repository's Releases page](https://github.com/Cosmo991119/Tracery_slicer/releases). Otherwise, build from source using the instructions below. [Upstream Snapmaker Orca releases](https://github.com/Snapmaker/OrcaSlicer/releases) are not equivalent to builds containing this branch's stained-glass changes.
 
@@ -100,7 +100,9 @@ When installing or running a build:
 
 - **Windows:** Use the corresponding installer or portable directory. Runtime components include Microsoft WebView2 and the Visual C++ runtime.
 - **macOS:** Choose the application package for your processor: `arm64` for Apple Silicon or `x86_64` for Intel. Drag the application into the Applications folder.
-- **Linux:** Make an AppImage executable before running it, for example `chmod +x ./Snapmaker_Orca_Linux.AppImage`. Use the actual filename of your build.
+- **Linux:** Make an AppImage executable before running it, for example `chmod +x ./Tracery_Slicer_1.0.0_Linux-x86_64.AppImage`. Use the actual filename of your build.
+
+Release packages and installation requirements are listed in the [release notes](doc/RELEASE_NOTES.md). For maintainers, [the release workflow](.github/workflows/release.yml) builds Windows x64, macOS arm64/x86_64, and Linux x86_64. Run it from GitHub Actions and enable **Publish a Release after all platforms succeed** to publish the version in `version.inc`; leave that option off to build artifacts only. Publication requires all four builds and startup checks to pass.
 
 ## How to Build
 
@@ -174,7 +176,7 @@ bash build_release_macos.sh -d
 bash build_release_macos.sh -s
 ```
 
-The default generator is Xcode. Build files are placed in `build/<architecture>`, and the packaged application is located at `build/<architecture>/Snapmaker_Orca/Snapmaker Orca.app`.
+The default generator is Xcode. Build files are placed in `build/<architecture>`, and the packaged application is located at `build/<architecture>/Snapmaker_Orca/Tracery slicer.app`.
 
 To debug in Xcode, first run `bash build_release_macos.sh -c RelWithDebInfo`. Open `Snapmaker_Orca.xcodeproj` in the corresponding build directory, select the `Snapmaker_Orca` scheme, set Run → Build Configuration to `RelWithDebInfo`, and run the application. To follow the upstream debugging setup, you can also uncheck `Allow debugging when browsing versions` under Run → Options.
 
@@ -254,6 +256,6 @@ Retained third-party notices:
 
 ## Feedback and Contributions
 
-Report issues or suggestions about this branch's stained-glass features in [this repository's Issues](https://github.com/Cosmo991119/Tracery_slicer/issues). Include reproduction steps, screenshots, relevant model characteristics, and the commit you are using. Access to a private repository and its issue tracker requires permission.
+Report issues or suggestions about this branch's stained-glass features in [this repository's Issues](https://github.com/Cosmo991119/Tracery_slicer/issues). Include reproduction steps, screenshots, relevant model characteristics, and the commit you are using.
 
 Before contributing code, read the [repository guidelines](AGENTS.md). Do not include account credentials, printer passwords, or other sensitive information in reports or project files.
