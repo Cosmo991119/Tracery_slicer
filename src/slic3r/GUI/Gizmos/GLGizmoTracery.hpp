@@ -96,7 +96,6 @@ private:
     {
         m_selection_modified = false;
         m_regeneration_requested = false;
-        m_palette_update_requested = false;
         m_opening_fragment_density = m_fragment_density;
         m_density_input            = m_fragment_density;
         m_paint_mode = PaintMode::SURFACE;
@@ -143,74 +142,10 @@ private:
                                         const std::vector<FragmentSeed>& seeds,
                                         const std::vector<std::set<size_t>>& neighbours);
     void publish_generated_regions(std::vector<std::vector<GeneratedVoronoiRegion>>&& regions);
-    struct WorkTriangle;
-    void build_work_surface(const GenerationInput& input, float boundary_sample_edge,
-                            std::vector<WorkTriangle>& work_triangles) const;
-    struct ColorRegionIntegrity;
-    struct EdgeKey {
-        size_t mesh_idx;
-        std::array<int64_t, 6> points;
-        bool operator<(const EdgeKey& other) const {
-            return mesh_idx != other.mesh_idx ? mesh_idx < other.mesh_idx : points < other.points;
-        }
-    };
-    ColorRegionIntegrity build_color_regions(std::vector<WorkTriangle>& work_triangles,
-                                             std::vector<ColorGroup>& color_groups,
-                                             std::vector<std::vector<size_t>>& group_triangles,
-                                             std::vector<double>& group_areas,
-                                             std::vector<size_t>& work_parents,
-                                             std::map<EdgeKey, size_t>& work_edge_owners,
-                                             std::map<size_t, std::array<int64_t, 4>>& work_anchors,
-                                             std::map<size_t, size_t>& work_group_indices,
-                                             bool verify_integrity) const;
-    ColorRegionIntegrity inspect_color_regions(const std::vector<WorkTriangle>& work_triangles,
-                                               const std::vector<ColorGroup>& color_groups,
-                                               const std::vector<std::vector<size_t>>& group_triangles,
-                                               const std::vector<double>& group_areas) const;
-    struct CpuGeometry;
-    struct FragmentGenerationIntegrity;
-    bool generate_fragments(const std::vector<WorkTriangle>& work_triangles,
-                            const std::vector<ColorGroup>& color_groups,
-                            const std::vector<std::vector<size_t>>& group_triangles,
-                            const std::vector<double>& group_areas,
-                            float target_edge, float maximum_fragment_diameter,
-                            std::map<EdgeKey, size_t>& work_edge_owners,
-                            size_t& fragment_count, std::vector<FragmentSeed>& seeds,
-                            std::vector<std::vector<CpuGeometry>>& geometry,
-                            std::vector<size_t>& fragment_for_triangle,
-                            std::vector<std::set<size_t>>& fragment_neighbours,
-                            std::vector<float>& fragment_boundary_distance,
-                            std::vector<size_t>& fragment_boundary_neighbor,
-                            bool verify_integrity, FragmentGenerationIntegrity* builder_integrity);
-    FragmentGenerationIntegrity inspect_fragment_generation(
-        const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
-        const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas,
-        float target_edge, size_t fragment_count, const std::vector<FragmentSeed>& seeds,
-        const std::vector<std::vector<CpuGeometry>>& geometry,
-        const std::vector<size_t>& fragment_for_triangle,
-        const std::vector<std::set<size_t>>& fragment_neighbours,
-        const std::vector<float>& fragment_boundary_distance,
-        const std::vector<size_t>& fragment_boundary_neighbor) const;
-    struct FragmentColorAssignmentIntegrity;
-    bool                             assign_fragment_colors(const std::vector<ColorGroup>&       color_groups,
-                                                            const std::vector<FragmentSeed>&     seeds,
-                                                            const std::vector<std::set<size_t>>& fragment_neighbours,
-                                                            size_t                               fragment_count,
-                                                            std::vector<ColorRGBA>&              fragment_colors,
-                                                            bool                                 verify_integrity,
-                                                            FragmentColorAssignmentIntegrity*    builder_integrity);
-    FragmentColorAssignmentIntegrity inspect_fragment_color_assignment(const std::vector<ColorGroup>&       color_groups,
-                                                                       const std::vector<FragmentSeed>&     seeds,
-                                                                       const std::vector<std::set<size_t>>& fragment_neighbours,
-                                                                       size_t                               fragment_count,
-                                                                       const std::vector<ColorRGBA>&        fragment_colors) const;
-    struct PublishGeneratedFragmentsIntegrity;
-    void publish_generated_fragments(std::vector<std::vector<CpuGeometry>>& geometry,
-                                     const std::vector<Transform3d>& volume_transforms,
-                                     size_t fragment_count,
-                                     bool verify_integrity,
-                                     PublishGeneratedFragmentsIntegrity* builder_integrity);
-    PublishGeneratedFragmentsIntegrity inspect_published_fragments(size_t fragment_count) const;
+    bool assign_fragment_colors(const std::vector<ColorGroup>& color_groups,
+                                const std::vector<FragmentSeed>& seeds,
+                                const std::vector<std::set<size_t>>& fragment_neighbours,
+                                size_t fragment_count, std::vector<ColorRGBA>& fragment_colors);
     void apply_stained_glass_colors(const std::function<void()>& rollback_preparation = {});
     struct PreparedTraceryVolume;
     struct StainedGlassApplyPlan {
@@ -236,7 +171,6 @@ private:
         std::vector<ColorRGBA> preview_colours;
     };
     std::optional<StainedGlassApplyPlan> prepare_stained_glass_apply(bool palette_only = false);
-    void                                 generate_through_fragments();
     void                                 generate_through_voronoi_regions();
     void                                 apply_incremental_boundary_transitions();
     void                                 commit_stained_glass_apply(StainedGlassApplyPlan&& plan);
@@ -245,7 +179,6 @@ private:
                                                                                const std::function<void(const std::string&)>& diagnostic,
                                                                                bool                                           material_budget = false,
                                                                                bool                                           front_only = false) const;
-    TriangleSelector::Tracery2DData build_tracery_2d_data(size_t volume_index) const;
     ModelObject* find_masked_model_object(Model& model) const;
     std::vector<TriangleSelector::TriangleSplittingData> collect_partition_annotations(const ModelVolume& volume, size_t index) const;
     std::vector<GeneratedVoronoiRegion> remap_partition_regions(
@@ -265,8 +198,8 @@ private:
     void record_display_diagnostic_state(const char* event, const std::string& detail = {});
 #endif
 
-    // CPU-only geometry used to classify surface points while baking the
-    // generated colours into normal MMU paint. It is never rendered.
+    // Temporary triangles for the back-projection fallback; they do not replace
+    // the model mesh and are converted back into vector regions.
     struct GeneratedFragment {
         size_t                   fragment_id = 0;
         indexed_triangle_set     surface;
@@ -277,8 +210,8 @@ private:
 
     enum class PaintMode { SURFACE, THROUGH };
 
-    // The direct Voronoi path preserves a clipped convex polygon until it is
-    // intersected with the selector leaves during the final MMU bake.
+    // Clipped Voronoi polygons are stored against original source facets and
+    // committed to the vector document for rendering and slicing.
     struct GeneratedVoronoiRegion {
         size_t              fragment_id = 0;
         int                 source_facet_id = -1;
@@ -327,11 +260,9 @@ private:
     bool    m_active_stroke_erases = false;
     bool    m_selection_modified = false;
     bool    m_regeneration_requested = false;
-    bool    m_palette_update_requested = false;
 #ifndef NDEBUG
     bool    m_display_diagnostics_active = false;
 #endif
-    bool    m_generation_integrity_valid = true;
 #ifndef NDEBUG
     std::filesystem::path m_display_diagnostics_dir;
     std::string m_display_diagnostics_phase;
@@ -373,7 +304,6 @@ private:
     // Destroy before the immutable selectors they reference.
     std::vector<std::unique_ptr<TraceryVectorFill>> m_vector_fills;
     std::optional<std::tuple<size_t, size_t, bool>> m_last_vector_fill_stroke;
-    std::vector<std::vector<GeneratedFragment>> m_generated_fragments;
     std::vector<std::vector<GeneratedVoronoiRegion>> m_generated_voronoi_regions;
     std::vector<TracerySelection> m_tracery_selections;
     bool m_incremental_generation = false;

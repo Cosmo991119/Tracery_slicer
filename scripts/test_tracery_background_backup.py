@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise recoverable async backups and verify writing leaves the calling thread."""
+"""Use a Debug test binary to check recoverable backups and worker-thread timing."""
 import os
 import subprocess
 import sys
@@ -11,6 +11,7 @@ print(result.stdout.strip())
 print(result.stderr.strip())
 records = [dict(token.split("=", 1) for token in line.split()[1:])
            for line in result.stderr.splitlines() if line.startswith("TRACERY_UI_PERF ")]
+assert records, "Timing verification requires a Debug test binary; Release intentionally disables tracing"
 threads = {r["scope_id"]: r["value"] for r in records if r.get("metric") == "thread_id"}
 capture = [r for r in records if r.get("phase") == "backup_snapshot_prepare" and r.get("kind") == "total"]
 writes = [r for r in records if r.get("phase") == "backup_write_background" and r.get("kind") == "total"]

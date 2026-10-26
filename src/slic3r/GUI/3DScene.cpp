@@ -26,6 +26,7 @@
 #include "libslic3r/QuadricEdgeCollapse.hpp"
 #include <thread>
 #include <algorithm>
+#include <cfloat>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -652,7 +653,8 @@ void GLVolume::render()
 void GLVolume::simple_render(GLShaderProgram*        shader,
                              ModelObjectPtrs&        model_objects,
                              std::vector<ColorRGBA>& extruder_colors,
-                             bool                    ban_light)
+                             bool                    ban_light,
+                             const GUI::Camera*      thumbnail_camera)
 {
     if (this->is_left_handed())
         glFrontFace(GL_CW);
@@ -663,10 +665,20 @@ void GLVolume::simple_render(GLShaderProgram*        shader,
         const auto* volume = model_objects[object_idx()]->volumes[volume_idx()];
         if (!volume->tracery_edit_data.empty()) {
             if (!vector_surface_renderer) vector_surface_renderer = std::make_shared<GUI::TracerySurfaceRenderer>();
-            const auto& collection = GUI::wxGetApp().plater()->canvas3D()->get_volumes();
-            const auto& plane = collection.get_clipping_plane();
-            if (vector_surface_renderer->render(*volume, extruder_colors, world_matrix(), GUI::wxGetApp().plater()->get_camera(),
-                {float(plane[0]), float(plane[1]), float(plane[2]), float(plane[3])}, collection.get_z_range(), render_color.a())) {
+            // Offscreen thumbnails have their own camera and show the complete
+            // object. Never borrow the editor camera or its current section cut.
+            const GUI::Camera* camera = thumbnail_camera;
+            std::array<float, 4> clipping{0.f, 0.f, 0.f, 1.f};
+            std::array<float, 2> z_range{-FLT_MAX, FLT_MAX};
+            if (!camera) {
+                camera = &GUI::wxGetApp().plater()->get_camera();
+                const auto& collection = GUI::wxGetApp().plater()->canvas3D()->get_volumes();
+                const auto& plane = collection.get_clipping_plane();
+                clipping = {float(plane[0]), float(plane[1]), float(plane[2]), float(plane[3])};
+                z_range = collection.get_z_range();
+            }
+            if (vector_surface_renderer->render(*volume, extruder_colors, world_matrix(), *camera,
+                clipping, z_range, render_color.a())) {
                 if (this->is_left_handed()) glFrontFace(GL_CCW);
                 return;
             }

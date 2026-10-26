@@ -1,6 +1,7 @@
 #ifndef slic3r_TraceryInteractionTiming_hpp_
 #define slic3r_TraceryInteractionTiming_hpp_
 
+#ifndef NDEBUG
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -10,7 +11,11 @@
 #include <optional>
 #include "TraceryPerformance.hpp"
 
+#endif
+
 namespace Slic3r {
+
+#ifndef NDEBUG
 
 // GUI-thread milestones across the stroke, deferred update, first displayed
 // frame and a subsequent idle callback. This measures an event-loop readiness
@@ -146,6 +151,40 @@ private:
         state() = Pending{};
     }
 };
+
+#else
+class TraceryInteractionTiming
+{
+public:
+    using Token = unsigned long long;
+    static constexpr Token begin(const void*, Token) noexcept { return 0; }
+    static void generation_finished(Token) noexcept {}
+    static void background_scheduled() noexcept {}
+    static constexpr bool after_generation(const void* = nullptr) noexcept { return false; }
+    static void milestone(const char*) noexcept {}
+    static constexpr Token background_started() noexcept { return 0; }
+    static void background_finished(Token) noexcept {}
+    static void frame_presented(const void*) noexcept {}
+    static void idle(const void*) noexcept {}
+    static void fail(Token) noexcept {}
+    static void fail_current() noexcept {}
+    class Activity
+    {
+    public:
+        constexpr Activity(const char*, const void* = nullptr) noexcept {}
+        ~Activity() noexcept {}
+        void stage(const char*) const noexcept {}
+    };
+    class Stroke
+    {
+    public:
+        constexpr Stroke(const void*, Token) noexcept {}
+        ~Stroke() noexcept {}
+        Stroke(const Stroke&) = delete;
+        Stroke& operator=(const Stroke&) = delete;
+    };
+};
+#endif
 
 } // namespace Slic3r
 #endif

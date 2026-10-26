@@ -16,7 +16,6 @@
 #include "libslic3r/TraceryBasePaint.hpp"
 #include "libslic3r/TraceryDisjointSet.hpp"
 #include "libslic3r/TracerySurfaceSampling.hpp"
-#include "libslic3r/TraceryPreviousFacetIndex.hpp"
 #include "libslic3r/TraceryPerformance.hpp"
 #include "libslic3r/TraceryInteractionTiming.hpp"
 #include "libslic3r/TraceryVoronoi.hpp"
@@ -28,7 +27,6 @@
 #include "slic3r/Utils/UndoRedo.hpp"
 
 #include "libslic3r/AABBMesh.hpp"
-#include "libslic3r/KDTreeIndirect.hpp"
 #include "libslic3r/Utils.hpp"
 
 #include <cereal/types/map.hpp>
@@ -63,6 +61,7 @@ namespace {
 
 using Slic3r::TraceryPerformanceScope;
 
+#ifndef NDEBUG
 // Opt-in diagnostic: written to stderr alongside the performance trace.
 bool tracery_color_trace_enabled()
 {
@@ -76,7 +75,6 @@ unsigned tracery_color_rgb(const Slic3r::ColorRGBA& color)
     return (component(color.r()) << 16) | (component(color.g()) << 8) | component(color.b());
 }
 
-#ifndef NDEBUG
 struct TraceryDisplayCanvasProbe {
     std::filesystem::path directory;
     std::string phase;
@@ -426,21 +424,6 @@ struct GLGizmoTracery::GenerationInput {
     double&                                                     surface_area;
 };
 
-struct GLGizmoTracery::WorkTriangle {
-    size_t    mesh_idx;
-    int       original_facet_id = -1;
-    Vec3f     a;
-    Vec3f     b;
-    Vec3f     c;
-    Vec3f     world_a;
-    Vec3f     world_b;
-    Vec3f     world_c;
-    Vec3f     normal;
-    ColorRGBA source_color;
-    size_t    color_group;
-    float     area;
-};
-
 struct GLGizmoTracery::ColorGroup {
     size_t    component_id;
     ColorRGBA color;
@@ -467,65 +450,10 @@ struct GLGizmoTracery::GenerationCache : TraceryGenerationCache<PreparedGenerati
     std::vector<TraceryVectorSelection> masks;
 };
 
-struct GLGizmoTracery::ColorRegionIntegrity {
-    size_t immutable_hash = 0;
-    size_t output_hash = 0;
-    size_t work_triangle_count = 0;
-    size_t grouped_triangle_count = 0;
-    size_t group_count = 0;
-    double work_area = 0.0;
-    double grouped_area = 0.0;
-    bool   valid = false;
-    bool   immutable_input_preserved = true;
-};
-
 struct GLGizmoTracery::FragmentSeed {
     Vec3f  position;
     size_t color_group;
     size_t stable_id;
-};
-
-struct GLGizmoTracery::CpuGeometry {
-    indexed_triangle_set surface;
-    // Parallel to surface.indices. A Voronoi polygon is triangulated into
-    // several faces, all of which retain the source model facet.
-    std::vector<int>     source_facet_ids;
-
-    bool empty() const { return surface.indices.empty(); }
-    void add_vertex(const Vec3f& vertex) { surface.vertices.emplace_back(vertex); }
-    void add_triangle(unsigned int first, unsigned int second, unsigned int third, int source_facet_id)
-    {
-        surface.indices.emplace_back(stl_triangle_vertex_indices{int(first), int(second), int(third)});
-        source_facet_ids.emplace_back(source_facet_id);
-    }
-};
-
-struct GLGizmoTracery::FragmentGenerationIntegrity {
-    size_t input_hash = 0;
-    size_t output_hash = 0;
-    size_t seed_count = 0;
-    size_t assigned_triangle_count = 0;
-    size_t nonempty_geometry_count = 0;
-    bool   valid = false;
-    bool   immutable_input_preserved = true;
-};
-
-struct GLGizmoTracery::FragmentColorAssignmentIntegrity {
-    size_t input_hash = 0;
-    size_t output_hash = 0;
-    size_t color_count = 0;
-    bool   valid = false;
-    bool   immutable_input_preserved = true;
-};
-
-struct GLGizmoTracery::PublishGeneratedFragmentsIntegrity {
-    size_t expected_hash = 0;
-    size_t published_hash = 0;
-    size_t expected_fragments = 0;
-    size_t published_fragments = 0;
-    size_t expected_faces = 0;
-    size_t published_faces = 0;
-    bool valid = false;
 };
 
 GLGizmoTracery::GLGizmoTracery(GLCanvas3D& parent, const std::string& icon_filename, unsigned int sprite_id)
@@ -892,7 +820,7 @@ void GLGizmoTracery::record_display_diagnostic_state(const char* event, const st
 
     const Model* model = m_parent.get_model();
     size_t fragments = 0;
-    for (const auto& volume : m_generated_fragments)
+    for (const auto& volume : m_generated_voronoi_regions)
         fragments += volume.size();
     std::string object_ids;
     if (model != nullptr) {
@@ -912,7 +840,7 @@ void GLGizmoTracery::record_display_diagnostic_state(const char* event, const st
         << "\tobject_ids=" << object_ids
         << "\tmask_entries=" << m_mask_data.size()
         << "\tlive_selectors=" << m_triangle_selectors.size()
-        << "\tgenerated_volumes=" << m_generated_fragments.size()
+        << "\tgenerated_volumes=" << m_generated_voronoi_regions.size()
         << "\tfragments=" << fragments
         << "\tfragment_colours=" << m_fragment_colors.size()
         << "\tmixed_ids=" << m_fragment_mixed_filament_ids.size() << '\n';
@@ -1293,7 +1221,6 @@ void GLGizmoTracery::clear_stained_glass_editor()
     m_vector_stroke_pending = false;
     m_stained_glass_base_paint_data.clear();
     m_tracery_selections.clear();
-    m_generated_fragments.clear();
     m_generated_voronoi_regions.clear();
     m_fragment_colors.clear();
     m_fragment_mixed_filament_ids.clear();
@@ -1301,7 +1228,6 @@ void GLGizmoTracery::clear_stained_glass_editor()
     m_pending_selection_fragment_count = 0;
     m_incremental_generation           = false;
     m_regeneration_requested           = false;
-    m_generation_integrity_valid       = true;
 }
 
 void GLGizmoTracery::update_model_object()
@@ -1323,10 +1249,10 @@ void GLGizmoTracery::update_model_object()
     // the previous stroke. Keep the complete editor checkpoint
     // until every volume's generated result has been prepared.
     auto state = std::tie(m_vector_masks, m_previous_vector_masks, m_mask_object_id, m_mask_object_index, m_mask_data, m_previous_mask_data,
-                          m_stained_glass_base_paint_data, m_tracery_selections, m_generated_fragments, m_generated_voronoi_regions,
+                          m_stained_glass_base_paint_data, m_tracery_selections, m_generated_voronoi_regions,
                           m_fragment_colors, m_fragment_mixed_filament_ids, m_transition_recipe_targets, m_pending_selection_fragment_count,
                           m_pending_selection_mode, m_pending_full_through, m_incremental_generation, m_selection_modified,
-                          m_generation_integrity_valid, m_regeneration_requested, m_regeneration_version);
+                          m_regeneration_requested, m_regeneration_version);
     auto checkpoint = std::apply([](const auto&... values) { return std::make_tuple(values...); }, state);
     bool restored = false;
     const std::function<void()> rollback = [&] {
@@ -1753,12 +1679,6 @@ std::vector<Vec3f> GLGizmoTracery::sample_region_seed_candidates(
 
 namespace {
 
-Vec3f tracery_warp_position(const Vec3f& point, float /* target_edge */)
-{
-    // A planar Voronoi bisector must remain a straight shared edge.
-    return point;
-}
-
 std::optional<TriangleSelector::TraceryFacet2DData> make_tracery_facet_plane(
     const indexed_triangle_set& mesh, int source_facet_id)
 {
@@ -1791,11 +1711,10 @@ void GLGizmoTracery::generate_voronoi_regions(
     TraceryPerformanceScope performance("voronoi_detail");
     performance.stage("voronoi.prepare_seeds");
     output.assign(m_triangle_selectors.size(), {});
-    const float target_edge = 6.5f - 4.0f * m_fragment_density;
-    std::vector<Vec3f> warped_seeds;
-    warped_seeds.reserve(seeds.size());
+    std::vector<Vec3f> seed_positions;
+    seed_positions.reserve(seeds.size());
     for (const FragmentSeed& seed : seeds)
-        warped_seeds.emplace_back(tracery_warp_position(seed.position, target_edge));
+        seed_positions.emplace_back(seed.position);
     constexpr size_t BATCH_SIZE = 4096;
     std::vector<TraceryVoronoiTriangle> triangles;
     std::vector<size_t> face_indices;
@@ -1810,7 +1729,7 @@ void GLGizmoTracery::generate_voronoi_regions(
                 region_seeds.emplace_back(index);
         auto clipper = [&] {
             TraceryPerformanceScope::Sample sample(performance, "voronoi.build_cells");
-            return TraceryVoronoiClipper(warped_seeds, region_seeds);
+            return TraceryVoronoiClipper(seed_positions, region_seeds);
         }();
         for (size_t start = 0; start < region.face_indices.size(); start += BATCH_SIZE) {
             {
@@ -1823,9 +1742,9 @@ void GLGizmoTracery::generate_voronoi_regions(
                     const auto& face = input.surface_triangles[index];
                     if (face.mesh_idx >= output.size())
                         continue;
-                    triangles.push_back({{{face.a, face.world_a, tracery_warp_position(face.world_a, target_edge)},
-                                          {face.b, face.world_b, tracery_warp_position(face.world_b, target_edge)},
-                                          {face.c, face.world_c, tracery_warp_position(face.world_c, target_edge)}}});
+                    triangles.push_back({{{face.a, face.world_a, face.world_a},
+                                          {face.b, face.world_b, face.world_b},
+                                          {face.c, face.world_c, face.world_c}}});
                     face_indices.push_back(index);
                 }
             }
@@ -1877,7 +1796,7 @@ void GLGizmoTracery::assign_voronoi_fragment_colors(
     const std::vector<ColorGroup>& color_groups, const std::vector<FragmentSeed>& seeds,
     const std::vector<std::set<size_t>>& neighbours)
 {
-    assign_fragment_colors(color_groups, seeds, neighbours, seeds.size(), m_fragment_colors, false, nullptr);
+    assign_fragment_colors(color_groups, seeds, neighbours, seeds.size(), m_fragment_colors);
 }
 
 void GLGizmoTracery::publish_generated_regions(std::vector<std::vector<GeneratedVoronoiRegion>>&& regions)
@@ -1885,991 +1804,11 @@ void GLGizmoTracery::publish_generated_regions(std::vector<std::vector<Generated
     m_generated_voronoi_regions = std::move(regions);
 }
 
-void GLGizmoTracery::build_work_surface(const GenerationInput& input, float boundary_sample_edge,
-                                        std::vector<WorkTriangle>& work_triangles) const
+bool GLGizmoTracery::assign_fragment_colors(const std::vector<ColorGroup>& color_groups,
+                                           const std::vector<FragmentSeed>& seeds,
+                                           const std::vector<std::set<size_t>>& fragment_neighbours,
+                                           size_t fragment_count, std::vector<ColorRGBA>& fragment_colors)
 {
-    using SurfaceTriangle = GenerationInput::SurfaceTriangle;
-    using ColorSource = GenerationInput::ColorSource;
-
-    const auto& color_sources = input.color_sources;
-    const auto sampled_source_color = [&color_sources](size_t mesh_idx, const Vec3f& local_position,
-                                                        const ColorRGBA& fallback) {
-        if (mesh_idx >= color_sources.size() || color_sources[mesh_idx].empty())
-            return fallback;
-        ColorRGBA result = fallback;
-        double closest_distance = std::numeric_limits<double>::max();
-        for (const std::unique_ptr<ColorSource>& source : color_sources[mesh_idx]) {
-            const double distance = source->aabb->squared_distance(local_position.cast<double>());
-            if (distance < closest_distance) {
-                closest_distance = distance;
-                result = source->color;
-            }
-        }
-        return result;
-    };
-
-    work_triangles.clear();
-    work_triangles.reserve(input.surface_triangles.size() * 24);
-    for (const SurfaceTriangle& source : input.surface_triangles) {
-        const float longest_edge = std::max({ (source.world_b - source.world_a).norm(), (source.world_c - source.world_b).norm(), (source.world_a - source.world_c).norm() });
-        const int subdivisions = std::clamp(int(std::ceil(longest_edge / boundary_sample_edge)), 1, 96);
-        const float inv_subdivisions = 1.0f / float(subdivisions);
-        const auto point = [inv_subdivisions](const Vec3f& a, const Vec3f& b, const Vec3f& c, int i, int j) {
-            return a + (b - a) * (float(i) * inv_subdivisions) + (c - a) * (float(j) * inv_subdivisions);
-        };
-        for (int i = 0; i < subdivisions; ++i) {
-            for (int j = 0; j < subdivisions - i; ++j) {
-                const Vec3f a = point(source.a, source.b, source.c, i, j);
-                const Vec3f b = point(source.a, source.b, source.c, i + 1, j);
-                const Vec3f c = point(source.a, source.b, source.c, i, j + 1);
-                const Vec3f world_a = point(source.world_a, source.world_b, source.world_c, i, j);
-                const Vec3f world_b = point(source.world_a, source.world_b, source.world_c, i + 1, j);
-                const Vec3f world_c = point(source.world_a, source.world_b, source.world_c, i, j + 1);
-                const ColorRGBA color = sampled_source_color(source.mesh_idx, (a + b + c) / 3.0f, source.source_color);
-                work_triangles.push_back({ source.mesh_idx, source.original_facet_id, a, b, c, world_a, world_b, world_c, source.normal, color, 0,
-                    0.5f * (world_b - world_a).cross(world_c - world_a).norm() });
-                if (j < subdivisions - i - 1) {
-                    const Vec3f d = point(source.a, source.b, source.c, i + 1, j + 1);
-                    const Vec3f world_d = point(source.world_a, source.world_b, source.world_c, i + 1, j + 1);
-                    const ColorRGBA color = sampled_source_color(source.mesh_idx, (b + d + c) / 3.0f, source.source_color);
-                    work_triangles.push_back({ source.mesh_idx, source.original_facet_id, b, d, c, world_b, world_d, world_c, source.normal, color, 0,
-                        0.5f * (world_d - world_b).cross(world_c - world_b).norm() });
-                }
-            }
-        }
-    }
-}
-
-GLGizmoTracery::ColorRegionIntegrity GLGizmoTracery::inspect_color_regions(
-    const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
-    const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas) const
-{
-    const auto mix_hash = [](size_t& hash, size_t value) {
-        hash = (hash * size_t(0x9e3779b1U)) ^ value;
-    };
-    const auto mix_float = [&mix_hash](size_t& hash, float value) {
-        mix_hash(hash, std::hash<float>{}(value));
-    };
-    const auto mix_color = [&mix_float](size_t& hash, const ColorRGBA& color) {
-        mix_float(hash, color.r());
-        mix_float(hash, color.g());
-        mix_float(hash, color.b());
-        mix_float(hash, color.a());
-    };
-
-    ColorRegionIntegrity result;
-    result.work_triangle_count = work_triangles.size();
-    result.group_count = color_groups.size();
-    result.immutable_hash = size_t(0x85ebca6bU);
-    bool source_ids_valid = true;
-    for (const WorkTriangle& triangle : work_triangles) {
-        mix_hash(result.immutable_hash, triangle.mesh_idx);
-        mix_hash(result.immutable_hash, size_t(triangle.original_facet_id));
-        if (triangle.original_facet_id < 0)
-            source_ids_valid = false;
-        for (const Vec3f* point : { &triangle.a, &triangle.b, &triangle.c, &triangle.world_a, &triangle.world_b,
-                                    &triangle.world_c, &triangle.normal }) {
-            mix_float(result.immutable_hash, point->x());
-            mix_float(result.immutable_hash, point->y());
-            mix_float(result.immutable_hash, point->z());
-        }
-        mix_color(result.immutable_hash, triangle.source_color);
-        mix_float(result.immutable_hash, triangle.area);
-        result.work_area += triangle.area;
-    }
-
-    result.output_hash = size_t(0xc2b2ae35U);
-    mix_hash(result.output_hash, color_groups.size());
-    for (const ColorGroup& group : color_groups) {
-        mix_hash(result.output_hash, group.component_id);
-        mix_color(result.output_hash, group.color);
-    }
-    const bool group_shapes_match = group_triangles.size() == color_groups.size() && group_areas.size() == color_groups.size();
-    mix_hash(result.output_hash, group_triangles.size());
-    mix_hash(result.output_hash, group_areas.size());
-    std::vector<unsigned char> seen(work_triangles.size(), 0);
-    bool assignments_valid = group_shapes_match && source_ids_valid;
-    for (size_t group = 0; group < group_triangles.size(); ++group) {
-        const double area = group < group_areas.size() ? group_areas[group] : 0.0;
-        result.grouped_area += area;
-        mix_hash(result.output_hash, group_triangles[group].size());
-        mix_hash(result.output_hash, std::hash<double>{}(area));
-        for (size_t triangle_index : group_triangles[group]) {
-            mix_hash(result.output_hash, triangle_index);
-            if (triangle_index >= work_triangles.size() || group >= color_groups.size() || seen[triangle_index] != 0) {
-                assignments_valid = false;
-                continue;
-            }
-            const WorkTriangle& triangle = work_triangles[triangle_index];
-            if (triangle.color_group != group || triangle.source_color != color_groups[group].color)
-                assignments_valid = false;
-            seen[triangle_index] = 1;
-            ++result.grouped_triangle_count;
-        }
-    }
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const WorkTriangle& triangle = work_triangles[index];
-        mix_hash(result.output_hash, triangle.color_group);
-        if (triangle.color_group >= color_groups.size() || seen[index] != 1)
-            assignments_valid = false;
-    }
-    const double area_epsilon = std::max(1e-5, std::abs(result.work_area) * 1e-6);
-    result.valid = assignments_valid && result.grouped_triangle_count == result.work_triangle_count &&
-        std::abs(result.grouped_area - result.work_area) <= area_epsilon;
-    return result;
-}
-
-GLGizmoTracery::ColorRegionIntegrity GLGizmoTracery::build_color_regions(
-    std::vector<WorkTriangle>& work_triangles, std::vector<ColorGroup>& color_groups,
-    std::vector<std::vector<size_t>>& group_triangles, std::vector<double>& group_areas,
-    std::vector<size_t>& work_parents, std::map<EdgeKey, size_t>& work_edge_owners,
-    std::map<size_t, std::array<int64_t, 4>>& work_anchors, std::map<size_t, size_t>& work_group_indices,
-    bool verify_integrity) const
-{
-    const size_t immutable_hash_before = verify_integrity ?
-        inspect_color_regions(work_triangles, color_groups, group_triangles, group_areas).immutable_hash : 0;
-    const auto quantize_point = [](const Vec3f& point) {
-        return std::array<int64_t, 3>{
-            int64_t(std::llround(point.x() * 100000.0f)),
-            int64_t(std::llround(point.y() * 100000.0f)),
-            int64_t(std::llround(point.z() * 100000.0f))
-        };
-    };
-    const auto edge_key = [&quantize_point](size_t mesh_idx, const Vec3f& first, const Vec3f& second) {
-        std::array<int64_t, 3> a = quantize_point(first);
-        std::array<int64_t, 3> b = quantize_point(second);
-        if (b < a)
-            std::swap(a, b);
-        return EdgeKey{ mesh_idx, { a[0], a[1], a[2], b[0], b[1], b[2] } };
-    };
-
-    color_groups.clear();
-    work_parents.resize(work_triangles.size());
-    for (size_t index = 0; index < work_parents.size(); ++index)
-        work_parents[index] = index;
-    const auto find_work_root = [&work_parents](size_t node) {
-        while (work_parents[node] != node) {
-            work_parents[node] = work_parents[work_parents[node]];
-            node = work_parents[node];
-        }
-        return node;
-    };
-    const auto merge_work = [&find_work_root, &work_parents](size_t first, size_t second) {
-        first = find_work_root(first);
-        second = find_work_root(second);
-        if (first != second)
-            work_parents[second] = first;
-    };
-    work_edge_owners.clear();
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const WorkTriangle& triangle = work_triangles[index];
-        const std::array<EdgeKey, 3> edges = {
-            edge_key(triangle.mesh_idx, triangle.a, triangle.b),
-            edge_key(triangle.mesh_idx, triangle.b, triangle.c),
-            edge_key(triangle.mesh_idx, triangle.c, triangle.a)
-        };
-        for (const EdgeKey& edge : edges) {
-            const auto owner = work_edge_owners.find(edge);
-            if (owner == work_edge_owners.end())
-                work_edge_owners.emplace(edge, index);
-            else if (work_triangles[owner->second].source_color == triangle.source_color)
-                merge_work(index, owner->second);
-        }
-    }
-
-    work_anchors.clear();
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const std::array<int64_t, 3> point = quantize_point(work_triangles[index].a);
-        const std::array<int64_t, 4> anchor = { int64_t(work_triangles[index].mesh_idx), point[0], point[1], point[2] };
-        const size_t root = find_work_root(index);
-        const auto current = work_anchors.find(root);
-        if (current == work_anchors.end() || anchor < current->second)
-            work_anchors[root] = anchor;
-    }
-    work_group_indices.clear();
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const size_t root = find_work_root(index);
-        auto group = work_group_indices.find(root);
-        if (group == work_group_indices.end()) {
-            size_t stable_id = 0;
-            for (int64_t value : work_anchors[root])
-                stable_id = (stable_id * size_t(0x9e3779b1U)) ^ size_t(value);
-            group = work_group_indices.emplace(root, color_groups.size()).first;
-            color_groups.emplace_back(ColorGroup{ stable_id, work_triangles[index].source_color });
-        }
-        work_triangles[index].color_group = group->second;
-    }
-
-    group_triangles.clear();
-    group_triangles.resize(color_groups.size());
-    group_areas.assign(color_groups.size(), 0.0);
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const WorkTriangle& triangle = work_triangles[index];
-        group_triangles[triangle.color_group].emplace_back(index);
-        group_areas[triangle.color_group] += triangle.area;
-    }
-
-    if (!verify_integrity)
-        return {};
-    ColorRegionIntegrity result = inspect_color_regions(work_triangles, color_groups, group_triangles, group_areas);
-    result.immutable_input_preserved = result.immutable_hash == immutable_hash_before;
-    result.valid = result.valid && result.immutable_input_preserved;
-    return result;
-}
-
-GLGizmoTracery::FragmentGenerationIntegrity GLGizmoTracery::inspect_fragment_generation(
-    const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
-    const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas,
-    float target_edge, size_t fragment_count, const std::vector<FragmentSeed>& seeds,
-    const std::vector<std::vector<CpuGeometry>>& geometry, const std::vector<size_t>& fragment_for_triangle,
-    const std::vector<std::set<size_t>>& fragment_neighbours, const std::vector<float>& fragment_boundary_distance,
-    const std::vector<size_t>& fragment_boundary_neighbor) const
-{
-    const auto mix_hash = [](size_t& hash, size_t value) {
-        hash = (hash * size_t(0x9e3779b1U)) ^ value;
-    };
-    const auto mix_float = [&mix_hash](size_t& hash, float value) {
-        mix_hash(hash, std::hash<float>{}(value));
-    };
-    const auto mix_color = [&mix_float](size_t& hash, const ColorRGBA& color) {
-        mix_float(hash, color.r());
-        mix_float(hash, color.g());
-        mix_float(hash, color.b());
-        mix_float(hash, color.a());
-    };
-
-    FragmentGenerationIntegrity result;
-    result.input_hash = size_t(0x27d4eb2fU);
-    mix_float(result.input_hash, target_edge);
-    mix_hash(result.input_hash, work_triangles.size());
-    bool source_ids_valid = true;
-    std::vector<std::set<int>> source_facets_by_mesh(m_triangle_selectors.size());
-    for (const WorkTriangle& triangle : work_triangles) {
-        mix_hash(result.input_hash, triangle.mesh_idx);
-        mix_hash(result.input_hash, size_t(triangle.original_facet_id));
-        if (triangle.mesh_idx >= source_facets_by_mesh.size() || triangle.original_facet_id < 0)
-            source_ids_valid = false;
-        else
-            source_facets_by_mesh[triangle.mesh_idx].insert(triangle.original_facet_id);
-        mix_hash(result.input_hash, triangle.color_group);
-        for (const Vec3f* point : { &triangle.a, &triangle.b, &triangle.c, &triangle.world_a, &triangle.world_b,
-                                    &triangle.world_c, &triangle.normal }) {
-            mix_float(result.input_hash, point->x());
-            mix_float(result.input_hash, point->y());
-            mix_float(result.input_hash, point->z());
-        }
-        mix_color(result.input_hash, triangle.source_color);
-        mix_float(result.input_hash, triangle.area);
-    }
-    mix_hash(result.input_hash, color_groups.size());
-    for (const ColorGroup& group : color_groups) {
-        mix_hash(result.input_hash, group.component_id);
-        mix_color(result.input_hash, group.color);
-    }
-    mix_hash(result.input_hash, group_triangles.size());
-    for (const auto& group : group_triangles) {
-        mix_hash(result.input_hash, group.size());
-        for (size_t triangle : group)
-            mix_hash(result.input_hash, triangle);
-    }
-    mix_hash(result.input_hash, group_areas.size());
-    for (double area : group_areas)
-        mix_hash(result.input_hash, std::hash<double>{}(area));
-
-    result.seed_count = seeds.size();
-    result.output_hash = size_t(0x165667b1U);
-    mix_hash(result.output_hash, fragment_count);
-    mix_hash(result.output_hash, seeds.size());
-    bool valid = source_ids_valid && fragment_count != 0 && seeds.size() == fragment_count &&
-        geometry.size() == m_triangle_selectors.size() && fragment_for_triangle.size() == work_triangles.size() &&
-        fragment_neighbours.size() == fragment_count && fragment_boundary_distance.size() == fragment_count &&
-        fragment_boundary_neighbor.size() == fragment_count;
-    for (size_t index = 0; index < seeds.size(); ++index) {
-        const FragmentSeed& seed = seeds[index];
-        mix_float(result.output_hash, seed.position.x());
-        mix_float(result.output_hash, seed.position.y());
-        mix_float(result.output_hash, seed.position.z());
-        mix_hash(result.output_hash, seed.color_group);
-        mix_hash(result.output_hash, seed.stable_id);
-        if (seed.color_group >= color_groups.size())
-            valid = false;
-    }
-    for (size_t volume = 0; volume < geometry.size(); ++volume) {
-        const auto& per_volume = geometry[volume];
-        mix_hash(result.output_hash, per_volume.size());
-        if (per_volume.size() != fragment_count)
-            valid = false;
-        for (const CpuGeometry& data : per_volume) {
-            mix_hash(result.output_hash, data.surface.vertices.size());
-            mix_hash(result.output_hash, data.surface.indices.size());
-            mix_hash(result.output_hash, data.source_facet_ids.size());
-            if (!data.empty())
-                ++result.nonempty_geometry_count;
-            if (data.source_facet_ids.size() != data.surface.indices.size())
-                valid = false;
-            for (const Vec3f& vertex : data.surface.vertices) {
-                mix_float(result.output_hash, vertex.x());
-                mix_float(result.output_hash, vertex.y());
-                mix_float(result.output_hash, vertex.z());
-            }
-            for (size_t face_index = 0; face_index < data.surface.indices.size(); ++face_index) {
-                const stl_triangle_vertex_indices& face = data.surface.indices[face_index];
-                if (face_index < data.source_facet_ids.size()) {
-                    const int source_facet_id = data.source_facet_ids[face_index];
-                    mix_hash(result.output_hash, size_t(source_facet_id));
-                    if (source_facet_id < 0 || volume >= source_facets_by_mesh.size() ||
-                        !source_facets_by_mesh[volume].count(source_facet_id))
-                        valid = false;
-                }
-                for (int vertex : face) {
-                    mix_hash(result.output_hash, size_t(vertex));
-                    if (vertex < 0 || size_t(vertex) >= data.surface.vertices.size())
-                        valid = false;
-                }
-            }
-        }
-    }
-    for (size_t triangle = 0; triangle < fragment_for_triangle.size(); ++triangle) {
-        const size_t fragment = fragment_for_triangle[triangle];
-        mix_hash(result.output_hash, fragment);
-        if (fragment == fragment_count)
-            continue;
-        if (fragment >= fragment_count || seeds[fragment].color_group != work_triangles[triangle].color_group)
-            valid = false;
-        else
-            ++result.assigned_triangle_count;
-    }
-    for (size_t fragment = 0; fragment < fragment_neighbours.size(); ++fragment) {
-        mix_hash(result.output_hash, fragment_neighbours[fragment].size());
-        for (size_t neighbour : fragment_neighbours[fragment]) {
-            mix_hash(result.output_hash, neighbour);
-            if (neighbour >= fragment_count || neighbour == fragment ||
-                !fragment_neighbours[neighbour].count(fragment))
-                valid = false;
-        }
-        mix_float(result.output_hash, fragment_boundary_distance[fragment]);
-        mix_hash(result.output_hash, fragment_boundary_neighbor[fragment]);
-        if (fragment_boundary_neighbor[fragment] > color_groups.size())
-            valid = false;
-    }
-    valid = valid && result.assigned_triangle_count == work_triangles.size();
-    result.valid = valid;
-    return result;
-}
-
-GLGizmoTracery::FragmentColorAssignmentIntegrity GLGizmoTracery::inspect_fragment_color_assignment(
-    const std::vector<ColorGroup>&       color_groups,
-    const std::vector<FragmentSeed>&     seeds,
-    const std::vector<std::set<size_t>>& fragment_neighbours,
-    size_t                               fragment_count,
-    const std::vector<ColorRGBA>&        fragment_colors) const
-{
-    const auto mix_hash = [](size_t& hash, size_t value) {
-        hash = (hash * size_t(0x9e3779b1U)) ^ value;
-    };
-    const auto mix_float = [&mix_hash](size_t& hash, float value) {
-        mix_hash(hash, std::hash<float>{}(value));
-    };
-    const auto mix_color = [&mix_float](size_t& hash, const ColorRGBA& color) {
-        mix_float(hash, color.r());
-        mix_float(hash, color.g());
-        mix_float(hash, color.b());
-        mix_float(hash, color.a());
-    };
-
-    FragmentColorAssignmentIntegrity result;
-    result.input_hash = size_t(0x9e3779b9U);
-    mix_hash(result.input_hash, fragment_count);
-    mix_hash(result.input_hash, color_groups.size());
-    for (const ColorGroup& group : color_groups) {
-        mix_hash(result.input_hash, group.component_id);
-        mix_color(result.input_hash, group.color);
-    }
-    mix_hash(result.input_hash, seeds.size());
-    for (const FragmentSeed& seed : seeds) {
-        mix_float(result.input_hash, seed.position.x());
-        mix_float(result.input_hash, seed.position.y());
-        mix_float(result.input_hash, seed.position.z());
-        mix_hash(result.input_hash, seed.color_group);
-        mix_hash(result.input_hash, seed.stable_id);
-    }
-    mix_hash(result.input_hash, fragment_neighbours.size());
-    for (const auto& neighbours : fragment_neighbours) {
-        mix_hash(result.input_hash, neighbours.size());
-        for (size_t neighbour : neighbours)
-            mix_hash(result.input_hash, neighbour);
-    }
-    result.color_count = fragment_colors.size();
-    result.output_hash = size_t(0x85ebca77U);
-    mix_hash(result.output_hash, fragment_colors.size());
-    bool valid = seeds.size() == fragment_count && fragment_neighbours.size() == fragment_count && fragment_colors.size() == fragment_count;
-    for (size_t fragment = 0; fragment < seeds.size(); ++fragment) {
-        if (seeds[fragment].color_group >= color_groups.size())
-            valid = false;
-        if (fragment >= fragment_neighbours.size()) {
-            valid = false;
-            continue;
-        }
-        for (size_t neighbour : fragment_neighbours[fragment])
-            if (neighbour >= fragment_count || neighbour >= fragment_neighbours.size() || neighbour == fragment ||
-                !fragment_neighbours[neighbour].count(fragment))
-                valid = false;
-    }
-    for (const ColorRGBA& color : fragment_colors) {
-        mix_color(result.output_hash, color);
-        if (!std::isfinite(color.r()) || !std::isfinite(color.g()) || !std::isfinite(color.b()) || !std::isfinite(color.a()) ||
-            color.r() < 0.0f || color.r() > 1.0f || color.g() < 0.0f || color.g() > 1.0f ||
-            color.b() < 0.0f || color.b() > 1.0f || color.a() != 1.0f)
-            valid = false;
-    }
-    result.valid = valid;
-    return result;
-}
-
-GLGizmoTracery::PublishGeneratedFragmentsIntegrity GLGizmoTracery::inspect_published_fragments(size_t fragment_count) const
-{
-    const auto mix_hash = [](size_t& hash, size_t value) {
-        hash = (hash * size_t(0x9e3779b1U)) ^ value;
-    };
-    const auto mix_float = [&mix_hash](size_t& hash, float value) { mix_hash(hash, std::hash<float>{}(value)); };
-    PublishGeneratedFragmentsIntegrity result;
-    result.published_hash = size_t(0xc2b2ae3dU);
-    mix_hash(result.published_hash, m_generated_fragments.size());
-    result.valid = true;
-    for (size_t volume = 0; volume < m_generated_fragments.size(); ++volume) {
-        const auto& fragments = m_generated_fragments[volume];
-        mix_hash(result.published_hash, fragments.size());
-        size_t previous = 0;
-        bool has_previous = false;
-        for (const GeneratedFragment& fragment : fragments) {
-            mix_hash(result.published_hash, volume);
-            mix_hash(result.published_hash, fragment.fragment_id);
-            mix_hash(result.published_hash, fragment.surface.vertices.size());
-            mix_hash(result.published_hash, fragment.surface.indices.size());
-            mix_hash(result.published_hash, fragment.source_facet_ids.size());
-            ++result.published_fragments;
-            result.published_faces += fragment.surface.indices.size();
-            if (fragment.fragment_id >= fragment_count || fragment.surface.indices.empty() ||
-                fragment.source_facet_ids.size() != fragment.surface.indices.size() ||
-                (has_previous && fragment.fragment_id <= previous))
-                result.valid = false;
-            previous = fragment.fragment_id;
-            has_previous = true;
-            for (const Vec3f& vertex : fragment.surface.vertices) {
-                mix_float(result.published_hash, vertex.x());
-                mix_float(result.published_hash, vertex.y());
-                mix_float(result.published_hash, vertex.z());
-            }
-            for (size_t face_index = 0; face_index < fragment.surface.indices.size(); ++face_index) {
-                const stl_triangle_vertex_indices& face = fragment.surface.indices[face_index];
-                if (face_index < fragment.source_facet_ids.size()) {
-                    const int source_facet_id = fragment.source_facet_ids[face_index];
-                    mix_hash(result.published_hash, size_t(source_facet_id));
-                    if (source_facet_id < 0)
-                        result.valid = false;
-                }
-                for (int vertex : face) {
-                    mix_hash(result.published_hash, size_t(vertex));
-                    if (vertex < 0 || size_t(vertex) >= fragment.surface.vertices.size())
-                        result.valid = false;
-                }
-            }
-        }
-    }
-    return result;
-}
-
-bool GLGizmoTracery::generate_fragments(
-    const std::vector<WorkTriangle>& work_triangles, const std::vector<ColorGroup>& color_groups,
-    const std::vector<std::vector<size_t>>& group_triangles, const std::vector<double>& group_areas,
-    float target_edge, float maximum_fragment_diameter,
-    std::map<EdgeKey, size_t>& work_edge_owners, size_t& fragment_count, std::vector<FragmentSeed>& seeds,
-    std::vector<std::vector<CpuGeometry>>& geometry, std::vector<size_t>& fragment_for_triangle,
-    std::vector<std::set<size_t>>& fragment_neighbours, std::vector<float>& fragment_boundary_distance,
-    std::vector<size_t>& fragment_boundary_neighbor, bool verify_integrity,
-    FragmentGenerationIntegrity* builder_integrity)
-{
-    const size_t input_hash_before = verify_integrity ? inspect_fragment_generation(
-        work_triangles, color_groups, group_triangles, group_areas, target_edge, 0, seeds, geometry,
-        fragment_for_triangle, fragment_neighbours, fragment_boundary_distance, fragment_boundary_neighbor).input_hash : 0;
-    std::vector<size_t> group_fragment_counts(color_groups.size(), 0);
-    const size_t minimum_fragments_per_region = std::clamp<size_t>(
-        size_t(std::lround(8.0f + 16.0f * m_fragment_density)), 8, 24);
-    for (size_t group = 0; group < group_triangles.size(); ++group) {
-        if (group_triangles[group].empty())
-            continue;
-        // Each disconnected colour region owns its fragment budget. Adding a
-        // different island cannot take fragments away from an existing one.
-        // Never collapse a small brush stroke into a single solid patch:
-        // otherwise there is no stained-glass pattern to see at all. Larger
-        // regions receive extra fragments by area, while the fine temporary
-        // mesh remains the upper bound on useful seeds.
-        const double maximum_piece_area = std::max(0.0001, 0.70 * double(maximum_fragment_diameter) * double(maximum_fragment_diameter));
-        const size_t area_count = std::max<size_t>(1, size_t(std::ceil(group_areas[group] / maximum_piece_area)));
-        group_fragment_counts[group] = std::min(group_triangles[group].size(),
-            std::max(minimum_fragments_per_region, area_count));
-    }
-    fragment_count = 0;
-    for (size_t count : group_fragment_counts)
-        fragment_count += count;
-    // A full-surface bucket fill must not allocate an unbounded number of
-    // separate GL meshes. Preserve every colour island while scaling only
-    // exceptionally large fragment budgets to an interactive upper bound.
-    constexpr size_t max_fragments = 2048;
-    if (fragment_count > max_fragments && color_groups.size() <= max_fragments) {
-        const double scale = double(max_fragments) / double(fragment_count);
-        fragment_count = 0;
-        for (size_t &count : group_fragment_counts) {
-            if (count > 0) count = std::max<size_t>(1, size_t(double(count) * scale));
-            fragment_count += count;
-        }
-        while (fragment_count > max_fragments) {
-            auto largest = std::max_element(group_fragment_counts.begin(), group_fragment_counts.end());
-            if (*largest <= 1) break;
-            --*largest;
-            --fragment_count;
-        }
-    }
-
-    seeds.clear();
-    seeds.reserve(fragment_count);
-    for (size_t group = 0; group < group_triangles.size(); ++group) {
-        const std::vector<size_t>& triangles = group_triangles[group];
-        if (triangles.empty())
-            continue;
-        const size_t sample_count = std::min<size_t>(triangles.size(), 4096);
-        std::vector<size_t> samples(sample_count);
-        std::vector<float> nearest_distances(sample_count, std::numeric_limits<float>::max());
-        for (size_t sample = 0; sample < sample_count; ++sample)
-            samples[sample] = triangles[sample * triangles.size() / sample_count];
-        for (size_t fragment = 0; fragment < group_fragment_counts[group]; ++fragment) {
-            const ColorGroup& color_group = color_groups[group];
-            const size_t stable_id = (color_group.component_id * size_t(2654435761U)) ^
-                (size_t(std::lround(color_group.color.r() * 255.0f)) << 24) ^
-                (size_t(std::lround(color_group.color.g() * 255.0f)) << 16) ^
-                (size_t(std::lround(color_group.color.b() * 255.0f)) << 8) ^ fragment ^
-                (m_regeneration_version * size_t(0x85ebca6bU));
-            // Each new seed updates the cached distance of every candidate.
-            // Rechecking every earlier seed made a large bucket fill quadratic
-            // in the fragment count and blocked the UI.
-            if (fragment == 0) {
-                const WorkTriangle& triangle = work_triangles[samples[stable_id % sample_count]];
-                seeds.emplace_back(FragmentSeed{ (triangle.world_a + triangle.world_b + triangle.world_c) / 3.0f, group, stable_id });
-                continue;
-            }
-            size_t selected = samples[0];
-            float best_distance = -1.0f;
-            for (size_t sample = 0; sample < sample_count; ++sample) {
-                const WorkTriangle& candidate = work_triangles[samples[sample]];
-                const Vec3f position = (candidate.world_a + candidate.world_b + candidate.world_c) / 3.0f;
-                nearest_distances[sample] = std::min(nearest_distances[sample], (position - seeds.back().position).squaredNorm());
-                if (nearest_distances[sample] > best_distance) {
-                    best_distance = nearest_distances[sample];
-                    selected = samples[sample];
-                }
-            }
-            const WorkTriangle& triangle = work_triangles[selected];
-            seeds.emplace_back(FragmentSeed{ (triangle.world_a + triangle.world_b + triangle.world_c) / 3.0f, group, stable_id });
-        }
-    }
-
-    fragment_count = seeds.size();
-    if (fragment_count == 0) {
-        return false;
-    }
-
-    geometry.assign(m_triangle_selectors.size(), std::vector<CpuGeometry>(fragment_count));
-
-    struct WarpComputation {
-        Vec3f result;
-        std::array<float, 3> phase;
-        std::array<float, 3> sine;
-        std::array<float, 3> offset;
-    };
-    const float warp_frequency = 1.35f / std::max(target_edge, 0.001f);
-    const float warp_amount = 0.f; // Preserve straight Voronoi bisectors.
-    const auto compute_warp = [warp_frequency, warp_amount](const Vec3f& point) {
-        // Keep the diagnostic fields, but use an identity transform so the
-        // generated planar bisectors remain straight.
-        WarpComputation calculation;
-        calculation.phase = {
-            (point.y() + 0.31f * point.z()) * warp_frequency,
-            (point.z() + 0.27f * point.x()) * warp_frequency + 1.7f,
-            (point.x() + 0.23f * point.y()) * warp_frequency + 3.1f
-        };
-        calculation.sine = {
-            std::sin(calculation.phase[0]), std::sin(calculation.phase[1]), std::sin(calculation.phase[2])
-        };
-        calculation.offset = {
-            warp_amount * calculation.sine[0], warp_amount * calculation.sine[1], warp_amount * calculation.sine[2]
-        };
-        calculation.result = point + Vec3f(calculation.offset[0], calculation.offset[1], calculation.offset[2]);
-        return calculation;
-    };
-    const auto warped_position = [&compute_warp](const Vec3f& point) { return compute_warp(point).result; };
-
-#ifndef NDEBUG
-    // This is deliberately a fixed, small probe. It records the complete
-    // floating-point path before any KD-tree operation while leaving the
-    // generation algorithm and its inputs untouched.
-    const bool trace_warp_probe = m_display_diagnostics_active;
-    const auto float_bits = [](float value) {
-        uint32_t bits = 0;
-        static_assert(sizeof(bits) == sizeof(value));
-        std::memcpy(&bits, &value, sizeof(bits));
-        return bits;
-    };
-    const auto append_float = [&float_bits](std::ostringstream& stream, const char* name, float value) {
-        stream << name << '=' << std::setprecision(9) << value << "(0x" << std::hex << float_bits(value) << std::dec << ')';
-    };
-    const auto append_vector = [&append_float](std::ostringstream& stream, const char* name, const Vec3f& value) {
-        stream << name << "={";
-        append_float(stream, "x", value.x()); stream << ',';
-        append_float(stream, "y", value.y()); stream << ',';
-        append_float(stream, "z", value.z()); stream << '}';
-    };
-    const auto describe_warp = [&append_float, &append_vector](const Vec3f& point, const WarpComputation& calculation) {
-        std::ostringstream stream;
-        append_vector(stream, "point", point); stream << ',';
-        append_float(stream, "phase_x", calculation.phase[0]); stream << ',';
-        append_float(stream, "phase_y", calculation.phase[1]); stream << ',';
-        append_float(stream, "phase_z", calculation.phase[2]); stream << ',';
-        append_float(stream, "sin_x", calculation.sine[0]); stream << ',';
-        append_float(stream, "sin_y", calculation.sine[1]); stream << ',';
-        append_float(stream, "sin_z", calculation.sine[2]); stream << ',';
-        append_float(stream, "offset_x", calculation.offset[0]); stream << ',';
-        append_float(stream, "offset_y", calculation.offset[1]); stream << ',';
-        append_float(stream, "offset_z", calculation.offset[2]); stream << ',';
-        append_vector(stream, "result", calculation.result);
-        return stream.str();
-    };
-#endif
-#ifndef NDEBUG
-    if (trace_warp_probe) {
-        std::ostringstream parameters;
-        append_float(parameters, "fragment_density", m_fragment_density); parameters << ',';
-        append_float(parameters, "target_edge", target_edge); parameters << ',';
-        append_float(parameters, "warp_frequency", warp_frequency); parameters << ',';
-        append_float(parameters, "warp_amount", warp_amount);
-        record_display_diagnostic_state("warp_probe_parameters", parameters.str());
-    }
-#endif
-
-    std::vector<Vec3f> warped_seeds;
-    warped_seeds.reserve(seeds.size());
-#ifndef NDEBUG
-    std::array<WarpComputation, 2> seed_probe_calculations;
-    const size_t seed_probe_count = std::min<size_t>(seed_probe_calculations.size(), seeds.size());
-#endif
-    for (size_t seed = 0; seed < seeds.size(); ++seed) {
-        const WarpComputation calculation = compute_warp(seeds[seed].position);
-#ifndef NDEBUG
-        if (seed < seed_probe_count) {
-            seed_probe_calculations[seed] = calculation;
-            if (trace_warp_probe) {
-                const WarpComputation repeat = compute_warp(seeds[seed].position);
-                record_display_diagnostic_state("warp_probe_seed_compute",
-                    "seed=" + std::to_string(seed) + ",same_result=" +
-                    std::to_string(float_bits(calculation.result.x()) == float_bits(repeat.result.x()) &&
-                                   float_bits(calculation.result.y()) == float_bits(repeat.result.y()) &&
-                                   float_bits(calculation.result.z()) == float_bits(repeat.result.z())) + "," +
-                    describe_warp(seeds[seed].position, calculation));
-            }
-        }
-#endif
-        warped_seeds.emplace_back(calculation.result);
-    }
-#ifndef NDEBUG
-    if (trace_warp_probe) {
-        for (size_t seed = 0; seed < seed_probe_count; ++seed) {
-            std::ostringstream stored;
-            append_vector(stored, "expected", seed_probe_calculations[seed].result); stored << ',';
-            append_vector(stored, "stored", warped_seeds[seed]);
-            record_display_diagnostic_state("warp_probe_seed_storage",
-                "seed=" + std::to_string(seed) + ",same_result=" +
-                std::to_string(float_bits(seed_probe_calculations[seed].result.x()) == float_bits(warped_seeds[seed].x()) &&
-                               float_bits(seed_probe_calculations[seed].result.y()) == float_bits(warped_seeds[seed].y()) &&
-                               float_bits(seed_probe_calculations[seed].result.z()) == float_bits(warped_seeds[seed].z())) + "," + stored.str());
-        }
-    }
-#endif
-
-    const auto seed_coordinate = [&warped_seeds](size_t index, size_t dimension) {
-        return warped_seeds[index][dimension];
-    };
-    using SeedTree = KDTreeIndirect<3, float, decltype(seed_coordinate)>;
-    std::vector<SeedTree> group_seed_trees;
-    std::vector<std::vector<size_t>> group_seed_indices(group_triangles.size());
-    group_seed_trees.reserve(group_triangles.size());
-    for (size_t group = 0; group < group_triangles.size(); ++group) {
-        std::vector<size_t>& indices = group_seed_indices[group];
-        for (size_t index = 0; index < seeds.size(); ++index)
-            if (seeds[index].color_group == group)
-                indices.emplace_back(index);
-        group_seed_trees.emplace_back(seed_coordinate, indices);
-    }
-#ifndef NDEBUG
-    if (trace_warp_probe) {
-        for (size_t seed = 0; seed < seed_probe_count; ++seed) {
-            std::ostringstream post_tree;
-            append_vector(post_tree, "expected", seed_probe_calculations[seed].result); post_tree << ',';
-            append_vector(post_tree, "after_kd_tree", warped_seeds[seed]);
-            record_display_diagnostic_state("warp_probe_seed_post_kd",
-                "seed=" + std::to_string(seed) + ",same_result=" +
-                std::to_string(float_bits(seed_probe_calculations[seed].result.x()) == float_bits(warped_seeds[seed].x()) &&
-                               float_bits(seed_probe_calculations[seed].result.y()) == float_bits(warped_seeds[seed].y()) &&
-                               float_bits(seed_probe_calculations[seed].result.z()) == float_bits(warped_seeds[seed].z())) + "," + post_tree.str());
-        }
-        if (!work_triangles.empty()) {
-            const WorkTriangle& triangle = work_triangles.front();
-            const WarpComputation first = compute_warp(triangle.world_a);
-            const WarpComputation repeat = compute_warp(triangle.world_a);
-            record_display_diagnostic_state("warp_probe_work_vertex",
-                "triangle=0,vertex=a,same_result=" +
-                std::to_string(float_bits(first.result.x()) == float_bits(repeat.result.x()) &&
-                               float_bits(first.result.y()) == float_bits(repeat.result.y()) &&
-                               float_bits(first.result.z()) == float_bits(repeat.result.z())) + "," +
-                describe_warp(triangle.world_a, first));
-        }
-    }
-#endif
-
-    struct ClipVertex {
-        Vec3f local;
-        Vec3f world;
-        Vec3f warped;
-    };
-    const auto interpolate_vertex = [](const ClipVertex& first, const ClipVertex& second, float t) {
-        return ClipVertex{
-            first.local + (second.local - first.local) * t,
-            first.world + (second.world - first.world) * t,
-            first.warped + (second.warped - first.warped) * t
-        };
-    };
-    const auto clip_to_half_plane = [&interpolate_vertex](const std::vector<ClipVertex>& polygon,
-                                                            const Vec3f& direction, float limit) {
-        std::vector<ClipVertex> result;
-        if (polygon.empty())
-            return result;
-        result.reserve(polygon.size() + 1);
-        for (size_t index = 0; index < polygon.size(); ++index) {
-            const ClipVertex& first = polygon[index];
-            const ClipVertex& second = polygon[(index + 1) % polygon.size()];
-            const float first_value = first.warped.dot(direction) - limit;
-            const float second_value = second.warped.dot(direction) - limit;
-            const bool first_inside = first_value <= 0.0f;
-            const bool second_inside = second_value <= 0.0f;
-            if (first_inside)
-                result.emplace_back(first);
-            if (first_inside != second_inside) {
-                const float t = first_value / (first_value - second_value);
-                result.emplace_back(interpolate_vertex(first, second, std::clamp(t, 0.0f, 1.0f)));
-            }
-        }
-        return result;
-    };
-
-    fragment_for_triangle.assign(work_triangles.size(), fragment_count);
-    for (size_t triangle_index = 0; triangle_index < work_triangles.size(); ++triangle_index) {
-        const WorkTriangle& triangle = work_triangles[triangle_index];
-        if (triangle.mesh_idx >= geometry.size() || triangle.color_group >= group_seed_trees.size() ||
-            group_seed_indices[triangle.color_group].empty())
-            continue;
-        const std::array<ClipVertex, 3> vertices = {{
-            { triangle.a, triangle.world_a, warped_position(triangle.world_a) },
-            { triangle.b, triangle.world_b, warped_position(triangle.world_b) },
-            { triangle.c, triangle.world_c, warped_position(triangle.world_c) }
-        }};
-        const Vec3f warped_center = (vertices[0].warped + vertices[1].warped + vertices[2].warped) / 3.0f;
-        const SeedTree& seed_tree = group_seed_trees[triangle.color_group];
-        size_t nearest = find_closest_point(seed_tree, warped_center);
-        if (nearest >= fragment_count || seeds[nearest].color_group != triangle.color_group) {
-            float best_distance = std::numeric_limits<float>::max();
-            nearest = fragment_count;
-            for (size_t index : group_seed_indices[triangle.color_group]) {
-                const float distance = (warped_seeds[index] - warped_center).squaredNorm();
-                if (distance < best_distance) {
-                    best_distance = distance;
-                    nearest = index;
-                }
-            }
-            if (nearest == fragment_count)
-                continue;
-        }
-        fragment_for_triangle[triangle_index] = nearest;
-
-        // If the centre's nearest seed is distance d away and the triangle's
-        // radius is r, no seed farther than d + 2r can own any part of it.
-        // Query that exact neighbourhood instead of comparing every triangle
-        // with every seed. All candidates still share the same clipped border.
-        const float triangle_radius = std::max({
-            (vertices[0].warped - warped_center).norm(),
-            (vertices[1].warped - warped_center).norm(),
-            (vertices[2].warped - warped_center).norm()
-        });
-        const float candidate_radius = (warped_seeds[nearest] - warped_center).norm() + 2.0f * triangle_radius + 0.0001f;
-        std::vector<size_t> candidates = find_nearby_points(seed_tree, warped_center, candidate_radius);
-        candidates.erase(std::remove_if(candidates.begin(), candidates.end(), [&](size_t index) {
-            return index >= fragment_count || seeds[index].color_group != triangle.color_group;
-        }), candidates.end());
-        candidates.emplace_back(nearest);
-        std::sort(candidates.begin(), candidates.end());
-        candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
-        for (const size_t candidate : candidates) {
-            std::vector<ClipVertex> polygon(vertices.begin(), vertices.end());
-            for (const size_t other : candidates) {
-                if (other == candidate || polygon.empty())
-                    continue;
-                const Vec3f direction = warped_seeds[other] - warped_seeds[candidate];
-                const float limit = 0.5f * (warped_seeds[other].squaredNorm() - warped_seeds[candidate].squaredNorm());
-                polygon = clip_to_half_plane(polygon, direction, limit);
-            }
-            if (polygon.size() < 3)
-                continue;
-            CpuGeometry& data = geometry[triangle.mesh_idx][candidate];
-            const unsigned int first = unsigned(data.surface.vertices.size());
-            for (const ClipVertex& vertex : polygon)
-                data.add_vertex(vertex.local);
-            for (unsigned int index = 1; index + 1 < polygon.size(); ++index)
-                data.add_triangle(first, first + index, first + index + 1, triangle.original_facet_id);
-        }
-    }
-
-    struct BoundarySample {
-        size_t first_triangle;
-        size_t second_triangle;
-    };
-    // Reuse the region edge map, preserving the same object lifetime as the
-    // pre-split path while rebuilding it for post-clipping adjacency.
-    const auto quantize_point = [](const Vec3f& point) {
-        return std::array<int64_t, 3>{
-            int64_t(std::llround(point.x() * 100000.0f)),
-            int64_t(std::llround(point.y() * 100000.0f)),
-            int64_t(std::llround(point.z() * 100000.0f))
-        };
-    };
-    const auto edge_key = [&quantize_point](size_t mesh_idx, const Vec3f& first, const Vec3f& second) {
-        std::array<int64_t, 3> a = quantize_point(first);
-        std::array<int64_t, 3> b = quantize_point(second);
-        if (b < a)
-            std::swap(a, b);
-        return EdgeKey{ mesh_idx, { a[0], a[1], a[2], b[0], b[1], b[2] } };
-    };
-    std::vector<BoundarySample> boundaries;
-    std::vector<std::vector<std::pair<size_t, float>>> work_adjacency(work_triangles.size());
-    work_edge_owners.clear();
-    for (size_t index = 0; index < work_triangles.size(); ++index) {
-        const WorkTriangle& triangle = work_triangles[index];
-        const std::array<EdgeKey, 3> local_edges = {
-            edge_key(triangle.mesh_idx, triangle.a, triangle.b),
-            edge_key(triangle.mesh_idx, triangle.b, triangle.c),
-            edge_key(triangle.mesh_idx, triangle.c, triangle.a)
-        };
-        for (size_t edge_index = 0; edge_index < local_edges.size(); ++edge_index) {
-            const auto owner = work_edge_owners.find(local_edges[edge_index]);
-            if (owner == work_edge_owners.end()) {
-                work_edge_owners.emplace(local_edges[edge_index], index);
-            } else {
-                const size_t other_index = owner->second;
-                const WorkTriangle& other = work_triangles[other_index];
-                const Vec3f center = (triangle.world_a + triangle.world_b + triangle.world_c) / 3.0f;
-                const Vec3f other_center = (other.world_a + other.world_b + other.world_c) / 3.0f;
-                const float step = std::max(0.0001f, (center - other_center).norm());
-                work_adjacency[index].emplace_back(other_index, step);
-                work_adjacency[other_index].emplace_back(index, step);
-                if (other.color_group != triangle.color_group)
-                    boundaries.push_back({ other_index, index });
-            }
-        }
-    }
-
-    // Approximate the visible fragment adjacency from adjacent source faces.
-    // This catches normal shard boundaries without treating merely nearby,
-    // folded model faces as neighbours.
-    fragment_neighbours.assign(fragment_count, {});
-    for (size_t triangle = 0; triangle < work_adjacency.size(); ++triangle) {
-        const size_t fragment = fragment_for_triangle[triangle];
-        if (fragment >= fragment_count)
-            continue;
-        for (const auto& adjacent : work_adjacency[triangle]) {
-            const size_t other_fragment = fragment_for_triangle[adjacent.first];
-            if (other_fragment < fragment_count && other_fragment != fragment)
-                fragment_neighbours[fragment].insert(other_fragment);
-        }
-    }
-
-    // Propagate each real colour boundary across only its own colour region.
-    // This is a surface-distance field: folded or nearby model faces cannot
-    // borrow colour through empty space.
-    const size_t no_group = color_groups.size();
-    std::vector<float> boundary_distance(work_triangles.size(), std::numeric_limits<float>::max());
-    std::vector<size_t> boundary_neighbor(work_triangles.size(), no_group);
-    using DistanceNode = std::pair<float, size_t>;
-    std::priority_queue<DistanceNode, std::vector<DistanceNode>, std::greater<DistanceNode>> open_nodes;
-    const auto seed_boundary = [&boundary_distance, &boundary_neighbor, &open_nodes](size_t triangle, size_t neighbor) {
-        if (boundary_distance[triangle] > 0.0f) {
-            boundary_distance[triangle] = 0.0f;
-            boundary_neighbor[triangle] = neighbor;
-            open_nodes.emplace(0.0f, triangle);
-        }
-    };
-    for (const BoundarySample& boundary : boundaries) {
-        seed_boundary(boundary.first_triangle, work_triangles[boundary.second_triangle].color_group);
-        seed_boundary(boundary.second_triangle, work_triangles[boundary.first_triangle].color_group);
-    }
-    while (!open_nodes.empty()) {
-        const auto [distance, triangle] = open_nodes.top();
-        open_nodes.pop();
-        if (distance != boundary_distance[triangle])
-            continue;
-        for (const auto& [next, step] : work_adjacency[triangle]) {
-            if (work_triangles[next].color_group != work_triangles[triangle].color_group)
-                continue;
-            const float next_distance = distance + step;
-            if (next_distance < boundary_distance[next]) {
-                boundary_distance[next] = next_distance;
-                boundary_neighbor[next] = boundary_neighbor[triangle];
-                open_nodes.emplace(next_distance, next);
-            }
-        }
-    }
-
-    fragment_boundary_distance.assign(fragment_count, std::numeric_limits<float>::max());
-    fragment_boundary_neighbor.assign(fragment_count, no_group);
-    for (size_t triangle = 0; triangle < work_triangles.size(); ++triangle) {
-        const size_t fragment = fragment_for_triangle[triangle];
-        if (fragment == fragment_count || boundary_distance[triangle] >= fragment_boundary_distance[fragment])
-            continue;
-        fragment_boundary_distance[fragment] = boundary_distance[triangle];
-        fragment_boundary_neighbor[fragment] = boundary_neighbor[triangle];
-    }
-
-    if (builder_integrity != nullptr) {
-        if (verify_integrity) {
-            *builder_integrity = inspect_fragment_generation(work_triangles, color_groups, group_triangles, group_areas,
-                target_edge, fragment_count, seeds, geometry, fragment_for_triangle, fragment_neighbours,
-                fragment_boundary_distance, fragment_boundary_neighbor);
-            builder_integrity->immutable_input_preserved = builder_integrity->input_hash == input_hash_before;
-            builder_integrity->valid = builder_integrity->valid && builder_integrity->immutable_input_preserved;
-        } else {
-            *builder_integrity = {};
-        }
-    }
-    return true;
-}
-
-bool GLGizmoTracery::assign_fragment_colors(const std::vector<ColorGroup>&       color_groups,
-                                            const std::vector<FragmentSeed>&     seeds,
-                                            const std::vector<std::set<size_t>>& fragment_neighbours,
-                                            size_t                               fragment_count,
-                                            std::vector<ColorRGBA>&              fragment_colors,
-                                            bool                                 verify_integrity,
-                                            FragmentColorAssignmentIntegrity*    builder_integrity)
-{
-    const size_t input_hash_before =
-        verify_integrity ?
-            inspect_fragment_color_assignment(color_groups, seeds, fragment_neighbours, fragment_count, fragment_colors).input_hash :
-            0;
     std::vector<ColorRGBA> base_colors;
     base_colors.reserve(fragment_count);
     for (const FragmentSeed& seed : seeds)
@@ -2901,7 +1840,7 @@ bool GLGizmoTracery::assign_fragment_colors(const std::vector<ColorGroup>&      
             minimum_delta_e = std::min(minimum_delta_e, delta_e);
             candidates.push_back({ recipe, delta_e, tracery_recipe_balance_spread(editor_palette[recipe].weights) });
         }
-        std::sort(candidates.begin(), candidates.end(), [minimum_delta_e, balanced_recipe_delta_e_window](const CandidateRecipe& first, const CandidateRecipe& second) {
+        std::sort(candidates.begin(), candidates.end(), [minimum_delta_e](const CandidateRecipe& first, const CandidateRecipe& second) {
             const bool first_is_visually_close = first.delta_e <= minimum_delta_e + balanced_recipe_delta_e_window;
             const bool second_is_visually_close = second.delta_e <= minimum_delta_e + balanced_recipe_delta_e_window;
             if (first_is_visually_close != second_is_visually_close)
@@ -2972,15 +1911,18 @@ bool GLGizmoTracery::assign_fragment_colors(const std::vector<ColorGroup>&      
     }
 
     fragment_colors.resize(fragment_count);
+#ifndef NDEBUG
     const bool trace_color = tracery_color_trace_enabled();
     std::map<size_t, size_t> traced_group_fragments;
     size_t traced_fragments = 0;
+#endif
     for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
         const TraceryEditorRecipe& recipe = editor_palette[selected_recipe[fragment]];
         const wxColour& preview = recipe.preview;
         const ColorRGBA color(float(preview.Red()) / 255.0f, float(preview.Green()) / 255.0f,
             float(preview.Blue()) / 255.0f, 1.0f);
         fragment_colors[fragment] = color;
+#ifndef NDEBUG
         if (trace_color && traced_fragments < 256 && traced_group_fragments[seeds[fragment].color_group]++ < 12) {
             std::fprintf(stderr, "TRACERY_COLOR fragment=%zu group=%zu seed=%zu base=%06X target=%06X preview=%06X palette=%zu delta_e=%.3f\n",
                 fragment, seeds[fragment].color_group, seeds[fragment].stable_id, tracery_color_rgb(base_colors[fragment]),
@@ -2988,105 +1930,10 @@ bool GLGizmoTracery::assign_fragment_colors(const std::vector<ColorGroup>&      
                 color_delta_e00(tracery_wx_color(desired_colors[fragment]), preview));
             ++traced_fragments;
         }
+#endif
     }
 
-    if (builder_integrity != nullptr) {
-        if (verify_integrity) {
-            *builder_integrity = inspect_fragment_color_assignment(color_groups, seeds, fragment_neighbours, fragment_count,
-                                                                   fragment_colors);
-            builder_integrity->immutable_input_preserved = builder_integrity->input_hash == input_hash_before;
-            builder_integrity->valid = builder_integrity->valid && builder_integrity->immutable_input_preserved;
-        } else {
-            *builder_integrity = {};
-        }
-    }
     return true;
-}
-
-void GLGizmoTracery::publish_generated_fragments(
-    std::vector<std::vector<CpuGeometry>>& geometry,
-    const std::vector<Transform3d>& volume_transforms, size_t fragment_count,
-    bool verify_integrity, PublishGeneratedFragmentsIntegrity* builder_integrity)
-{
-    const auto mix_hash = [](size_t& hash, size_t value) {
-        hash = (hash * size_t(0x9e3779b1U)) ^ value;
-    };
-    const auto mix_float = [&mix_hash](size_t& hash, float value) { mix_hash(hash, std::hash<float>{}(value)); };
-    PublishGeneratedFragmentsIntegrity expected;
-    expected.expected_hash = size_t(0xc2b2ae3dU);
-    mix_hash(expected.expected_hash, geometry.size());
-    bool layout_valid = geometry.size() == volume_transforms.size() &&
-        geometry.size() == m_generated_fragments.size() && m_fragment_colors.size() == fragment_count;
-    for (const auto& fragments : m_generated_fragments)
-        if (!fragments.empty())
-            layout_valid = false;
-    for (size_t volume = 0; volume < geometry.size(); ++volume) {
-        if (geometry[volume].size() != fragment_count)
-            layout_valid = false;
-        size_t count = 0;
-        for (const CpuGeometry& data : geometry[volume])
-            if (!data.empty())
-                ++count;
-        mix_hash(expected.expected_hash, count);
-        for (size_t fragment = 0; fragment < geometry[volume].size(); ++fragment) {
-            const CpuGeometry& data = geometry[volume][fragment];
-            if (data.empty())
-                continue;
-            mix_hash(expected.expected_hash, volume);
-            mix_hash(expected.expected_hash, fragment);
-            mix_hash(expected.expected_hash, data.surface.vertices.size());
-            mix_hash(expected.expected_hash, data.surface.indices.size());
-            mix_hash(expected.expected_hash, data.source_facet_ids.size());
-            ++expected.expected_fragments;
-            expected.expected_faces += data.surface.indices.size();
-            if (data.source_facet_ids.size() != data.surface.indices.size())
-                layout_valid = false;
-            for (const Vec3f& vertex : data.surface.vertices) {
-                mix_float(expected.expected_hash, vertex.x());
-                mix_float(expected.expected_hash, vertex.y());
-                mix_float(expected.expected_hash, vertex.z());
-            }
-            for (size_t face_index = 0; face_index < data.surface.indices.size(); ++face_index) {
-                const stl_triangle_vertex_indices& face = data.surface.indices[face_index];
-                if (face_index < data.source_facet_ids.size()) {
-                    const int source_facet_id = data.source_facet_ids[face_index];
-                    mix_hash(expected.expected_hash, size_t(source_facet_id));
-                    if (source_facet_id < 0)
-                        layout_valid = false;
-                }
-                for (int vertex : face) {
-                    mix_hash(expected.expected_hash, size_t(vertex));
-                    if (vertex < 0 || size_t(vertex) >= data.surface.vertices.size())
-                        layout_valid = false;
-                }
-            }
-        }
-    }
-    for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
-        for (size_t volume = 0; volume < geometry.size(); ++volume) {
-            CpuGeometry& data = geometry[volume][fragment];
-            if (data.empty())
-                continue;
-            indexed_triangle_set surface = std::move(data.surface);
-            m_generated_fragments[volume].emplace_back(
-                GeneratedFragment{ fragment, std::move(surface), std::move(data.source_facet_ids) });
-        }
-    }
-    if (builder_integrity != nullptr) {
-        if (verify_integrity) {
-            const PublishGeneratedFragmentsIntegrity published = inspect_published_fragments(fragment_count);
-            expected.published_hash = published.published_hash;
-            expected.published_fragments = published.published_fragments;
-            expected.published_faces = published.published_faces;
-            expected.valid = layout_valid && published.valid &&
-                expected.expected_hash == expected.published_hash &&
-                expected.expected_fragments == expected.published_fragments &&
-                expected.expected_faces == expected.published_faces;
-            *builder_integrity = expected;
-        } else {
-            *builder_integrity = {};
-        }
-    }
 }
 
 void GLGizmoTracery::generate_paint_plan()
@@ -3099,13 +1946,11 @@ void GLGizmoTracery::generate_paint_plan()
     m_regeneration_requested = false;
     if (!m_incremental_generation)
         m_tracery_selections.clear();
-    m_generated_fragments.clear();
     m_generated_voronoi_regions.clear();
     m_fragment_colors.clear();
     m_fragment_mixed_filament_ids.clear();
     m_pending_selection_fragment_count = 0;
     m_transition_recipe_targets.clear();
-    m_generation_integrity_valid = true;
     const ModelObject* model_object = m_c != nullptr && m_c->selection_info() != nullptr ?
         m_c->selection_info()->model_object() : nullptr;
     if (model_object == nullptr || model_object->id() != m_mask_object_id) {
@@ -3174,12 +2019,6 @@ void GLGizmoTracery::apply_stained_glass_colors(const std::function<void()>& rol
     TraceryPerformanceScope performance("apply");
     TraceryDocument::ReadCacheScope document_cache;
     performance.stage("apply.check_inputs");
-    if (!m_generation_integrity_valid) {
-        if (rollback_preparation)
-            rollback_preparation();
-        return;
-    }
-
     // An incremental stroke fully inside an existing selection has no new
     // leaves to bake. Crucially, do not restore the base snapshot here.
     if (m_incremental_generation && m_fragment_colors.empty())
@@ -3814,10 +2653,11 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
 }
 
 GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_date(
-    const GeneratedFragment& front_fragment, const TriangleMesh& target_mesh, size_t volume_index) const
+    const GeneratedFragment& front_fragment, const TriangleMesh& target_mesh, [[maybe_unused]] size_t volume_index) const
 {
     GeneratedFragment back_fragment;
     back_fragment.fragment_id = front_fragment.fragment_id;
+#ifndef NDEBUG
     size_t input_faces = front_fragment.surface.indices.size();
     size_t projected_faces = 0;
     size_t invalid_projections = 0;
@@ -3841,6 +2681,7 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
     double degenerate_projected_source_area = 0.0;
     std::map<int, size_t> target_face_counts;
     std::map<int, size_t> rejected_face_counts;
+#endif
     const indexed_triangle_set& target = target_mesh.its;
     if (target.vertices.empty() || target.indices.empty())
         return back_fragment;
@@ -3853,9 +2694,11 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         maximum = maximum.cwiseMax(vertex);
     }
     const float ray_epsilon = std::max(1e-5f, (maximum - minimum).norm() * 1e-6f);
+#ifndef NDEBUG
     const auto triangle_area = [](const Vec3f& a, const Vec3f& b, const Vec3f& c) {
         return 0.5 * (b - a).cross(c - a).norm();
     };
+#endif
 #ifndef NDEBUG
     const int diagnostic_source_facet_id = front_fragment.source_facet_ids.empty() ? -1 : front_fragment.source_facet_ids.front();
     const auto record_ray_rejection = [this, volume_index, &front_fragment, diagnostic_source_facet_id](
@@ -3875,8 +2718,6 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
                << direction.x() << '\t' << direction.y() << '\t' << direction.z() << '\t'
                << hit.face() << '\t' << hit.distance() << '\n';
     };
-#else
-    const auto record_ray_rejection = [](const char*, const Vec3f&, const Vec3d&, const AABBMesh::hit_result&) {};
 #endif
 
     struct ProjectionResult {
@@ -3885,27 +2726,36 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         Vec3f normal = Vec3f::Zero();
         int   face = -1;
     };
-    const auto project = [&target_surface, ray_epsilon, &ray_no_hit, &ray_near_hit, &ray_entry_facing_hit,
-                          &rejected_face_counts, &record_ray_rejection](const Vec3f& point, const Vec3f& normal) {
+    const auto project = [&target_surface, ray_epsilon
+#ifndef NDEBUG
+                          , &ray_no_hit, &ray_near_hit, &ray_entry_facing_hit, &rejected_face_counts, &record_ray_rejection
+#endif
+                         ](const Vec3f& point, const Vec3f& normal) {
         ProjectionResult result;
         const Vec3d direction = -normal.cast<double>();
         const Vec3d origin = point.cast<double>() + direction * double(ray_epsilon);
         const AABBMesh::hit_result hit = target_surface.query_ray_hit(origin, direction);
         if (!hit.is_hit()) {
+#ifndef NDEBUG
             ++ray_no_hit;
             record_ray_rejection("no_hit", point, direction, hit);
+#endif
             return result;
         }
         if (hit.distance() <= double(ray_epsilon)) {
+#ifndef NDEBUG
             ++ray_near_hit;
             ++rejected_face_counts[hit.face()];
             record_ray_rejection("near_hit", point, direction, hit);
+#endif
             return result;
         }
         if (!hit.is_inside()) {
+#ifndef NDEBUG
             ++ray_entry_facing_hit;
             ++rejected_face_counts[hit.face()];
             record_ray_rejection("entry_facing_hit", point, direction, hit);
+#endif
             return result;
         }
         result.valid = true;
@@ -3914,15 +2764,21 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         result.face = hit.face();
         return result;
     };
-    const auto append_projected = [&back_fragment, &projected_faces, &target_face_counts, &triangle_area,
-                                   &emitted_source_area, &emitted_target_area, &degenerate_projected,
-                                   &degenerate_projected_source_area](
+    const auto append_projected = [&back_fragment
+#ifndef NDEBUG
+                                   , &projected_faces, &target_face_counts, &triangle_area, &emitted_source_area,
+                                   &emitted_target_area, &degenerate_projected, &degenerate_projected_source_area
+#endif
+                                  ](
                                       const ProjectionResult& a, const ProjectionResult& b, const ProjectionResult& c,
-                                      const Vec3f& source_a, const Vec3f& source_b, const Vec3f& source_c) {
+                                      [[maybe_unused]] const Vec3f& source_a, [[maybe_unused]] const Vec3f& source_b,
+                                      [[maybe_unused]] const Vec3f& source_c) {
         const Vec3f projected_normal = (b.position - a.position).cross(c.position - a.position);
         if (projected_normal.squaredNorm() <= 1e-12f) {
+#ifndef NDEBUG
             ++degenerate_projected;
             degenerate_projected_source_area += triangle_area(source_a, source_b, source_c);
+#endif
             return;
         }
         const unsigned int first = unsigned(back_fragment.surface.vertices.size());
@@ -3935,25 +2791,34 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         else
             back_fragment.surface.indices.emplace_back(stl_triangle_vertex_indices{ int(first), int(first + 1), int(first + 2) });
         back_fragment.source_facet_ids.emplace_back(a.face);
+#ifndef NDEBUG
         ++projected_faces;
         emitted_source_area += triangle_area(source_a, source_b, source_c);
         emitted_target_area += triangle_area(a.position, b.position, c.position);
         ++target_face_counts[a.face];
+#endif
     };
 
     // A projected triangle may cross a target-mesh edge. Split it until an
     // emitted triangle belongs to exactly one target facet; never guess an ID
     // for a cross-facet triangle.
     std::function<void(const Vec3f&, const Vec3f&, const Vec3f&, int)> project_triangle;
-    project_triangle = [&project_triangle, &project, &append_projected, &target, &triangle_area, &invalid_projections,
-                        &invalid_vertices, &invalid_source_area, &cross_facet_splits, &depth_limited,
-                        &depth_limited_source_area, &degenerate_input, &degenerate_source_area](
+    project_triangle = [&project_triangle, &project, &append_projected, &target
+#ifndef NDEBUG
+                        , &triangle_area, &invalid_projections, &invalid_vertices, &invalid_source_area,
+                        &cross_facet_splits, &depth_limited, &depth_limited_source_area, &degenerate_input, &degenerate_source_area
+#endif
+                       ](
         const Vec3f& a, const Vec3f& b, const Vec3f& c, int depth) {
         Vec3f normal = (b - a).cross(c - a);
+#ifndef NDEBUG
         const double source_area = triangle_area(a, b, c);
+#endif
         if (normal.squaredNorm() <= 1e-12f) {
+#ifndef NDEBUG
             ++degenerate_input;
             degenerate_source_area += source_area;
+#endif
             return;
         }
         normal.normalize();
@@ -3961,9 +2826,11 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         const ProjectionResult projected_b = project(b, normal);
         const ProjectionResult projected_c = project(c, normal);
         if (!projected_a.valid || !projected_b.valid || !projected_c.valid) {
+#ifndef NDEBUG
             ++invalid_projections;
             invalid_vertices += size_t(!projected_a.valid) + size_t(!projected_b.valid) + size_t(!projected_c.valid);
             invalid_source_area += source_area;
+#endif
             return;
         }
         if (projected_a.face >= 0 && projected_a.face == projected_b.face && projected_a.face == projected_c.face &&
@@ -3975,11 +2842,15 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         // unresolved remainder is conservative: it leaves existing paint
         // intact instead of assigning it to a wrong facet.
         if (depth >= 6) {
+#ifndef NDEBUG
             ++depth_limited;
             depth_limited_source_area += source_area;
+#endif
             return;
         }
+#ifndef NDEBUG
         ++cross_facet_splits;
+#endif
         const Vec3f ab = (a + b) * 0.5f;
         const Vec3f bc = (b + c) * 0.5f;
         const Vec3f ca = (c + a) * 0.5f;
@@ -3999,6 +2870,7 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
         const Vec3f& a = front_fragment.surface.vertices[size_t(face[0])];
         const Vec3f& b = front_fragment.surface.vertices[size_t(face[1])];
         const Vec3f& c = front_fragment.surface.vertices[size_t(face[2])];
+#ifndef NDEBUG
         const int source_facet_id = face_index < front_fragment.source_facet_ids.size() ?
             front_fragment.source_facet_ids[face_index] : -1;
         if (source_facet_id < 0 || size_t(source_facet_id) >= target.indices.size()) {
@@ -4022,6 +2894,7 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
             }
         }
         input_area += triangle_area(a, b, c);
+#endif
         project_triangle(a, b, c, 0);
     }
 #ifndef NDEBUG
@@ -4108,187 +2981,6 @@ GLGizmoTracery::GeneratedFragment GLGizmoTracery::generate_back_fact_tracery_dat
     }
 #endif
     return back_fragment;
-}
-
-void GLGizmoTracery::generate_through_fragments()
-{
-    Model& model = wxGetApp().plater()->model();
-    ModelObject* object = nullptr;
-    for (ModelObject* candidate : model.objects)
-        if (candidate->id() == m_mask_object_id) {
-            object = candidate;
-            break;
-        }
-    if (object == nullptr && m_mask_object_index >= 0 && size_t(m_mask_object_index) < model.objects.size())
-        object = model.objects[size_t(m_mask_object_index)];
-    if (object == nullptr || m_generated_fragments.empty())
-        return;
-
-    size_t volume_index = 0;
-    for (ModelVolume* volume : object->volumes) {
-        if (!volume->is_model_part())
-            continue;
-        if (volume_index >= m_generated_fragments.size())
-            break;
-
-        const TriangleMesh& volume_mesh = volume->mesh();
-        const size_t front_fragment_count = m_generated_fragments[volume_index].size();
-        for (size_t fragment_index = 0; fragment_index < front_fragment_count; ++fragment_index) {
-            const GeneratedFragment& front = m_generated_fragments[volume_index][fragment_index];
-            if (front.fragment_id >= m_fragment_colors.size() || front.surface.indices.empty())
-                continue;
-
-            // The helper will retain fragment_id and assign the target back
-            // facet ID to every output triangle before it is appended.
-            GeneratedFragment back = generate_back_fact_tracery_date(front, volume_mesh, volume_index);
-            if (!back.surface.indices.empty())
-                m_generated_fragments[volume_index].emplace_back(std::move(back));
-        }
-        ++volume_index;
-    }
-
-    // Legacy projection kept as an inactive reference while the helper above
-    // supplies the target-facet-ID-aware implementation.
-#if 0
-    struct ProjectionKey {
-        std::array<int64_t, 6> value;
-
-        bool operator<(const ProjectionKey& other) const { return value < other.value; }
-    };
-    struct ProjectionResult {
-        bool  valid = false;
-        Vec3f position = Vec3f::Zero();
-        Vec3f normal = Vec3f::Zero();
-        int   face = -1;
-    };
-    const auto quantize = [](const Vec3f& position, const Vec3f& normal) {
-        constexpr double position_scale = 100000.0;
-        constexpr double normal_scale = 1000000.0;
-        return ProjectionKey{{
-            int64_t(std::llround(double(position.x()) * position_scale)),
-            int64_t(std::llround(double(position.y()) * position_scale)),
-            int64_t(std::llround(double(position.z()) * position_scale)),
-            int64_t(std::llround(double(normal.x()) * normal_scale)),
-            int64_t(std::llround(double(normal.y()) * normal_scale)),
-            int64_t(std::llround(double(normal.z()) * normal_scale))
-        }};
-    };
-
-    volume_index = 0;
-    for (ModelVolume* volume : object->volumes) {
-        if (!volume->is_model_part())
-            continue;
-        if (volume_index >= m_generated_fragments.size())
-            break;
-
-        // Work against only this volume's mesh. A through stroke must never
-        // jump to a neighbouring or overlapping part of the same object.
-        const TriangleMesh& volume_mesh = volume->mesh();
-        const indexed_triangle_set& mesh = volume_mesh.its;
-        if (mesh.vertices.empty() || mesh.indices.empty()) {
-            ++volume_index;
-            continue;
-        }
-        AABBMesh target_surface(volume_mesh);
-        const std::vector<Vec3i32>& face_neighbours = target_surface.face_neighbor_index();
-
-        Vec3f minimum = mesh.vertices.front();
-        Vec3f maximum = minimum;
-        for (const Vec3f& vertex : mesh.vertices) {
-            minimum = minimum.cwiseMin(vertex);
-            maximum = maximum.cwiseMax(vertex);
-        }
-        // Offset the ray into the solid so the source triangle cannot be
-        // selected as its own destination. Scale the epsilon with the mesh,
-        // while retaining a safe lower bound for very small models.
-        const float ray_epsilon = std::max(1e-5f, (maximum - minimum).norm() * 1e-6f);
-
-        const auto faces_are_compatible = [&face_neighbours](int first, int second) {
-            if (first < 0 || second < 0)
-                return false;
-            if (first == second)
-                return true;
-            if (size_t(first) >= face_neighbours.size() || size_t(second) >= face_neighbours.size())
-                return false;
-            for (int edge = 0; edge < 3; ++edge) {
-                if (face_neighbours[size_t(first)][edge] == second ||
-                    face_neighbours[size_t(second)][edge] == first)
-                    return true;
-            }
-            return false;
-        };
-
-        std::map<ProjectionKey, ProjectionResult> projection_cache;
-        const auto project_vertex = [&target_surface, &projection_cache, &quantize, ray_epsilon](const Vec3f& point, const Vec3f& normal) {
-            const ProjectionKey key = quantize(point, normal);
-            auto [cached, inserted] = projection_cache.emplace(key, ProjectionResult{});
-            if (!inserted)
-                return cached->second;
-
-            const Vec3d direction = -normal.cast<double>();
-            const Vec3d origin = point.cast<double>() + direction * double(ray_epsilon);
-            const AABBMesh::hit_result hit = target_surface.query_ray_hit(origin, direction);
-            // From a point just inside a closed shell, the nearest valid hit
-            // must be an exit intersection. Any ambiguous hit is rejected;
-            // this conservative path prefers a small gap to misplaced paint.
-            if (hit.is_hit() && hit.distance() > double(ray_epsilon) && hit.is_inside()) {
-                cached->second.valid = true;
-                cached->second.position = hit.position().cast<float>();
-                cached->second.normal = hit.normal().cast<float>();
-                cached->second.face = hit.face();
-            }
-            return cached->second;
-        };
-
-        const size_t front_fragment_count = m_generated_fragments[volume_index].size();
-        for (size_t fragment_index = 0; fragment_index < front_fragment_count; ++fragment_index) {
-            const GeneratedFragment& front = m_generated_fragments[volume_index][fragment_index];
-            if (front.fragment_id >= m_fragment_colors.size() || front.surface.indices.empty())
-                continue;
-
-            indexed_triangle_set back_surface;
-            for (const stl_triangle_vertex_indices& face : front.surface.indices) {
-                if (face[0] < 0 || face[1] < 0 || face[2] < 0 ||
-                    size_t(face[0]) >= front.surface.vertices.size() ||
-                    size_t(face[1]) >= front.surface.vertices.size() ||
-                    size_t(face[2]) >= front.surface.vertices.size())
-                    continue;
-                const Vec3f& a = front.surface.vertices[size_t(face[0])];
-                const Vec3f& b = front.surface.vertices[size_t(face[1])];
-                const Vec3f& c = front.surface.vertices[size_t(face[2])];
-                Vec3f normal = (b - a).cross(c - a);
-                if (normal.squaredNorm() <= 1e-12f)
-                    continue;
-                normal.normalize();
-
-                const ProjectionResult projected_a = project_vertex(a, normal);
-                const ProjectionResult projected_b = project_vertex(b, normal);
-                const ProjectionResult projected_c = project_vertex(c, normal);
-                if (!projected_a.valid || !projected_b.valid || !projected_c.valid ||
-                    !faces_are_compatible(projected_a.face, projected_b.face) ||
-                    !faces_are_compatible(projected_b.face, projected_c.face) ||
-                    !faces_are_compatible(projected_c.face, projected_a.face))
-                    continue;
-
-                const Vec3f projected_normal = (projected_b.position - projected_a.position).cross(projected_c.position - projected_a.position);
-                if (projected_normal.squaredNorm() <= 1e-12f)
-                    continue;
-                const unsigned int first = unsigned(back_surface.vertices.size());
-                back_surface.vertices.emplace_back(projected_a.position);
-                back_surface.vertices.emplace_back(projected_b.position);
-                back_surface.vertices.emplace_back(projected_c.position);
-                const Vec3f target_normal = projected_a.normal + projected_b.normal + projected_c.normal;
-                if (projected_normal.dot(target_normal) < 0.0f)
-                    back_surface.indices.emplace_back(stl_triangle_vertex_indices{ int(first), int(first + 2), int(first + 1) });
-                else
-                    back_surface.indices.emplace_back(stl_triangle_vertex_indices{ int(first), int(first + 1), int(first + 2) });
-            }
-            if (!back_surface.indices.empty())
-                m_generated_fragments[volume_index].emplace_back(GeneratedFragment{ front.fragment_id, std::move(back_surface) });
-        }
-        ++volume_index;
-    }
-#endif
 }
 
 void GLGizmoTracery::generate_through_voronoi_regions()
@@ -4686,26 +3378,7 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
                 plan.approximate_colour_count));
     }
 
-#ifndef NDEBUG
-    if (m_display_diagnostics_active) {
-        size_t fragment_total = 0;
-        size_t face_total = 0;
-        size_t source_id_total = 0;
-        for (const auto& per_volume : m_generated_fragments)
-            for (const GeneratedFragment& fragment : per_volume) {
-                ++fragment_total;
-                face_total += fragment.surface.indices.size();
-                source_id_total += fragment.source_facet_ids.size();
-            }
-        record_display_diagnostic_state("commit_apply_begin",
-            "mode=" + std::string(plan.mode == StainedGlassApplyPlan::Mode::BakeFragments ? "bake" : "restore") +
-            ",generated_volumes=" + std::to_string(m_generated_fragments.size()) +
-            ",generated_fragments=" + std::to_string(fragment_total) +
-            ",generated_faces=" + std::to_string(face_total) +
-            ",source_ids=" + std::to_string(source_id_total) +
-            ",plan_mixed_ids=" + std::to_string(plan.fragment_mixed_filament_ids.size()));
-    }
-#endif
+
     if (!plate_conversion && !plan.partitions.empty()) {
         performance.stage("commit.publish_partitions");
         for (auto& partition : plan.partitions)
@@ -4759,8 +3432,7 @@ void GLGizmoTracery::commit_stained_glass_apply(StainedGlassApplyPlan&& plan)
 #ifndef NDEBUG
     if (m_display_diagnostics_active)
         record_display_diagnostic_state("commit_apply_after_bake",
-            "remaining_generated_volumes=" + std::to_string(m_generated_fragments.size()) +
-            ",mixed_ids=" + std::to_string(m_fragment_mixed_filament_ids.size()));
+            "mixed_ids=" + std::to_string(m_fragment_mixed_filament_ids.size()));
 #endif
     performance.stage("commit.schedule_ui_state");
     wxGetApp().plater()->post_slice_state_change_update();
@@ -5079,7 +3751,6 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting(bool prepared)
     performance.stage("effect.clear_temporary_regions");
     m_generated_voronoi_regions.clear();
     m_transition_recipe_targets.clear();
-    m_generated_fragments.clear();
     performance.stage("effect.refresh_scene");
     bool vector_only = true;
     for (const auto* volume : direct_object->volumes)
@@ -5100,21 +3771,25 @@ void GLGizmoTracery::bake_fragments_to_mmu_painting(bool prepared)
 }
 
 TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t                                         volume_index,
-                                                                      const std::function<void(const std::string&)>& diagnostic,
+                                                                      [[maybe_unused]] const std::function<void(const std::string&)>& diagnostic,
                                                                       bool                                           material_budget,
                                                                       bool                                           front_only) const
 {
     TriangleSelector::Tracery2DData data;
     if (volume_index >= m_generated_voronoi_regions.size()) {
+#ifndef NDEBUG
         if (diagnostic)
             diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) + "\treason=no_generated_volume");
+#endif
         return data;
     }
     Model& model = wxGetApp().plater()->model();
     const ModelObject* object = find_masked_model_object(model);
     if (object == nullptr) {
+#ifndef NDEBUG
         if (diagnostic)
             diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) + "\treason=masked_object_not_found");
+#endif
         return data;
     }
     const ModelVolume* volume = nullptr;
@@ -5125,11 +3800,14 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t    
             break;
         }
     if (volume == nullptr) {
+#ifndef NDEBUG
         if (diagnostic)
             diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) + "\treason=model_volume_not_found");
+#endif
         return data;
     }
     const indexed_triangle_set& mesh = volume->mesh().its;
+#ifndef NDEBUG
     struct ProjectionStatistics {
         size_t input = 0;
         size_t output = 0;
@@ -5162,30 +3840,37 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t    
                           polygon[index].y() * polygon[(index + 1) % polygon.size()].x();
         return std::abs(twice_area) * 0.5;
     };
+#endif
     std::map<int, size_t> facet_entries;
     for (const GeneratedVoronoiRegion& generated : m_generated_voronoi_regions[volume_index]) {
         if (front_only && generated.is_back_projection)
             continue;
+#ifndef NDEBUG
         ProjectionStatistics& statistics = diagnostic ? statistics_by_facet[generated.source_facet_id] : unused_statistics;
         ++statistics.input;
         const double area_3d = diagnostic ? polygon_area_3d(generated.local_polygon) : 0.;
+#endif
         if (generated.mixed_filament_id == 0 && generated.fragment_id >=
             (material_budget ? m_fragment_colors.size() : m_fragment_mixed_filament_ids.size())) {
+#ifndef NDEBUG
             ++statistics.skipped_fragment_id;
             if (diagnostic)
                 diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
                            "\tfragment=" + std::to_string(generated.fragment_id) +
                            "\tfacet=" + std::to_string(generated.source_facet_id) +
                            "\treason=fragment_id_out_of_range");
+#endif
             continue;
         }
         if (generated.local_polygon.size() < 3) {
+#ifndef NDEBUG
             ++statistics.skipped_polygon;
             if (diagnostic)
                 diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
                            "\tfragment=" + std::to_string(generated.fragment_id) +
                            "\tfacet=" + std::to_string(generated.source_facet_id) +
                            "\treason=polygon_has_fewer_than_3_vertices");
+#endif
             continue;
         }
         // Before recipes are assigned, only the geometry is needed. A temporary
@@ -5194,24 +3879,28 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t    
         const unsigned int filament = material_budget ? 1u : (generated.mixed_filament_id != 0 ? generated.mixed_filament_id :
             m_fragment_mixed_filament_ids[generated.fragment_id]);
         if (filament == 0 || filament > unsigned(EnforcerBlockerType::ExtruderMax)) {
+#ifndef NDEBUG
             ++statistics.skipped_filament;
             if (diagnostic)
                 diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
                            "\tfragment=" + std::to_string(generated.fragment_id) +
                            "\tfacet=" + std::to_string(generated.source_facet_id) +
                            "\tfilament=" + std::to_string(filament) + "\treason=invalid_filament");
+#endif
             continue;
         }
         auto [entry, inserted] = facet_entries.emplace(generated.source_facet_id, data.size());
         if (inserted) {
             auto plane = make_tracery_facet_plane(mesh, generated.source_facet_id);
             if (!plane) {
+#ifndef NDEBUG
                 ++statistics.skipped_plane;
                 if (diagnostic)
                     diagnostic("projection_skipped\tvolume=" + std::to_string(volume_index) +
                                "\tfragment=" + std::to_string(generated.fragment_id) +
                                "\tfacet=" + std::to_string(generated.source_facet_id) +
                                "\tfilament=" + std::to_string(filament) + "\treason=invalid_source_facet_plane");
+#endif
                 facet_entries.erase(entry);
                 continue;
             }
@@ -5227,6 +3916,7 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t    
                 region.polygon.emplace_back(delta.dot(facet.axis_u), delta.dot(facet.axis_v));
             }
             update_tracery_region_bounds(region);
+#ifndef NDEBUG
             const double area_2d = diagnostic ? polygon_area_2d(region.polygon) : 0.;
             bool finite = true;
             if (diagnostic)
@@ -5251,9 +3941,11 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t    
                        << "\tfinite=" << finite;
                 diagnostic(detail.str());
             }
+#endif
             facet.regions.emplace_back(std::move(region));
         }
     }
+#ifndef NDEBUG
     if (diagnostic)
         for (const auto& [source_facet_id, statistics] : statistics_by_facet) {
             std::ostringstream detail;
@@ -5271,241 +3963,9 @@ TriangleSelector::Tracery2DData GLGizmoTracery::build_voronoi_2d_data(size_t    
                    << "\toutput_area_2d=" << statistics.output_area_2d;
             diagnostic(detail.str());
         }
+#endif
     data.erase(std::remove_if(data.begin(), data.end(), [](const auto& facet) { return facet.regions.empty(); }), data.end());
     return data;
-}
-
-TriangleSelector::Tracery2DData GLGizmoTracery::build_tracery_2d_data(size_t volume_index) const
-{
-    TriangleSelector::Tracery2DData result;
-    std::ofstream diagnostic;
-#ifndef NDEBUG
-    if (m_display_diagnostics_active) {
-        const std::filesystem::path path = m_display_diagnostics_dir /
-            ("tracery_2d_volume_" + std::to_string(volume_index) + ".tsv");
-        const bool new_file = !std::filesystem::exists(path);
-        diagnostic.open(path, std::ios::app | std::ios::binary);
-        if (diagnostic && new_file)
-            diagnostic << "record\tvolume\tfragment\tsource_facet\tcolor\tdetail\n";
-    }
-#endif
-    const auto trace = [&diagnostic, volume_index](const std::string& record, size_t fragment, int source_facet,
-                                                    int color, const std::string& detail) {
-        if (diagnostic)
-            diagnostic << record << '\t' << volume_index << '\t' << fragment << '\t' << source_facet << '\t'
-                       << color << "\t" << detail << '\n';
-    };
-    if (volume_index >= m_generated_fragments.size())
-        return result;
-
-    const Model& model = wxGetApp().plater()->model();
-    const ModelObject* object = nullptr;
-    for (const ModelObject* candidate : model.objects)
-        if (candidate->id() == m_mask_object_id) {
-            object = candidate;
-            break;
-        }
-    if (object == nullptr && m_mask_object_index >= 0 && size_t(m_mask_object_index) < model.objects.size())
-        object = model.objects[size_t(m_mask_object_index)];
-    if (object == nullptr)
-        return result;
-
-    const ModelVolume* target_volume = nullptr;
-    size_t current_volume_index = 0;
-    for (const ModelVolume* volume : object->volumes) {
-        if (!volume->is_model_part())
-            continue;
-        if (current_volume_index++ == volume_index) {
-            target_volume = volume;
-            break;
-        }
-    }
-    if (target_volume == nullptr)
-        return result;
-
-    const indexed_triangle_set& mesh = target_volume->mesh().its;
-    std::map<int, size_t> facet_entries;
-    const auto ensure_facet = [&result, &facet_entries, &mesh, &trace](int source_facet_id) -> TriangleSelector::TraceryFacet2DData* {
-        if (source_facet_id < 0 || size_t(source_facet_id) >= mesh.indices.size())
-            return nullptr;
-        if (const auto found = facet_entries.find(source_facet_id); found != facet_entries.end())
-            return &result[found->second];
-        const stl_triangle_vertex_indices& face = mesh.indices[size_t(source_facet_id)];
-        if (face[0] < 0 || face[1] < 0 || face[2] < 0 ||
-            size_t(face[0]) >= mesh.vertices.size() || size_t(face[1]) >= mesh.vertices.size() ||
-            size_t(face[2]) >= mesh.vertices.size())
-            return nullptr;
-        const Vec3d origin = mesh.vertices[size_t(face[0])].cast<double>();
-        Vec3d axis_u = mesh.vertices[size_t(face[1])].cast<double>() - origin;
-        const Vec3d edge_v = mesh.vertices[size_t(face[2])].cast<double>() - origin;
-        Vec3d normal = axis_u.cross(edge_v);
-        if (axis_u.squaredNorm() <= 1e-18 || normal.squaredNorm() <= 1e-18)
-            return nullptr;
-        axis_u.normalize();
-        normal.normalize();
-        Vec3d axis_v = normal.cross(axis_u);
-        axis_v.normalize();
-        const size_t entry_index = result.size();
-        result.emplace_back(TriangleSelector::TraceryFacet2DData{ source_facet_id, origin, axis_u, axis_v, {} });
-        facet_entries.emplace(source_facet_id, entry_index);
-        std::ostringstream plane;
-        plane << std::setprecision(12)
-              << "origin=" << origin.x() << ',' << origin.y() << ',' << origin.z()
-              << ";axis_u=" << axis_u.x() << ',' << axis_u.y() << ',' << axis_u.z()
-              << ";axis_v=" << axis_v.x() << ',' << axis_v.y() << ',' << axis_v.z()
-              << ";source_vertices="
-              << mesh.vertices[size_t(face[0])].x() << ',' << mesh.vertices[size_t(face[0])].y() << ',' << mesh.vertices[size_t(face[0])].z() << ';'
-              << mesh.vertices[size_t(face[1])].x() << ',' << mesh.vertices[size_t(face[1])].y() << ',' << mesh.vertices[size_t(face[1])].z() << ';'
-              << mesh.vertices[size_t(face[2])].x() << ',' << mesh.vertices[size_t(face[2])].y() << ',' << mesh.vertices[size_t(face[2])].z();
-        trace("facet_plane", 0, source_facet_id, 0, plane.str());
-        return &result.back();
-    };
-
-    for (const GeneratedFragment& fragment : m_generated_fragments[volume_index]) {
-        if (fragment.fragment_id >= m_fragment_mixed_filament_ids.size() ||
-            fragment.source_facet_ids.size() != fragment.surface.indices.size()) {
-            trace("fragment_skipped", fragment.fragment_id, -1, 0,
-                  "faces=" + std::to_string(fragment.surface.indices.size()) +
-                  ",source_ids=" + std::to_string(fragment.source_facet_ids.size()));
-            continue;
-        }
-        const unsigned int filament_id = m_fragment_mixed_filament_ids[fragment.fragment_id];
-        if (filament_id == 0 || filament_id > unsigned(EnforcerBlockerType::ExtruderMax)) {
-            trace("fragment_skipped", fragment.fragment_id, -1, int(filament_id), "invalid_filament");
-            continue;
-        }
-        trace("fragment_input", fragment.fragment_id, -1, int(filament_id),
-              "vertices=" + std::to_string(fragment.surface.vertices.size()) +
-              ",faces=" + std::to_string(fragment.surface.indices.size()));
-        struct ProjectionStatistics {
-            size_t input_faces = 0;
-            size_t invalid_vertices = 0;
-            size_t invalid_source_facet = 0;
-            size_t degenerate_3d = 0;
-            size_t noncoplanar = 0;
-            size_t degenerate_2d = 0;
-            size_t output_regions = 0;
-            size_t sample_count = 0;
-            double output_area_2d = 0.0;
-            double maximum_plane_distance = 0.0;
-        };
-        std::map<int, ProjectionStatistics> projection_statistics;
-        for (size_t face_index = 0; face_index < fragment.surface.indices.size(); ++face_index) {
-            const stl_triangle_vertex_indices& face = fragment.surface.indices[face_index];
-            const int source_facet_id = fragment.source_facet_ids[face_index];
-            ProjectionStatistics* statistics = nullptr;
-            if (diagnostic) {
-                statistics = &projection_statistics[source_facet_id];
-                ++statistics->input_faces;
-            }
-            if (face[0] < 0 || face[1] < 0 || face[2] < 0 ||
-                size_t(face[0]) >= fragment.surface.vertices.size() ||
-                size_t(face[1]) >= fragment.surface.vertices.size() ||
-                size_t(face[2]) >= fragment.surface.vertices.size()) {
-                if (statistics != nullptr)
-                    ++statistics->invalid_vertices;
-                trace("face_skipped", fragment.fragment_id, source_facet_id, int(filament_id), "invalid_vertex_index");
-                continue;
-            }
-            TriangleSelector::TraceryFacet2DData* facet = ensure_facet(source_facet_id);
-            if (facet == nullptr) {
-                if (statistics != nullptr)
-                    ++statistics->invalid_source_facet;
-                trace("face_skipped", fragment.fragment_id, source_facet_id, int(filament_id),
-                      "invalid_source_facet");
-                continue;
-            }
-            const std::array<Vec3d, 3> vertices_3d = {
-                fragment.surface.vertices[size_t(face[0])].cast<double>(),
-                fragment.surface.vertices[size_t(face[1])].cast<double>(),
-                fragment.surface.vertices[size_t(face[2])].cast<double>()
-            };
-            const double area_3d = 0.5 * (vertices_3d[1] - vertices_3d[0]).cross(vertices_3d[2] - vertices_3d[0]).norm();
-            const Vec3d plane_normal = facet->axis_u.cross(facet->axis_v);
-            std::array<double, 3> plane_distances;
-            for (size_t corner = 0; corner < plane_distances.size(); ++corner)
-                plane_distances[corner] = (vertices_3d[corner] - facet->origin).dot(plane_normal);
-            const double maximum_plane_distance = std::max({ std::abs(plane_distances[0]), std::abs(plane_distances[1]),
-                                                              std::abs(plane_distances[2]) });
-            if (statistics != nullptr) {
-                statistics->maximum_plane_distance = std::max(statistics->maximum_plane_distance, maximum_plane_distance);
-                if (maximum_plane_distance > 1e-5)
-                    ++statistics->noncoplanar;
-            }
-            TriangleSelector::TraceryRegion2D region;
-            region.color = EnforcerBlockerType(filament_id);
-            region.fragment_id = fragment.fragment_id;
-            for (size_t corner = 0; corner < 3; ++corner) {
-                const Vec3d delta = vertices_3d[corner] - facet->origin;
-                region.polygon.emplace_back(delta.dot(facet->axis_u), delta.dot(facet->axis_v));
-            }
-            update_tracery_region_bounds(region);
-            const Vec2d first_edge = region.polygon[1] - region.polygon[0];
-            const Vec2d second_edge = region.polygon[2] - region.polygon[0];
-            const double twice_area_2d = first_edge.x() * second_edge.y() - first_edge.y() * second_edge.x();
-            if (area_3d > 1e-12 && std::abs(twice_area_2d) > 1e-12) {
-                facet->regions.emplace_back(std::move(region));
-                const TriangleSelector::TraceryRegion2D& written = facet->regions.back();
-                if (statistics != nullptr) {
-                    ++statistics->output_regions;
-                    statistics->output_area_2d += std::abs(twice_area_2d) * 0.5;
-                }
-                std::ostringstream detail;
-                detail << std::setprecision(12)
-                       << written.polygon[0].x() << ',' << written.polygon[0].y() << ';'
-                       << written.polygon[1].x() << ',' << written.polygon[1].y() << ';'
-                       << written.polygon[2].x() << ',' << written.polygon[2].y();
-                trace("region_output", fragment.fragment_id, facet->source_facet_id, int(filament_id), detail.str());
-            } else {
-                if (statistics != nullptr) {
-                    if (area_3d <= 1e-12)
-                        ++statistics->degenerate_3d;
-                    else
-                        ++statistics->degenerate_2d;
-                    if (statistics->sample_count++ < 12) {
-                        std::ostringstream detail;
-                        detail << std::setprecision(12)
-                               << "face=" << face_index << ";area_3d=" << area_3d
-                               << ";area_2d=" << std::abs(twice_area_2d) * 0.5
-                               << ";plane_distances=" << plane_distances[0] << ',' << plane_distances[1] << ',' << plane_distances[2]
-                               << ";vertices_3d="
-                               << vertices_3d[0].x() << ',' << vertices_3d[0].y() << ',' << vertices_3d[0].z() << '|'
-                               << vertices_3d[1].x() << ',' << vertices_3d[1].y() << ',' << vertices_3d[1].z() << '|'
-                               << vertices_3d[2].x() << ',' << vertices_3d[2].y() << ',' << vertices_3d[2].z()
-                               << ";vertices_2d="
-                               << region.polygon[0].x() << ',' << region.polygon[0].y() << '|'
-                               << region.polygon[1].x() << ',' << region.polygon[1].y() << '|'
-                               << region.polygon[2].x() << ',' << region.polygon[2].y();
-                        trace("degenerate_projection_sample", fragment.fragment_id, facet->source_facet_id,
-                              int(filament_id), detail.str());
-                    }
-                }
-                trace("face_skipped", fragment.fragment_id, facet->source_facet_id, int(filament_id),
-                      area_3d <= 1e-12 ? "degenerate_3d" : "degenerate_2d");
-            }
-        }
-        if (diagnostic) {
-            for (const auto& [source_facet_id, statistics] : projection_statistics) {
-                trace("projection_summary", fragment.fragment_id, source_facet_id, int(filament_id),
-                      "input=" + std::to_string(statistics.input_faces) +
-                      ",invalid_vertices=" + std::to_string(statistics.invalid_vertices) +
-                      ",invalid_source=" + std::to_string(statistics.invalid_source_facet) +
-                      ",degenerate_3d=" + std::to_string(statistics.degenerate_3d) +
-                      ",noncoplanar=" + std::to_string(statistics.noncoplanar) +
-                      ",degenerate_2d=" + std::to_string(statistics.degenerate_2d) +
-                      ",output_regions=" + std::to_string(statistics.output_regions) +
-                      ",output_area_2d=" + std::to_string(statistics.output_area_2d) +
-                      ",max_plane_distance=" + std::to_string(statistics.maximum_plane_distance));
-            }
-        }
-    }
-    for (const TriangleSelector::TraceryFacet2DData& facet : result)
-        trace("facet_summary", 0, facet.source_facet_id, 0,
-              "regions=" + std::to_string(facet.regions.size()));
-    result.erase(std::remove_if(result.begin(), result.end(),
-                                [](const TriangleSelector::TraceryFacet2DData& facet) { return facet.regions.empty(); }),
-                 result.end());
-    return result;
 }
 
 void GLGizmoTracery::update_from_model_object(bool)
@@ -5573,7 +4033,6 @@ void GLGizmoTracery::update_from_model_object(bool)
         m_mask_data.clear();
         m_previous_mask_data.clear();
         m_stained_glass_base_paint_data.clear();
-        m_generated_fragments.clear();
         m_generated_voronoi_regions.clear();
         m_tracery_selections.clear();
         m_incremental_generation = false;
@@ -5663,7 +4122,6 @@ void GLGizmoTracery::on_load(cereal::BinaryInputArchive& ar)
     ar(m_mask_object_id, m_mask_data, m_stained_glass_base_paint_data, m_fragment_density, m_mesh_restore_states, m_regeneration_version);
     m_density_input          = m_fragment_density;
     m_regeneration_requested = false;
-    m_generated_fragments.clear();
     m_generated_voronoi_regions.clear();
     m_tracery_selections.clear();
     m_previous_mask_data.clear();

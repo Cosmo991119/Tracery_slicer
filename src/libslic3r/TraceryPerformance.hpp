@@ -1,16 +1,22 @@
 #ifndef slic3r_TraceryPerformance_hpp_
 #define slic3r_TraceryPerformance_hpp_
 
+#include <cstddef>
+
+#ifndef NDEBUG
 #include <atomic>
 #include <chrono>
-#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <vector>
 
+#endif
+
 namespace Slic3r {
+
+#ifndef NDEBUG
 
 // Opt-in diagnostics only. Parent durations include children; do not sum levels.
 // Loop samples are accumulated and emitted once, not logged per triangle.
@@ -143,6 +149,33 @@ private:
     Clock::time_point m_begin, m_stage_begin;
     std::vector<Entry> m_entries;
 };
+
+#else
+// Preserve the call-site API without clocks, environment reads or trace state
+// in release builds. Guard expensive diagnostic arguments at their call sites.
+class TraceryPerformanceScope
+{
+public:
+    explicit constexpr TraceryPerformanceScope(const char*) noexcept {}
+    ~TraceryPerformanceScope() noexcept {}
+    TraceryPerformanceScope(const TraceryPerformanceScope&) = delete;
+    TraceryPerformanceScope& operator=(const TraceryPerformanceScope&) = delete;
+    constexpr bool enabled() const noexcept { return false; }
+    constexpr unsigned long long id() const noexcept { return 0; }
+    void mark_failed() const noexcept {}
+    void count(const char*, size_t) const noexcept {}
+    void stage(const char*) const noexcept {}
+    void finish() const noexcept {}
+    class Sample
+    {
+    public:
+        constexpr Sample(TraceryPerformanceScope&, const char*) noexcept {}
+        ~Sample() noexcept {}
+        Sample(const Sample&) = delete;
+        Sample& operator=(const Sample&) = delete;
+    };
+};
+#endif
 
 } // namespace Slic3r
 #endif

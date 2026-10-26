@@ -7306,7 +7306,11 @@ void GLCanvas3D::render_thumbnail_internal(ThumbnailData& thumbnail_data, const 
             const Transform3d model_matrix = vol->world_matrix();
             shader->set_uniform("view_model_matrix", view_matrix * model_matrix);
             shader->set_uniform("projection_matrix", projection_matrix);
-            vol->simple_render(shader, model_objects, extruder_colors);
+            // Picking thumbnails encode object IDs, not surface colors.
+            const bool was_picking = vol->picking;
+            vol->picking = true;
+            vol->simple_render(shader, model_objects, extruder_colors, false, &camera);
+            vol->picking = was_picking;
             vol->is_active = is_active;
         }
 
@@ -7348,7 +7352,7 @@ void GLCanvas3D::render_thumbnail_internal(ThumbnailData& thumbnail_data, const 
             shader->set_uniform("projection_matrix", projection_matrix);
             const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) * model_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
             shader->set_uniform("view_normal_matrix", view_normal_matrix);
-            vol->simple_render(shader,  model_objects, extruder_colors, ban_light);
+            vol->simple_render(shader, model_objects, extruder_colors, ban_light, &camera);
             vol->is_active = is_active;
         }
         shader->stop_using();

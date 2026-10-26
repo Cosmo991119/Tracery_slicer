@@ -44,6 +44,12 @@ def main():
         source = Path(directory) / "trace.cpp"
         binary = Path(directory) / "trace"
         source.write_text(SOURCE)
+        release_binary = Path(directory) / "test-release"
+        subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-O2", "-DNDEBUG", "-Wall", "-Wextra", "-Werror",
+                        "-I", str(ROOT / "src"), str(source), "-o", str(release_binary)], check=True)
+        release = subprocess.run([str(release_binary)], env=dict(os.environ, TRACERY_PERF_TRACE="1"),
+                                 capture_output=True, text=True, check=True)
+        assert not release.stderr, "Release must not emit traces even when the environment enables them"
         subprocess.run([os.environ.get("CXX", "c++"), "-std=c++17", "-Wall", "-Wextra", "-Werror",
                         "-I", str(ROOT / "src"), str(source), "-o", str(binary)], check=True)
         env = os.environ.copy()

@@ -13941,15 +13941,19 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
 }
 unsigned int Plater::priv::update_restart_background_process(bool force_update_scene, bool force_update_preview)
 {
+#ifndef NDEBUG
     const auto interaction = TraceryInteractionTiming::background_started();
     const int exceptions = std::uncaught_exceptions();
     ScopeGuard finish_interaction([interaction, exceptions]() {
         if (std::uncaught_exceptions() > exceptions) TraceryInteractionTiming::fail(interaction);
         else TraceryInteractionTiming::background_finished(interaction);
     });
+#endif
     TraceryPerformanceScope performance("deferred_scene_update");
     TraceryDocument::ReadCacheScope document_cache;
+#ifndef NDEBUG
     performance.count("interaction_id", interaction);
+#endif
     performance.stage("deferred_scene.apply_and_validate");
     bool switch_print = true;
     //BBS: judge whether can switch print or not

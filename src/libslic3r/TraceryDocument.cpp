@@ -7,11 +7,13 @@
 #include <nlohmann/json.hpp>
 #include <numeric>
 #include <set>
+#ifndef NDEBUG
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#endif
 #include <list>
 #include <stdexcept>
 
@@ -370,12 +372,13 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
                 continue;
             {
                 TraceryPerformanceScope::Sample sample(performance, "paint.cancel_shared_edges");
-                if (tracery_cancel_internal_edges(polys, &reduction))
+                if (tracery_cancel_internal_edges(polys, performance.enabled() ? &reduction : nullptr))
                     ++compacted;
             }
             union_inputs += polys.size();
-            for (const auto& p : polys)
-                union_vertices += p.points.size();
+            if (performance.enabled())
+                for (const auto& p : polys)
+                    union_vertices += p.points.size();
             {
                 TraceryPerformanceScope::Sample sample(performance, "paint.union_polygons");
                 polys = union_(polys);
@@ -408,8 +411,9 @@ Regions paint_regions(const TriangleMesh& base, const std::vector<int>& sources,
                 polys = intersection(polys, Polygons{boundary});
             }
             output_polygons += polys.size();
-            for (const auto& p : polys)
-                output_vertices += p.points.size();
+            if (performance.enabled())
+                for (const auto& p : polys)
+                    output_vertices += p.points.size();
         }
     }
     performance.count("source_facets", result.size());
@@ -531,6 +535,7 @@ TraceryPartitionResult TraceryDocument::rebuild(const TriangleMesh&             
     if (m_vector) return apply_vector_edit(current, annotations, paint, edit);
     if (!matches(current) || annotations.size() != 8)
         throw std::runtime_error("Stained-glass base no longer matches this geometry; clear the effect before editing the changed mesh");
+#ifndef NDEBUG
     if (edit == TraceryEdit::Erase) {
         if (const char* directory = std::getenv("TRACERY_REPLAY_DIR"); directory && *directory) {
             static std::atomic<unsigned long long> sequence{0};
@@ -548,6 +553,7 @@ TraceryPartitionResult TraceryDocument::rebuild(const TriangleMesh&             
                 throw std::runtime_error("Unable to publish stained-glass diagnostic capture");
         }
     }
+#endif
     TraceryPerformanceScope performance("stable_base_rebuild");
     performance.count("base_facets", m_base.its.indices.size());
     performance.count("derived_facets", current.its.indices.size());

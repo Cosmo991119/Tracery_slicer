@@ -360,7 +360,8 @@ public:
     virtual void        render();
 
     //BBS: add simple render function for thumbnail
-    void simple_render(GLShaderProgram* shader, ModelObjectPtrs& model_objects, std::vector<ColorRGBA>& extruder_colors, bool ban_light =false);
+    void simple_render(GLShaderProgram* shader, ModelObjectPtrs& model_objects, std::vector<ColorRGBA>& extruder_colors,
+                       bool ban_light = false, const GUI::Camera* thumbnail_camera = nullptr);
 
     // LOD mesh simplification (async, uses quadric edge collapse)
     bool SimplifyMesh(const TriangleMesh& mesh, std::shared_ptr<GUI::GLModel> model, std::shared_ptr<std::atomic<bool>> readyFlag, LODLevel lod) const;

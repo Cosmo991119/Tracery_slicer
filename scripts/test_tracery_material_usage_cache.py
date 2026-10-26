@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check real material queries avoid re-parsing after a commit cache expires."""
+"""Use a Debug test binary to verify queries avoid re-parsing after a commit cache expires."""
 import os
 import subprocess
 import sys
@@ -11,6 +11,7 @@ def main():
                             text=True, capture_output=True, check=True)
     records = [dict(token.split("=", 1) for token in line.split()[1:])
                for line in result.stderr.splitlines() if line.startswith("TRACERY_UI_PERF ")]
+    assert records, "Timing verification requires a Debug test binary; Release intentionally disables tracing"
     totals = {r["scope_id"]: r for r in records if r.get("kind") == "total"}
     repeated = {i for i, r in totals.items() if r["phase"] == "material_usage_repeat_pass"}
     assert repeated, "The repeated material query scenario did not run"

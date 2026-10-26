@@ -8213,7 +8213,8 @@ struct BackupSnapshot::Data
     bool write()
     {
         TraceryPerformanceScope timing("backup_write_background");
-        timing.count("thread_id", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+        if (timing.enabled())
+            timing.count("thread_id", std::hash<std::thread::id>{}(std::this_thread::get_id()));
         try {
             scratch = (boost::filesystem::temp_directory_path() /
                        boost::filesystem::unique_path("tracery-backup-write-%%%%-%%%%-%%%%")).string();
@@ -8237,7 +8238,8 @@ struct BackupSnapshot::Data
 BackupSnapshot::BackupSnapshot(const StoreParams& source)
 {
     TraceryPerformanceScope timing("backup_snapshot_prepare");
-    timing.count("thread_id", std::hash<std::thread::id>{}(std::this_thread::get_id()));
+    if (timing.enabled())
+        timing.count("thread_id", std::hash<std::thread::id>{}(std::this_thread::get_id()));
     auto strategy = source.strategy;
     if (!source.path || !source.model || !source.config || !(strategy & SaveStrategy::Backup) || source.proFn ||
         source.profile || !source.thumbnail_data.empty() || !source.no_light_thumbnail_data.empty() ||
