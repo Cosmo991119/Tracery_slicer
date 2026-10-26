@@ -13,11 +13,14 @@ namespace Slic3r {
 enum class TraceryMaterialMode { CMYW, CMY, CMYK };
 
 constexpr double TRACERY_VISUAL_REUSE_DELTA_E = 2.0;
+constexpr double TRACERY_PAIR_PREFERENCE_DELTA_E = 0.5;
 
 // Distances must use final preview colours from eligible existing/pending slots.
 // Return distances.size() if none qualify; when full, use the closest valid slot.
-// Stable ties preserve existing references across repeated applications.
-inline size_t tracery_preview_slot(const std::vector<double>& distances, bool can_add)
+// Prefer a pair within 0.5 Delta E of the closest multi-color slot.
+// Stable ties within a recipe class preserve existing references.
+inline size_t tracery_preview_slot(const std::vector<double>& distances, bool can_add,
+                                   const std::vector<size_t>& component_counts = {}, size_t new_recipe_components = 0)
 {
     size_t best = distances.size();
     double nearest = can_add ? TRACERY_VISUAL_REUSE_DELTA_E : std::numeric_limits<double>::infinity();
@@ -27,6 +30,22 @@ inline size_t tracery_preview_slot(const std::vector<double>& distances, bool ca
             best = i;
             nearest = distances[i];
         }
+    }
+    if (best < distances.size() && component_counts.size() == distances.size() && component_counts[best] > 2) {
+        size_t pair = distances.size();
+        const double limit = can_add ? TRACERY_VISUAL_REUSE_DELTA_E : std::numeric_limits<double>::infinity();
+        for (size_t i = 0; i < distances.size(); ++i) {
+            if (component_counts[i] == 2 && std::isfinite(distances[i]) && distances[i] >= 0.0 && distances[i] <= limit &&
+                distances[i] <= nearest + TRACERY_PAIR_PREFERENCE_DELTA_E &&
+                (pair == distances.size() || distances[i] < distances[pair]))
+                pair = i;
+        }
+        if (pair < distances.size())
+            return pair;
+        // Keep the selected new pair rather than replacing it with a multi-color
+        // slot. At capacity, retain the existing closest-color fallback.
+        if (can_add && new_recipe_components == 2)
+            return distances.size();
     }
     return best;
 }
@@ -79,12 +98,19 @@ inline bool legal_tracery_weights(const std::array<int, 4>& weights, TraceryMate
 template<class Score>
 std::array<int, 4> match_tracery_weights(TraceryMaterialMode mode, Score score)
 {
-    std::array<int, 4> best{};
+    std::array<int, 4> best{}, best_pair{};
+    double best_pair_score = std::numeric_limits<double>::infinity();
     double best_score = std::numeric_limits<double>::infinity();
     auto consider = [&](const std::array<int, 4>& weights) {
         if (!legal_tracery_weights(weights, mode))
             return;
         const double value = score(weights);
+        if (!std::isfinite(value) || value < 0.0)
+            return;
+        if (std::count_if(weights.begin(), weights.end(), [](int weight) { return weight > 0; }) == 2 && value < best_pair_score) {
+            best_pair_score = value;
+            best_pair = weights;
+        }
         if (value < best_score) {
             best_score = value;
             best = weights;
@@ -99,6 +125,19 @@ std::array<int, 4> match_tracery_weights(TraceryMaterialMode mode, Score score)
         for (int m = std::max(0, centre[1] - 4); m <= std::min(100 - c, centre[1] + 4); ++m)
             for (int y = std::max(0, centre[2] - 4); y <= std::min(100 - c - m, centre[2] + 4); ++y)
                 consider({c, m, y, 100 - c - m - y});
+    // Search every pair at 1% resolution, independently of the best multi-color
+    // neighborhood. Otherwise a good pair can be missed far from that center.
+    for (size_t a = 0; a < 4; ++a)
+        for (size_t b = a + 1; b < 4; ++b)
+            for (int percent = 30; percent <= 70; ++percent) {
+                std::array<int, 4> pair{};
+                pair[a] = percent;
+                pair[b] = 100 - percent;
+                consider(pair);
+            }
+    if (std::count_if(best.begin(), best.end(), [](int weight) { return weight > 0; }) > 2 &&
+        best_pair_score <= best_score + TRACERY_PAIR_PREFERENCE_DELTA_E)
+        return best_pair;
     return best;
 }
 

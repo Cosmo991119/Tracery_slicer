@@ -3650,6 +3650,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         wxColour colour;
         unsigned int filament_id = 0;
         size_t new_row = no_new_row;
+        size_t component_count = 1;
     };
     std::vector<VisualRecipeSlot> visual_slots;
     // Physical bases are valid colours too, and provide a bounded fallback even
@@ -3661,14 +3662,15 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         if (row.deleted || !row.enabled)
             continue;
         ++virtual_id;
-        if (!row.manual_pattern.empty() || row.gradient_enabled ||
-            !tracery_recipe_uses_only(tracery_recipe_ingredients(row, projected_colours.size()), base_ids))
+        const auto ingredients = tracery_recipe_ingredients(row, projected_colours.size());
+        if (!row.manual_pattern.empty() || row.gradient_enabled || !tracery_recipe_uses_only(ingredients, base_ids))
             continue;
         // Existing rows retain their displayed colour and recipe, including
         // rows used on another plate. Reuse never rewrites them.
         const wxColour display_colour(row.display_color);
         if (display_colour.IsOk())
-            visual_slots.push_back({display_colour, virtual_id, no_new_row});
+            visual_slots.push_back({display_colour, virtual_id, no_new_row,
+                                    std::set<unsigned int>(ingredients.begin(), ingredients.end()).size()});
     }
     TraceryPerformanceScope recipe_performance("recipe_search_and_reuse");
     for (size_t index = 0; index < target_colours.size(); ++index) {
@@ -3705,10 +3707,17 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         if (!final_colour.IsOk())
             continue;
         std::vector<double> distances;
+        std::vector<size_t> component_counts;
         distances.reserve(visual_slots.size());
-        for (const auto& slot : visual_slots)
+        component_counts.reserve(visual_slots.size());
+        for (const auto& slot : visual_slots) {
             distances.push_back(color_delta_e00(final_colour, slot.colour));
-        const size_t selected = tracery_preview_slot(distances, new_rows.size() < available_mixed);
+            component_counts.push_back(slot.component_count);
+        }
+        // Generated recipes explicitly encode every positive-weight ingredient,
+        // including pure colors, in gradient_component_ids.
+        const size_t recipe_components = MixedFilamentManager::decode_gradient_component_ids(entry.gradient_component_ids).size();
+        const size_t selected = tracery_preview_slot(distances, new_rows.size() < available_mixed, component_counts, recipe_components);
         if (selected < visual_slots.size()) {
             const auto& slot = visual_slots[selected];
             palette_filament_ids[index] = slot.filament_id;
@@ -3720,7 +3729,7 @@ std::optional<GLGizmoTracery::StainedGlassApplyPlan> GLGizmoTracery::prepare_sta
         }
         target_row_indices[index] = new_rows.size();
         palette_preview_colours[index] = final_colour;
-        visual_slots.push_back({final_colour, 0, new_rows.size()});
+        visual_slots.push_back({final_colour, 0, new_rows.size(), recipe_components});
         new_rows.emplace_back(std::move(entry));
     }
 
