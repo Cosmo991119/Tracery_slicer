@@ -6,13 +6,19 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-[![Tracery Slicer feature preview: colorful stained-glass fragments on a window model](doc/images/tracery-feature-preview.png)](doc/images/tracery-feature-preview.png)
+## Demo Video
+
+[![Tracery Slicer stained-glass feature demo](doc/images/tracery-stained-glass-demo-cover.jpg)](doc/videos/tracery-stained-glass-demo.mp4)
+
+Click the cover or [watch the feature demo](doc/videos/tracery-stained-glass-demo.mp4) for a walkthrough of the stained-glass tool (about 3 minutes 16 seconds).
+
+The name comes from *tracery*, the framework of a church's stained-glass windows, reflecting the tool's purpose of creating stained-glass effects.
 
 Tracery Slicer is an FDM slicing tool for creating stained-glass effects. Paint an area on a model to automatically generate colorful fragments and apply them as multi-material painting data that can be sliced.
 
 For now, development is focused solely on this feature; whether other features will be added is undecided. I use a Snapmaker U1 printer, so I forked [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) and implemented the feature directly in that codebase.
 
-This project is under development. A known limitation is slow stained-glass generation over large areas.
+This project is under development, and printed results are still being tested. If you are interested, give it a try and share your feedback. I hope you enjoy the possibilities of multicolor printing.
 
 Test prints are in progress. Automatic stained-glass color generation is also being tested and refined through printing.
 
@@ -46,7 +52,7 @@ Newly selected regions can use different modes. For example, paint region A in N
 
 ![CMYW stained-glass palette: 292 valid recipes; two-color recipes require at least 30% per color, while three-color recipes require at least 15%](doc/images/tracery-cmyw-palette-two-min30.svg)
 
-Stained glass uses a fixed CMYW palette: C (cyan), M (magenta), Y (yellow), and W (white). Recipes use 5% increments. Each active color contributes at least 30% in two-color recipes and at least 15% in three-color recipes. Three-color recipes must contain white and two CMY colors. Single-color recipes use 100% of that color; unused colors contribute 0%. When generating fragment colors, the system matches the target appearance against these combinations, favoring recipes that balance color error and component proportions.
+Stained glass uses a fixed CMYW palette: C (cyan), M (magenta), Y (yellow), and W (white). Black is excluded from stained-glass color calculations.
 
 ### Example
 
@@ -61,16 +67,6 @@ A four-panel comparison of the same model: original colors, the front and back i
 Click an image to view the original. The sliced view is a preview; actual printed results depend on the filament, model, and print settings.
 
 
-
-### Example: Stained Glass on a Building Model
-
-A side-by-side comparison of the building model before and after adding stained-glass patterns to its windows.
-
-| Before | After · Stained Glass Windows |
-| :---: | :---: |
-| [![Building model before adding stained-glass patterns](doc/images/tracery-building-before.png)](doc/images/tracery-building-before.png) | [![Building model with colorful stained-glass patterns on its windows](doc/images/tracery-building-after.png)](doc/images/tracery-building-after.png) |
-
-Click an image to view the original.
 
 ## Basic Workflow
 

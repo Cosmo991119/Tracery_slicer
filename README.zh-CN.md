@@ -6,13 +6,18 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-[![Tracery Slicer 功能效果展示：窗形模型上的彩色花窗碎片图案](doc/images/tracery-feature-preview.png)](doc/images/tracery-feature-preview.png)
+## 演示视频
+[![Tracery Slicer 花窗功能演示视频封面](doc/images/tracery-stained-glass-demo-cover.jpg)](doc/videos/tracery-stained-glass-demo.mp4)
+
+点击封面或[观看功能演示视频](doc/videos/tracery-stained-glass-demo.mp4)，查看花窗功能的操作演示（约 3 分 16 秒）。
+
+tracery 本身指教堂花窗的框架，功能为生成花窗效果，所以因此得名。
 
 Tracery Slicer 是一个生成花窗特殊效果FDM 切片工具，通过涂选模型表面自动生成彩色碎片，并将结果应用为可参与切片的多材料着色数据。
 
 暂时确认只实现这个功能，不确定以后是否会扩展其它功能。因为我使用snapmaker 的U1打印机，所以我的代码分支从 [Snapmaker Orca](https://github.com/Snapmaker/OrcaSlicer) 拉取并直接实现
 
-正在开发中，已知面积较大时候时花窗生成速度较慢。
+正在开发中，打印效果还在测试，如果大家感兴趣可以尝试并提出建议，很希望大家能享受多色的快乐。
 
 测试数据打印中。
 
@@ -49,7 +54,7 @@ Tracery Slicer 是一个生成花窗特殊效果FDM 切片工具，通过涂选�
 
 ![CMYW 花窗可用颜色配方：当前允许的 292 种合法配方，双色配方每种颜色至少 30%，三色配方每种颜色至少 15%](doc/images/tracery-cmyw-palette-two-min30.svg)
 
-花窗使用固定的 CMYW 基础颜色：C（青色）、M（品红）、Y（黄色）与 W（白色）。当前可用配方以 5% 为步进。双色配方中每种颜色至少占 30%；三色配方中每种颜色至少占 15%，且必须由白色与两种 CMY 颜色组成。单色配方为该颜色占 100%，未参与的颜色占 0%。生成碎片颜色时，系统从这些可用组合中匹配目标显色，并优先选择兼顾颜色误差和配比均衡性的方案。
+花窗使用固定的 CMYW 基础颜色：C（青色）、M（品红）、Y（黄色）与 W（白色）。黑色不参与花窗计算。
 
 ### 案例演示
 
@@ -63,15 +68,7 @@ Tracery Slicer 是一个生成花窗特殊效果FDM 切片工具，通过涂选�
 
 点击图片可查看原图。图中为切片预览，实际打印效果以耗材、模型及打印参数为准。
 
-### 案例演示：建筑模型花窗
 
-建筑模型添加花窗前后的效果对照，展示窗户区域的彩色碎片图案。
-
-| 原始效果 | 添加花窗后 |
-| :---: | :---: |
-| [![建筑模型添加花窗前的原始效果](doc/images/tracery-building-before.png)](doc/images/tracery-building-before.png) | [![建筑模型窗户区域添加彩色花窗后的效果](doc/images/tracery-building-after.png)](doc/images/tracery-building-after.png) |
-
-点击图片可查看原图。
 
 ## 基本使用流程
 
