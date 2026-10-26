@@ -7,9 +7,10 @@
 [English](README.md) | [简体中文](README.zh-CN.md)
 
 ## 演示视频
-[![Tracery Slicer 花窗功能演示视频封面](doc/images/tracery-stained-glass-demo-cover.jpg)](doc/videos/tracery-stained-glass-demo.mp4)
 
-点击封面或[观看功能演示视频](doc/videos/tracery-stained-glass-demo.mp4)，查看花窗功能的操作演示（约 3 分 16 秒）。
+https://github.com/user-attachments/assets/e6fdc4cc-ae38-4ae3-8331-5e7b8f4c67ab
+
+点击上方播放按钮，观看花窗功能的操作演示（约 3 分 16 秒）。
 
 tracery 本身指教堂花窗的框架，功能为生成花窗效果，所以因此得名。
 

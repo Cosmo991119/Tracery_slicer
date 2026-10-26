@@ -8,9 +8,9 @@
 
 ## Demo Video
 
-[![Tracery Slicer stained-glass feature demo](doc/images/tracery-stained-glass-demo-cover.jpg)](doc/videos/tracery-stained-glass-demo.mp4)
+https://github.com/user-attachments/assets/e6fdc4cc-ae38-4ae3-8331-5e7b8f4c67ab
 
-Click the cover or [watch the feature demo](doc/videos/tracery-stained-glass-demo.mp4) for a walkthrough of the stained-glass tool (about 3 minutes 16 seconds).
+Click the play button above to watch a walkthrough of the stained-glass tool (about 3 minutes 16 seconds).
 
 The name comes from *tracery*, the framework of a church's stained-glass windows, reflecting the tool's purpose of creating stained-glass effects.
 
