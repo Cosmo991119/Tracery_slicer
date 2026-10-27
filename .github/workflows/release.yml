@@ -138,7 +138,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           app="build/$BUILD_ARCH/Snapmaker_Orca/Tracery slicer.app"
-          lipo -verify_arch "$BUILD_ARCH" "$app/Contents/MacOS/Snapmaker_Orca"
+          lipo "$app/Contents/MacOS/Snapmaker_Orca" -verify_arch "$BUILD_ARCH"
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict "$app"
           "$app/Contents/MacOS/Snapmaker_Orca" --help
