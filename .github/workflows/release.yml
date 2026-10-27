@@ -93,6 +93,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           'C:\Strawberry\perl\bin' | Out-File -Append $env:GITHUB_PATH
           'C:\Program Files (x86)\NSIS' | Out-File -Append $env:GITHUB_PATH
+          # setup-msbuild adds MSBuild to PATH but does not set VCINSTALLDIR.
+          # OpenSSL's clean build wrapper needs it to locate vcvarsall.bat.
+          $vswhere = 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe'
+          $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs -or -not (Test-Path "$vs\VC\Auxiliary\Build\vcvarsall.bat")) {
+            throw 'Visual C++ toolchain initialization script not found'
+          }
+          "VCINSTALLDIR=$vs\VC\" | Out-File -Append $env:GITHUB_ENV
       - name: Restore dependencies
         id: deps
         uses: actions/cache/restore@v4
