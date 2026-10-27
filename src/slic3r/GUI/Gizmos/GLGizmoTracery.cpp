@@ -1829,7 +1829,6 @@ bool GLGizmoTracery::assign_fragment_colors(const std::vector<ColorGroup>& color
     // Keep the same just-noticeable threshold used when reusing visual recipe
     // slots. Within this window, a more even material split is preferable to
     // a marginally closer preview colour.
-    constexpr double balanced_recipe_delta_e_window = 2.0;
     for (size_t fragment = 0; fragment < fragment_count; ++fragment) {
         const wxColour target = tracery_wx_color(desired_colors[fragment]);
         auto& candidates = fragment_candidates[fragment];
@@ -1841,8 +1840,9 @@ bool GLGizmoTracery::assign_fragment_colors(const std::vector<ColorGroup>& color
             candidates.push_back({ recipe, delta_e, tracery_recipe_balance_spread(editor_palette[recipe].weights) });
         }
         std::sort(candidates.begin(), candidates.end(), [minimum_delta_e](const CandidateRecipe& first, const CandidateRecipe& second) {
-            const bool first_is_visually_close = first.delta_e <= minimum_delta_e + balanced_recipe_delta_e_window;
-            const bool second_is_visually_close = second.delta_e <= minimum_delta_e + balanced_recipe_delta_e_window;
+            constexpr double balanced_recipe_delta_e_window = 2.0;
+            const bool       first_is_visually_close        = first.delta_e <= minimum_delta_e + balanced_recipe_delta_e_window;
+            const bool       second_is_visually_close       = second.delta_e <= minimum_delta_e + balanced_recipe_delta_e_window;
             if (first_is_visually_close != second_is_visually_close)
                 return first_is_visually_close;
             if (first_is_visually_close && first.balance_spread != second.balance_spread)
